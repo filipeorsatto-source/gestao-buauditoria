@@ -337,6 +337,7 @@
   .field{margin-bottom:16px;}
   .field label{display:block;font-size:12px;font-weight:600;color:var(--ink);margin-bottom:6px;}
   .field .hint{font-size:11px;color:var(--ink-soft);margin-top:4px;}
+  .budget-note{font-size:11px;font-weight:400;font-style:italic;color:var(--ink-soft);margin-top:8px;}
   .field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
   .input, .select, textarea.input{
     width:100%;padding:9px 11px;border-radius:var(--radius-sm);border:1px solid var(--line);
@@ -697,7 +698,7 @@
   }
   .demanda-select{
     width:100%;min-width:210px;padding:6px 7px;border-radius:7px;border:1px solid transparent;background:var(--surface-2);
-    font-size:11.6px;color:var(--ink);outline:none;
+    font-size:11.6px;color:#000;outline:none;
   }
   .demanda-select:hover{border-color:var(--line);}
   .demanda-select:focus{border-color:var(--accent);background:var(--surface);}
@@ -1931,8 +1932,22 @@ function buildDemandasMerged(customMap){
       mesPlanning: c.mesPlanning || '',
       atrasado: isDemandaAtrasado(prazo, o.s, concluidoEm),
       concluidaNoPrazo: isDemandaConcluidaNoPrazo(prazo, o.s, concluidoEm),
+      editMeta: c._editMeta || {},
     };
   });
+}
+
+// Formata o metadado de última edição de um campo para exibir em tooltip.
+// meta = { by: 'nome ou e-mail', at: 'ISO timestamp' }
+function fmtEditMetaTooltip(meta){
+  if(!meta || !meta.by || !meta.at) return null;
+  const d = new Date(meta.at);
+  if(isNaN(d.getTime())) return null;
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mm = String(d.getMinutes()).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mo = String(d.getMonth()+1).padStart(2,'0');
+  return `Última edição feita por ${meta.by} às ${hh}:${mm} do dia ${dd}.${mo}`;
 }
 
 
@@ -3746,6 +3761,138 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
   return null;
 }
 
+// Indicadores para os quais existe granularidade por cliente (Realizado, e às vezes Budget).
+// Os demais (ex.: Margem Bruta, que é uma razão do P&L da empresa como um todo) não têm quebra
+// por cliente e por isso não exibem a tabela Clientes x Meses.
+const META_GRANULAR_CLIENTE_SLUGS = [
+  'upsell-score','contas-finalizadas','penetracao-regras','efetividade-regras',
+  'cobertura-dados','entregas-prazo','csat-tech','csat-atendimento','csat-produto',
+  'dias-ticket-aberto','nps',
+];
+
+// Realizado de um indicador, para um cliente e mês específicos. Retorna null se não aplicável.
+function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN){
+  if(slug === 'upsell-score'){
+    const monthData = ((data.upsellScore||{})[CURRENT_YEAR]||{})[mesN] || {};
+    return computeUpsellScore(monthData[clienteId]);
+  }
+  if(slug === 'contas-finalizadas'){
+    const yearData = (data.financeiro && data.financeiro.contasFinalizadas && data.financeiro.contasFinalizadas[CURRENT_YEAR]) || {};
+    const v = (yearData[clienteNome]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
+  if(slug === 'penetracao-regras' || slug === 'efetividade-regras'){
+    const dataKey = slug === 'penetracao-regras' ? 'penetracaoRegras' : 'efetividadeRegras';
+    const yearData = (data[dataKey] && data[dataKey][CURRENT_YEAR]) || {};
+    const v = (yearData[clienteId]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
+  if(slug === 'cobertura-dados'){
+    const coberturaYear = (data.coberturaDados && data.coberturaDados[CURRENT_YEAR]) || {};
+    const monthData = coberturaYear[mesN];
+    const totalCampos = COBERTURA_BASES.length * COBERTURA_ITENS.length;
+    if(!monthData || !totalCampos) return null;
+    let checked = 0;
+    COBERTURA_BASES.forEach(base => COBERTURA_ITENS.forEach(item => {
+      const rowKey = coberturaRowKey(base.key, item);
+      if(monthData[rowKey] && monthData[rowKey][clienteId]) checked++;
+    }));
+    return checked / totalCampos * 100;
+  }
+  if(slug === 'entregas-prazo'){
+    const merged = buildDemandasMerged(data.demandasCustom);
+    const subset = merged.filter(x => x.classificacao && x.classificacao.startsWith('Desenvolvimento') && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome);
+    return subset.length ? (subset.filter(x => x.concluidaNoPrazo).length / subset.length * 100) : null;
+  }
+  if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
+    const matchFn = slug === 'csat-tech' ? (c => c.startsWith('Desenvolvimento'))
+      : slug === 'csat-produto' ? (c => c === 'Desenvolvimento Produto')
+      : (c => c.startsWith('Atendimento'));
+    const merged = buildDemandasMerged(data.demandasCustom);
+    const subset = merged.filter(x => x.classificacao && matchFn(x.classificacao) && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome);
+    return avgCsat(subset.map(x => x.csat));
+  }
+  if(slug === 'dias-ticket-aberto'){
+    const merged = buildDemandasMerged(data.demandasCustom);
+    const subset = merged.filter(x => !!x.mesPlanning && x.diasEmAberto !== null && x.diasEmAberto !== undefined && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome);
+    return avgOf(subset.map(x => x.diasEmAberto));
+  }
+  if(slug === 'nps'){
+    const yearData = (data.nps && data.nps[CURRENT_YEAR]) || {};
+    const v = (yearData[clienteId]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
+  return null;
+}
+
+// Budget de um indicador, por cliente e mês, apenas para os 3 indicadores cujo budget já é
+// nativamente detalhado por cliente (definido na própria tela do indicador). Para os demais,
+// retorna null — nesse caso a tabela usa o budget mensal único do indicador (mesmo valor em todas as linhas).
+function getMetaBudgetPorClienteMes(slug, data, clienteId, clienteNome, mesN){
+  if(slug === 'contas-finalizadas'){
+    const yearData = (data.financeiro && data.financeiro.contasFinalizadasBudget && data.financeiro.contasFinalizadasBudget[CURRENT_YEAR]) || {};
+    const v = (yearData[clienteNome]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
+  if(slug === 'penetracao-regras' || slug === 'efetividade-regras'){
+    const dataKey = slug === 'penetracao-regras' ? 'penetracaoRegrasBudget' : 'efetividadeRegrasBudget';
+    const yearData = (data[dataKey] && data[dataKey][CURRENT_YEAR]) || {};
+    const v = (yearData[clienteId]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
+  return null;
+}
+
+// Tabela Clientes (linhas) x Meses (colunas) com Real / Budget em cada célula, exibida embaixo
+// do gráfico de cada meta em Gestão de Metas.
+function GoalClienteMesTable({goal, data, clienteNomesFilter}){
+  if(!goal.slug || !META_GRANULAR_CLIENTE_SLUGS.includes(goal.slug)) return null;
+  const clientesCols = (data.clientes || []).filter(c => c.nome.toLowerCase() !== 'interno' && (!clienteNomesFilter || clienteNomesFilter.has(c.nome)));
+  if(!clientesCols.length) return null;
+
+  const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(goal.slug);
+  const flatBudgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(goal.slug, data, clienteNomesFilter) : (goal.budgets[CURRENT_YEAR] || {});
+  const budgetIsPerCliente = ['contas-finalizadas','penetracao-regras','efetividade-regras'].includes(goal.slug);
+
+  return (
+    <div style={{marginTop:14}}>
+      <div className="section-block-title" style={{fontSize:12.5, marginBottom:6}}>Clientes × Meses · Real / Budget</div>
+      <div className="table-wrap">
+        <table className="upsell-tbl">
+          <thead>
+            <tr><th>Cliente</th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {clientesCols.map(c => (
+              <tr key={c.id}>
+                <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{c.nome}</td>
+                {MONTHS.map(m => {
+                  const real = getMetaRealizadoPorClienteMes(goal.slug, data, c.id, c.nome, m.n);
+                  const budgetPerCliente = getMetaBudgetPorClienteMes(goal.slug, data, c.id, c.nome, m.n);
+                  const budgetRaw = budgetPerCliente !== null ? budgetPerCliente : (flatBudgetByMonth ? flatBudgetByMonth[m.n] : undefined);
+                  const hasReal = real !== null && real !== undefined;
+                  const hasBudget = budgetRaw !== undefined && budgetRaw !== null && budgetRaw !== '';
+                  if(!hasReal && !hasBudget) return <td key={m.n} style={{color:'#B7BACB'}}>—</td>;
+                  return (
+                    <td key={m.n} style={{fontFamily:'IBM Plex Mono, monospace', fontSize:11.5, lineHeight:1.55, padding:'6px 10px'}}>
+                      <div>{hasReal ? fmtChartValue(real, goal.unidadeMedida) : '—'}</div>
+                      <div style={{color:'var(--ink-soft)'}}>{hasBudget ? fmtChartValue(Number(budgetRaw), goal.unidadeMedida) : '—'}</div>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="budget-note">
+        Em cada célula: <strong style={{fontWeight:600, fontStyle:'normal'}}>Real</strong> em cima, <em>Budget</em> embaixo
+        {!budgetIsPerCliente ? ' (budget mensal do indicador, o mesmo valor aplicado a cada cliente, pois este indicador não tem budget detalhado por cliente)' : ''}.
+      </div>
+    </div>
+  );
+}
+
 function GoalModal({initial, pessoas, onSave, onClose}){
   const [titulo, setTitulo] = useState(initial ? initial.titulo : '');
   const [descricao, setDescricao] = useState(initial ? initial.descricao : '');
@@ -3898,7 +4045,8 @@ function GoalFullCard({goal, pessoas, data, clienteNomesFilter, onEdit, onDelete
       <div className="detail-grid">
         <div className="card card-pad">
           <BudgetChart budgetsByMonth={year} realizedByMonth={realizedByMonth} unidade={goal.unidadeMedida}/>
-          {isExterno && <div className="hint" style={{marginTop:8}}>Budget definido na tela do indicador, dentro de Acompanhamento de Metas.</div>}
+          {isExterno && <div className="budget-note">Budget definido na tela do indicador, dentro de Acompanhamento de Metas.</div>}
+          <GoalClienteMesTable goal={goal} data={data} clienteNomesFilter={clienteNomesFilter}/>
         </div>
 
         <div className="card card-pad">
@@ -5695,7 +5843,7 @@ function DemandaRow({row, devTeam, actions}){
       <td className="demanda-csat">{row.csat || '—'}</td>
       <td className="demanda-resp">{row.responsavel || '—'}</td>
       <td className="demanda-dias">{row.diasEmAberto === null ? '—' : row.diasEmAberto}</td>
-      <td>
+      <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.classificacao) || undefined}>
         <select
           className={"demanda-select" + (row.classificacao ? '' : ' empty')}
           value={row.classificacao}
@@ -5705,7 +5853,7 @@ function DemandaRow({row, devTeam, actions}){
           {DEMANDA_CLASSIFICACAO_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
         </select>
       </td>
-      <td>
+      <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.tipo) || undefined}>
         <select
           className={"demanda-select" + (row.tipo ? '' : ' empty')}
           value={row.tipo}
@@ -5715,7 +5863,7 @@ function DemandaRow({row, devTeam, actions}){
           {DEMANDA_TIPO_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
         </select>
       </td>
-      <td>
+      <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.mesPlanning) || undefined}>
         <select
           className={"demanda-select" + (row.mesPlanning ? '' : ' empty')}
           value={row.mesPlanning}
@@ -5725,7 +5873,7 @@ function DemandaRow({row, devTeam, actions}){
           {MESES_PLANNING.map(m => <option value={m.n} key={m.n}>{m.nome}</option>)}
         </select>
       </td>
-      <td>
+      <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.responsavelDesenvolvimentoId) || undefined}>
         <select
           className={"demanda-select" + (row.responsavelDesenvolvimentoId ? '' : ' empty')}
           value={row.responsavelDesenvolvimentoId}
@@ -6042,10 +6190,15 @@ function App(){
     // demandas (campos personalizados por nº de ticket, preservados ao atualizar a base)
     updateDemandaCustom: (numero, patch) => mutate(d => {
       const demandasCustom = {...(d.demandasCustom||{})};
-      demandasCustom[numero] = {...(demandasCustom[numero]||{}), ...patch};
+      const prev = demandasCustom[numero] || {};
+      const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
+      const nowIso = new Date().toISOString();
+      const editMeta = {...(prev._editMeta||{})};
+      Object.keys(patch).forEach(k => { editMeta[k] = {by: who, at: nowIso}; });
+      demandasCustom[numero] = {...prev, ...patch, _editMeta: editMeta};
       return {...d, demandasCustom};
     }, null),
-  }), [mutate]);
+  }), [mutate, authUser]);
 
   if(authUser === undefined){
     return <div className="loading-screen"><span className="spinner"></span>Verificando login...</div>;
