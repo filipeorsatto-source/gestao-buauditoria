@@ -5713,19 +5713,51 @@ function WeeklyTicketsChart({weeks}){
   );
 }
 
-function ContagemTable({titulo, rows}){
+// Quebra semana a semana (mesmas semanas do gráfico) para uma dimensão qualquer (pessoa, classificação, cliente...).
+function buildWeeklyBreakdown(filtered, keyFn){
+  const rowsMap = {};
+  filtered.forEach(m => {
+    if(!m.abertoEm) return;
+    const d = new Date(m.abertoEm);
+    if(isNaN(d.getTime())) return;
+    const weekKey = startOfWeekMonday(d).getTime();
+    const nome = keyFn(m);
+    if(!rowsMap[nome]) rowsMap[nome] = {};
+    rowsMap[nome][weekKey] = (rowsMap[nome][weekKey]||0) + 1;
+  });
+  const rows = Object.entries(rowsMap).map(([nome, counts]) => {
+    const total = Object.values(counts).reduce((a,b)=>a+b,0);
+    return {nome, counts, total};
+  });
+  rows.sort((a,b) => b.total - a.total);
+  return rows;
+}
+
+// Tabela nome x semana (mesmas colunas do gráfico acima), com scroll horizontal quando não couber
+// na largura padrão do card — mantém a moldura no tamanho normal da tela.
+function WeeklyBreakdownTable({titulo, weeks, rows}){
   return (
-    <div>
+    <div style={{marginTop:26}}>
       <div className="section-block-title" style={{fontSize:12.5, marginBottom:6}}>{titulo}</div>
-      {rows.length === 0 ? <div className="hint">Sem dados.</div> : (
+      {rows.length === 0 || weeks.length === 0 ? <div className="hint">Sem dados.</div> : (
         <div className="table-wrap">
           <table className="upsell-tbl">
-            <thead><tr><th style={{textAlign:'left'}}>Nome</th><th>Tickets</th></tr></thead>
+            <thead>
+              <tr>
+                <th style={{textAlign:'left'}}>Nome</th>
+                {weeks.map(w => <th key={w.key}>{w.label}</th>)}
+                <th>Total</th>
+              </tr>
+            </thead>
             <tbody>
               {rows.map(r => (
                 <tr key={r.nome}>
-                  <td style={{textAlign:'left', paddingLeft:12}}>{r.nome}</td>
-                  <td style={{fontFamily:'IBM Plex Mono, monospace', fontWeight:600}}>{r.count}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, whiteSpace:'nowrap'}}>{r.nome}</td>
+                  {weeks.map(w => {
+                    const v = r.counts[w.key] || 0;
+                    return <td key={w.key} style={{fontFamily:'IBM Plex Mono, monospace', color: v ? 'var(--ink)' : '#C7CAD6'}}>{v || '—'}</td>;
+                  })}
+                  <td style={{fontFamily:'IBM Plex Mono, monospace', fontWeight:700}}>{r.total}</td>
                 </tr>
               ))}
             </tbody>
@@ -5760,12 +5792,13 @@ function DemandasResumoSection({filtered, devTeam}){
     return out;
   }, [filtered]);
 
-  const porSuporte = useMemo(() => countBy(filtered, m => m.responsavel || 'Sem responsável'), [filtered]);
+  const porSuporte = useMemo(() => buildWeeklyBreakdown(filtered, m => m.responsavel || 'Sem responsável'), [filtered]);
   const porDev = useMemo(() => {
     const devById = Object.fromEntries(devTeam.map(p => [p.id, p.nome]));
-    return countBy(filtered, m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído');
+    return buildWeeklyBreakdown(filtered, m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído');
   }, [filtered, devTeam]);
-  const porClassificacao = useMemo(() => countBy(filtered, m => m.classificacao || 'Sem classificação'), [filtered]);
+  const porClassificacao = useMemo(() => buildWeeklyBreakdown(filtered, m => m.classificacao || 'Sem classificação'), [filtered]);
+  const porCliente = useMemo(() => buildWeeklyBreakdown(filtered, m => m.cliente || 'Sem cliente'), [filtered]);
 
   if(!filtered.length) return null;
 
@@ -5775,11 +5808,10 @@ function DemandasResumoSection({filtered, devTeam}){
       <div className="section-block-desc" style={{marginBottom:12}}>Considera os tickets que respeitam os filtros acima, pela data de abertura (nº {filtered.length}).</div>
       <WeeklyTicketsChart weeks={semanas}/>
 
-      <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:20, marginTop:26}}>
-        <ContagemTable titulo="Por pessoa de suporte" rows={porSuporte}/>
-        <ContagemTable titulo="Por pessoa de desenvolvimento" rows={porDev}/>
-        <ContagemTable titulo="Por classificação" rows={porClassificacao}/>
-      </div>
+      <WeeklyBreakdownTable titulo="Por pessoa de suporte" weeks={semanas} rows={porSuporte}/>
+      <WeeklyBreakdownTable titulo="Por pessoa de desenvolvimento" weeks={semanas} rows={porDev}/>
+      <WeeklyBreakdownTable titulo="Por classificação" weeks={semanas} rows={porClassificacao}/>
+      <WeeklyBreakdownTable titulo="Por cliente" weeks={semanas} rows={porCliente}/>
     </div>
   );
 }
