@@ -1844,6 +1844,8 @@ const DEMANDA_CLASSIFICACAO_OPTIONS = [
 
 const DEMANDA_TIPO_OPTIONS = ['Planning','Nova Demanda','Rotina'];
 
+const DEMANDA_PRIORIDADE_OPTIONS = ['Despriorizado','P0','P1','P2'];
+
 const MESES_PLANNING = [
   {n:1, nome:'Janeiro'}, {n:2, nome:'Fevereiro'}, {n:3, nome:'Março'}, {n:4, nome:'Abril'},
   {n:5, nome:'Maio'}, {n:6, nome:'Junho'}, {n:7, nome:'Julho'}, {n:8, nome:'Agosto'},
@@ -1930,6 +1932,7 @@ function buildDemandasMerged(customMap){
       prazo: prazo,
       concluidoEm: concluidoEm,
       mesPlanning: c.mesPlanning || '',
+      prioridade: c.prioridade || '',
       atrasado: isDemandaAtrasado(prazo, o.s, concluidoEm),
       concluidaNoPrazo: isDemandaConcluidaNoPrazo(prazo, o.s, concluidoEm),
       editMeta: c._editMeta || {},
@@ -5611,6 +5614,176 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
 /* ---------------------------------------------------------------
    DEMANDAS (tickets Movidesk)
 --------------------------------------------------------------- */
+function countBy(list, keyFn){
+  const map = {};
+  list.forEach(item => {
+    const k = keyFn(item);
+    map[k] = (map[k]||0) + 1;
+  });
+  return Object.entries(map).map(([nome, count]) => ({nome, count})).sort((a,b) => b.count - a.count);
+}
+
+function startOfWeekMonday(d){
+  const date = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = date.getDay();
+  const diff = (day === 0 ? -6 : 1 - day);
+  date.setDate(date.getDate() + diff);
+  return date;
+}
+
+function weekLabel(mondayDate){
+  const dd = String(mondayDate.getDate()).padStart(2,'0');
+  const mm = String(mondayDate.getMonth()+1).padStart(2,'0');
+  return dd + '/' + mm;
+}
+
+// Gráfico de barras (semana a semana) do nº de tickets abertos, com hover interativo.
+function WeeklyTicketsChart({weeks}){
+  const wrapRef = useRef(null);
+  const [hoverIdx, setHoverIdx] = useState(null);
+  const [tooltipLeftPct, setTooltipLeftPct] = useState(50);
+
+  if(!weeks.length) return <div className="hint">Sem dados suficientes para o período filtrado.</div>;
+
+  const barGroupW = 26;
+  const W = Math.max(640, weeks.length * barGroupW + 52);
+  const H = 220, padL = 40, padB = 28, padT = 12, padR = 12;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+  const maxVal = Math.max(1, ...weeks.map(w => w.count));
+  const gW = chartW / weeks.length;
+  const barW = Math.min(18, gW*0.6);
+  const gridLines = 4;
+  const labelEvery = Math.max(1, Math.ceil(weeks.length/16));
+
+  const handleMove = (e) => {
+    if(!wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    if(rect.width === 0) return;
+    const fracX = (e.clientX - rect.left) / rect.width;
+    const svgX = fracX * W;
+    const idx = Math.floor((svgX - padL) / gW);
+    if(idx < 0 || idx >= weeks.length){ setHoverIdx(null); return; }
+    setHoverIdx(idx);
+    setTooltipLeftPct(Math.min(94, Math.max(6, fracX * 100)));
+  };
+  const handleLeave = () => setHoverIdx(null);
+  const hovered = hoverIdx !== null ? weeks[hoverIdx] : null;
+
+  return (
+    <div style={{overflowX:'auto'}}>
+      <div ref={wrapRef} onMouseMove={handleMove} onMouseLeave={handleLeave} style={{position:'relative', width:W}}>
+        <svg viewBox={"0 0 " + W + " " + H} width={W} height={H} style={{overflow:'visible', display:'block'}}>
+          {Array.from({length: gridLines+1}).map((_, i) => {
+            const y = padT + (chartH / gridLines) * i;
+            const val = maxVal - (maxVal / gridLines) * i;
+            return (
+              <g key={i}>
+                <line x1={padL} x2={W-padR} y1={y} y2={y} stroke="#EEF0F4" strokeWidth="1"/>
+                <text x={padL-8} y={y+3} fontSize="9.5" fill="#93970F" textAnchor="end" fontFamily="IBM Plex Mono, monospace" opacity="0.75">{Math.round(val)}</text>
+              </g>
+            );
+          })}
+          {hoverIdx !== null && (
+            <rect x={padL + gW*hoverIdx} y={padT} width={gW} height={chartH} fill="rgba(30,62,112,0.06)"/>
+          )}
+          {weeks.map((w, i) => {
+            const gx = padL + gW * i;
+            const bH = (w.count / maxVal) * chartH;
+            const bx = gx + gW/2 - barW/2;
+            const bY = padT + chartH - bH;
+            return (
+              <g key={w.key}>
+                <rect x={bx} y={bY} width={barW} height={bH} rx="2" fill="var(--accent)" opacity={hoverIdx===null || hoverIdx===i ? 0.92 : 0.45}/>
+                {(i % labelEvery === 0) && <text x={gx+gW/2} y={H-8} fontSize="9.5" fill="#5D6274" textAnchor="middle" fontFamily="Inter, sans-serif">{w.label}</text>}
+              </g>
+            );
+          })}
+          <line x1={padL} x2={padL} y1={padT} y2={padT+chartH} stroke="#E6E8EE"/>
+          <line x1={padL} x2={W-padR} y1={padT+chartH} y2={padT+chartH} stroke="#E6E8EE"/>
+        </svg>
+        {hovered && (
+          <div className="chart-tooltip" style={{left: tooltipLeftPct + '%'}}>
+            <div className="chart-tooltip-title">Semana de {hovered.label}</div>
+            <div className="chart-tooltip-row"><span className="chart-tooltip-dot" style={{background:'var(--accent)'}}></span>Tickets abertos: <b>{hovered.count}</b></div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ContagemTable({titulo, rows}){
+  return (
+    <div>
+      <div className="section-block-title" style={{fontSize:12.5, marginBottom:6}}>{titulo}</div>
+      {rows.length === 0 ? <div className="hint">Sem dados.</div> : (
+        <div className="table-wrap">
+          <table className="upsell-tbl">
+            <thead><tr><th style={{textAlign:'left'}}>Nome</th><th>Tickets</th></tr></thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.nome}>
+                  <td style={{textAlign:'left', paddingLeft:12}}>{r.nome}</td>
+                  <td style={{fontFamily:'IBM Plex Mono, monospace', fontWeight:600}}>{r.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Resumo (gráfico semanal + tabelas de contagem) exibido entre os filtros e a listagem por cliente.
+// Responde aos mesmos filtros da tela (recebe a lista já filtrada).
+function DemandasResumoSection({filtered, devTeam}){
+  const semanas = useMemo(() => {
+    const buckets = {};
+    filtered.forEach(m => {
+      if(!m.abertoEm) return;
+      const d = new Date(m.abertoEm);
+      if(isNaN(d.getTime())) return;
+      const monday = startOfWeekMonday(d);
+      const key = monday.getTime();
+      buckets[key] = (buckets[key]||0) + 1;
+    });
+    const keys = Object.keys(buckets).map(Number);
+    if(!keys.length) return [];
+    const minKey = Math.min(...keys), maxKey = Math.max(...keys);
+    const weekMs = 7*24*60*60*1000;
+    const out = [];
+    for(let t = minKey; t <= maxKey; t += weekMs){
+      out.push({ key: t, label: weekLabel(new Date(t)), count: buckets[t] || 0 });
+    }
+    return out;
+  }, [filtered]);
+
+  const porSuporte = useMemo(() => countBy(filtered, m => m.responsavel || 'Sem responsável'), [filtered]);
+  const porDev = useMemo(() => {
+    const devById = Object.fromEntries(devTeam.map(p => [p.id, p.nome]));
+    return countBy(filtered, m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído');
+  }, [filtered, devTeam]);
+  const porClassificacao = useMemo(() => countBy(filtered, m => m.classificacao || 'Sem classificação'), [filtered]);
+
+  if(!filtered.length) return null;
+
+  return (
+    <div className="card card-pad" style={{marginBottom:20}}>
+      <div className="section-block-title" style={{marginBottom:4}}>Tickets abertos por semana</div>
+      <div className="section-block-desc" style={{marginBottom:12}}>Considera os tickets que respeitam os filtros acima, pela data de abertura (nº {filtered.length}).</div>
+      <WeeklyTicketsChart weeks={semanas}/>
+
+      <div style={{display:'grid', gridTemplateColumns:'repeat(3, 1fr)', gap:20, marginTop:26}}>
+        <ContagemTable titulo="Por pessoa de suporte" rows={porSuporte}/>
+        <ContagemTable titulo="Por pessoa de desenvolvimento" rows={porDev}/>
+        <ContagemTable titulo="Por classificação" rows={porClassificacao}/>
+      </div>
+    </div>
+  );
+}
+
 function DemandasPage({data, actions}){
   const merged = useMemo(() => buildDemandasMerged(data.demandasCustom), [data.demandasCustom]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento'), [data.pessoas]);
@@ -5634,6 +5807,7 @@ function DemandasPage({data, actions}){
   const [tipoFilter, setTipoFilter] = useState('');
   const [classificacaoFilter, setClassificacaoFilter] = useState('');
   const [respDevFilter, setRespDevFilter] = useState('');
+  const [prioridadeFilter, setPrioridadeFilter] = useState('');
 
   const toggleStatus = (s) => {
     setStatusFilter(prev => {
@@ -5659,12 +5833,13 @@ function DemandasPage({data, actions}){
     if(tipoFilter && m.tipo !== tipoFilter) return false;
     if(classificacaoFilter && m.classificacao !== classificacaoFilter) return false;
     if(respDevFilter && m.responsavelDesenvolvimentoId !== respDevFilter) return false;
+    if(prioridadeFilter && m.prioridade !== prioridadeFilter) return false;
     return true;
-  }), [merged, statusFilter, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter]);
+  }), [merged, statusFilter, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter]);
 
-  const anyExtraFilterActive = mesFinalizacaoFilter || mesPlanningFilter || tipoFilter || classificacaoFilter || respDevFilter;
+  const anyExtraFilterActive = mesFinalizacaoFilter || mesPlanningFilter || tipoFilter || classificacaoFilter || respDevFilter || prioridadeFilter;
   const clearExtraFilters = () => {
-    setMesFinalizacaoFilter(''); setMesPlanningFilter(''); setTipoFilter(''); setClassificacaoFilter(''); setRespDevFilter('');
+    setMesFinalizacaoFilter(''); setMesPlanningFilter(''); setTipoFilter(''); setClassificacaoFilter(''); setRespDevFilter(''); setPrioridadeFilter('');
   };
 
   const byCliente = useMemo(() => {
@@ -5726,7 +5901,7 @@ function DemandasPage({data, actions}){
           {respFilter && <button className="btn btn-ghost btn-sm" onClick={()=>setRespFilter('')}>Limpar</button>}
         </div>
 
-        <div className="demandas-filter-label">Mês Finalização, Mês Planning, Tipo, Classificação e Responsável Desenvolvimento</div>
+        <div className="demandas-filter-label">Mês Finalização, Mês Planning, Tipo, Classificação, Prioridade e Responsável Desenvolvimento</div>
         <div className="filters-bar" style={{margin:0}}>
           <select className="filter-select" value={mesFinalizacaoFilter} onChange={e=>setMesFinalizacaoFilter(e.target.value)}>
             <option value="">Mês de finalização</option>
@@ -5744,6 +5919,10 @@ function DemandasPage({data, actions}){
             <option value="">Classificação</option>
             {DEMANDA_CLASSIFICACAO_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
           </select>
+          <select className="filter-select" value={prioridadeFilter} onChange={e=>setPrioridadeFilter(e.target.value)}>
+            <option value="">Prioridade</option>
+            {DEMANDA_PRIORIDADE_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
           <select className="filter-select" value={respDevFilter} onChange={e=>setRespDevFilter(e.target.value)}>
             <option value="">Responsável Desenvolvimento</option>
             {devTeam.map(p => <option value={p.id} key={p.id}>{p.nome}</option>)}
@@ -5751,6 +5930,8 @@ function DemandasPage({data, actions}){
           {anyExtraFilterActive && <button className="btn btn-ghost btn-sm" onClick={clearExtraFilters}>Limpar</button>}
         </div>
       </div>
+
+      <DemandasResumoSection filtered={filtered} devTeam={devTeam}/>
 
       {clientesComDados.length === 0 ? (
         <div className="card"><EmptyState icon={IconClipboard} title="Nenhuma demanda encontrada"
@@ -5793,6 +5974,7 @@ function DemandasClienteTable({cliente, rows, devTeam, actions}){
                 <th>Assunto</th>
                 <th>Status</th>
                 <th>Urgência</th>
+                <th>Prioridade</th>
                 <th>Prazo</th>
                 <th>Concluído em</th>
                 <th>CSAT</th>
@@ -5823,6 +6005,16 @@ function DemandaRow({row, devTeam, actions}){
       <td className="demanda-assunto" title={row.assunto}>{row.assunto}</td>
       <td><span className="status-pill" style={{background:statusCol.bg, color:statusCol.fg}}>{row.status}</span></td>
       <td><span className="status-pill" style={{background:urgCol.bg, color:urgCol.fg}}>{row.urgencia || '—'}</span></td>
+      <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.prioridade) || undefined}>
+        <select
+          className={"demanda-select" + (row.prioridade ? '' : ' empty')}
+          value={row.prioridade}
+          onChange={e => actions.updateDemandaCustom(row.numero, {prioridade: e.target.value})}
+        >
+          <option value="">—</option>
+          {DEMANDA_PRIORIDADE_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+        </select>
+      </td>
       <td className="demanda-prazo-cell">
         <input
           type="date"
