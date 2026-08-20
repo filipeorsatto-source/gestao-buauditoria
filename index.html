@@ -186,6 +186,7 @@
   .topbar-eyebrow{font-family:var(--font-mono);font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:3px;}
   .content{flex:1;padding:28px 32px 60px;max-width:1320px;width:100%;margin:0 auto;}
   .content-demandas{max-width:none;margin:0;}
+  .kpi-name-hint{border-bottom:1px dotted var(--ink-soft);cursor:help;}
 
   .section-block{margin-bottom:34px;}
   .section-block-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px;}
@@ -795,6 +796,113 @@ function transformMovideskRows(rows){
     });
   }
   return out;
+}
+
+/* ---------------------------------------------------------------
+   MARGEM BRUTA — sincronização com a planilha "Gestão Metas" (aba Finance)
+--------------------------------------------------------------- */
+// ID da planilha "Gestão Metas" no Google Drive (a mesma referenciada como "Fonte" do indicador
+// Margem Bruta). O botão "Atualizar base Margem Bruta" exporta a primeira aba (Finance) como CSV
+// direto do Drive (mesma permissão de leitura já usada pela sincronização do Movidesk) e substitui
+// os dados de P&L do ano vigente na base compartilhada do Firestore.
+const MARGEM_BRUTA_SHEET_ID = '1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU';
+
+const MONTH_NAME_TO_N = {
+  'Janeiro':1, 'Fevereiro':2, 'Março':3, 'Abril':4, 'Maio':5, 'Junho':6,
+  'Julho':7, 'Agosto':8, 'Setembro':9, 'Outubro':10, 'Novembro':11, 'Dezembro':12,
+};
+
+const FINANCE_ROW_MAP = {
+  'Total revenues': 'receitaTotal',
+  '(-) Taxes on revenues': 'taxasReceita',
+  '(-) COGS': 'cogs',
+  '(-) Payroll': 'payroll',
+  '(=) Gross profit': 'grossProfit',
+  '(-) G&A': 'gea',
+  '(-) S&M': 'sem',
+  '(=) EBITDA / burn': 'ebitda',
+};
+
+const FINANCE_CLIENT_ROWS = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
+
+// Números no formato brasileiro (ponto = separador de milhar, vírgula = decimal). Também aceita
+// negativos com "-" na frente.
+function parseBRNumber(str){
+  if(str === undefined || str === null) return null;
+  let s = String(str).trim();
+  if(s === '') return null;
+  const negative = s.startsWith('-');
+  if(negative) s = s.slice(1);
+  s = s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/\./g, '');
+  const n = Number(s);
+  if(isNaN(n)) return null;
+  return negative ? -n : n;
+}
+
+// Parser simples de CSV (RFC4180-ish): lida com campos entre aspas contendo vírgulas/aspas escapadas.
+function parseCSVText(text){
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for(let i = 0; i < text.length; i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c === '"'){
+        if(text[i+1] === '"'){ field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if(c === '"'){ inQuotes = true; }
+    else if(c === ','){ row.push(field); field = ''; }
+    else if(c === '\r'){ /* ignora */ }
+    else if(c === '\n'){ row.push(field); rows.push(row); row = []; field = ''; }
+    else field += c;
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows;
+}
+
+// Converte as linhas cruas do CSV exportado da aba Finance no formato { [mesN]: {receitaTotal,
+// receitaPorCliente:{...}, taxasReceita, cogs, payroll, grossProfit, gea, sem, ebitda} }.
+function transformFinanceRows(rows){
+  let headerRowIdx = -1, monthStartCol = -1;
+  for(let i = 0; i < rows.length && headerRowIdx === -1; i++){
+    const row = rows[i] || [];
+    for(let j = 0; j < row.length; j++){
+      if(MONTH_NAME_TO_N[String(row[j]).trim()]){ headerRowIdx = i; monthStartCol = j; break; }
+    }
+  }
+  if(headerRowIdx === -1) throw new Error('Não foi possível localizar o cabeçalho de meses na aba Finance.');
+
+  const headerRow = rows[headerRowIdx];
+  const monthCols = [];
+  for(let j = monthStartCol; j < headerRow.length; j++){
+    const n = MONTH_NAME_TO_N[String(headerRow[j]).trim()];
+    if(n) monthCols.push({col: j, n});
+  }
+  if(!monthCols.length) throw new Error('Nenhum mês reconhecido no cabeçalho da aba Finance.');
+
+  const labelCol = monthStartCol - 1;
+  const monthsData = {};
+  let foundTotalRevenues = false;
+
+  for(let i = headerRowIdx + 1; i < rows.length; i++){
+    const row = rows[i] || [];
+    const label = String(row[labelCol] || '').trim();
+    if(!label) continue;
+    const key = FINANCE_ROW_MAP[label];
+    const isClientRow = FINANCE_CLIENT_ROWS.includes(label);
+    if(!key && !isClientRow) continue;
+    if(label === 'Total revenues') foundTotalRevenues = true;
+    monthCols.forEach(({col, n}) => {
+      const val = parseBRNumber(row[col]);
+      if(val === null) return;
+      if(!monthsData[n]) monthsData[n] = {receitaPorCliente:{}};
+      if(isClientRow) monthsData[n].receitaPorCliente[label] = val;
+      else monthsData[n][key] = val;
+    });
+  }
+
+  if(!foundTotalRevenues) throw new Error('A aba não contém a linha "Total revenues" — confirme se a primeira aba da planilha "Gestão Metas" é a aba "Finance".');
+  return monthsData;
 }
 
 const DEMANDAS_SEED = [
@@ -2347,6 +2455,19 @@ const UPSELL_PILLARS = [
     {key:'contasAutomatico', nome:'Contas Automático', tipo:'contasAuto', sufixo:'%'},
   ]},
 ];
+
+const UPSELL_KPI_RATIONALE = {
+  penetracaoContas: 'Mede o % de contas do cliente cobertas por regras de auditoria automatizada. Normalização: o valor informado (0–100%) é convertido linearmente para uma escala de 0 a 10 (ex.: 80% → nota 8).',
+  penetracaoAuditores: 'Mede o % de auditores do cliente que efetivamente utilizam a ferramenta. Normalização: o valor informado (0–100%) é convertido linearmente para uma escala de 0 a 10 (ex.: 80% → nota 8).',
+  tempoImportacao: 'Tempo médio (em segundos) para importar as contas do cliente. Normalização: até 30s a nota é 10; a cada 30s adicionais, perde-se 1 ponto, até o mínimo de 0 — quanto mais rápido, melhor.',
+  tempoRecalculo: 'Tempo médio (em segundos) para recalcular as contas do cliente. Normalização: até 30s a nota é 10; a cada 30s adicionais, perde-se 1 ponto, até o mínimo de 0 — quanto mais rápido, melhor.',
+  termometroCRM: 'Percepção de relacionamento junto aos contatos-chave (N1 a N4). Normalização: cada contato marcado como "Quente" soma 2,5 pontos, "Morno" soma 2 pontos e "Frio" soma 0, com o total limitado a 10.',
+  ritos: 'Cadência de ritos de relacionamento realizados com o cliente (Acompanhamento Auditoria, Semanal Status Report, Mensal Resultados, Visitas Presenciais). Normalização: cada rito realizado soma 2,5 pontos, até o máximo de 10.',
+  mediaCSAT: 'Nota média de satisfação coletada com o cliente (escala de 0 a 5). Normalização: o valor informado é multiplicado por 2, resultando em um score de 0 a 10.',
+  diasAberto: 'Média de dias que os tickets do cliente ficam em aberto. Normalização: quanto menor o tempo, melhor a nota — até 5 dias = nota 10, caindo em faixas (8d→9, 10d→8, 12d→7 ...) até 0 a partir de 24 dias.',
+  subfaturamento: 'Percentual de subfaturamento identificado e corrigido pela auditoria. Normalização: por faixas crescentes de valor (quanto maior o % capturado, maior a nota), de 0 a 10.',
+  contasAutomatico: 'Percentual de contas do cliente finalizadas automaticamente, sem intervenção manual. Normalização: por faixas crescentes de valor (quanto maior o %, maior a nota), de 0 a 10.',
+};
 
 function clampNum(v, min, max){ return Math.min(max, Math.max(min, v)); }
 function isEmptyVal(v){ return v === null || v === undefined || v === ''; }
@@ -4531,9 +4652,40 @@ function TrackingIndexPage(){
   );
 }
 
-function MargemBrutaPage({financeiro}){
+function MargemBrutaPage({financeiro, financeiroSync, actions}){
   const pnlYear = (financeiro && financeiro.pnl && financeiro.pnl[CURRENT_YEAR]) || {};
   const filledMonths = MONTHS.filter(m => pnlYear[m.n]);
+
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState(null);
+
+  const handleSyncMargemBruta = async () => {
+    setSyncing(true);
+    setSyncError(null);
+    try{
+      const fb = await waitForFirebase();
+      const provider = new fb.GoogleAuthProvider();
+      provider.addScope('https://www.googleapis.com/auth/drive.readonly');
+      const result = await fb.signInWithPopup(fb.auth, provider);
+      const credential = fb.credentialFromResult ? fb.credentialFromResult(result) : null;
+      const accessToken = credential && credential.accessToken;
+      if(!accessToken) throw new Error('Não foi possível obter permissão de acesso ao Google Drive.');
+      const res = await fetch('https://www.googleapis.com/drive/v3/files/' + MARGEM_BRUTA_SHEET_ID + '/export?mimeType=text/csv', {
+        headers: { Authorization: 'Bearer ' + accessToken },
+      });
+      if(!res.ok) throw new Error('Não foi possível baixar a planilha do Drive (HTTP ' + res.status + ').');
+      const text = await res.text();
+      const rows = parseCSVText(text);
+      const monthsData = transformFinanceRows(rows);
+      if(!Object.keys(monthsData).length) throw new Error('A planilha foi baixada, mas nenhum mês com dados foi encontrado.');
+      actions.importMargemBrutaBase(monthsData);
+    }catch(e){
+      console.error('Margem Bruta sync error', e);
+      setSyncError(e.message || 'Erro ao atualizar a base de Margem Bruta.');
+    }finally{
+      setSyncing(false);
+    }
+  };
   const lastMonth = filledMonths.length ? filledMonths[filledMonths.length - 1] : null;
   const lastData = lastMonth ? pnlYear[lastMonth.n] : null;
   const kpi = lastData ? (lastData.grossProfit / lastData.receitaTotal) * 100 : null;
@@ -4598,6 +4750,25 @@ function MargemBrutaPage({financeiro}){
           <div>
             <div className="section-block-title">P&amp;L · {CURRENT_YEAR}</div>
             <div className="section-block-desc">Dados carregados da aba Finance da planilha de metas.</div>
+            <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>
+              {financeiroSync
+                ? `Última atualização: ${financeiroSync.by} em ${fmtDataAbertura(financeiroSync.at)} · ${financeiroSync.count} mês${financeiroSync.count===1?'':'es'}`
+                : 'Base ainda não atualizada a partir do Drive — exibindo dados estáticos.'}
+            </div>
+          </div>
+          <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end', gap:6}}>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={syncing}
+              onClick={handleSyncMargemBruta}
+              style={{whiteSpace:'nowrap', opacity: syncing ? 0.6 : 1, cursor: syncing ? 'not-allowed' : 'pointer'}}
+            >
+              {syncing ? 'Atualizando…' : 'Atualizar base Margem Bruta'}
+            </button>
+            {syncError && (
+              <div style={{fontSize:12.5, color:'#c0392b', maxWidth:320, textAlign:'right'}}>{syncError}</div>
+            )}
           </div>
         </div>
         <div className="table-wrap">
@@ -4712,7 +4883,7 @@ function MonthUpsellTable({mes, monthData, clientesCols, actions, expanded, onTo
                             </tr>
                           ))}
                           <tr className="upsell-kpi-computed-row">
-                            <td>{kpi.nome}</td>
+                            <td><span className="kpi-name-hint" title={UPSELL_KPI_RATIONALE[kpi.key] || undefined}>{kpi.nome}</span></td>
                             {clientesCols.map(c => {
                               const score = computeKpiScore(kpi, (monthData||{})[c.id]);
                               return <td key={c.id}>{fmtScore(score)}</td>;
@@ -4724,7 +4895,7 @@ function MonthUpsellTable({mes, monthData, clientesCols, actions, expanded, onTo
                     }
                     return (
                       <tr className="upsell-kpi-row" key={kpi.key}>
-                        <td>{kpi.nome}{kpi.sufixo ? ' (' + kpi.sufixo + ')' : ''}</td>
+                        <td><span className="kpi-name-hint" title={UPSELL_KPI_RATIONALE[kpi.key] || undefined}>{kpi.nome}{kpi.sufixo ? ' (' + kpi.sufixo + ')' : ''}</span></td>
                         {clientesCols.map(c => {
                           const clienteData = (monthData||{})[c.id] || {};
                           const raw = clienteData[kpi.key];
@@ -5699,7 +5870,7 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   const ind = INDICADORES.find(i => i.slug === slug);
   if(!ind) return <TrackingIndexPage/>;
   if(slug === 'margem-bruta'){
-    return <MargemBrutaPage financeiro={financeiro}/>;
+    return <MargemBrutaPage financeiro={financeiro} financeiroSync={data.financeiroSync} actions={actions}/>;
   }
   if(slug === 'upsell-score'){
     return <UpsellScorePage upsellScore={upsellScore} clientes={clientes} actions={actions}/>;
@@ -6204,6 +6375,7 @@ function DemandasPage({data, actions}){
 
 function DemandasClienteTable({cliente, rows, devTeam, actions}){
   const [expanded, setExpanded] = useState(false);
+  const mediaDiasAberto = useMemo(() => avgOf(rows.map(r => r.diasEmAberto)), [rows]);
 
   return (
     <div className="card demandas-client-card" style={expanded ? {width:'fit-content', minWidth:'100%'} : undefined}>
@@ -6215,7 +6387,10 @@ function DemandasClienteTable({cliente, rows, devTeam, actions}){
           aria-label={expanded ? 'Recolher' : 'Expandir'}
         >{expanded ? '−' : '+'}</button>
         <span>{cliente}</span>
-        <span className="group-card-count">{rows.length} ticket{rows.length===1?'':'s'}</span>
+        <span className="group-card-count" style={{marginLeft:'auto'}}>{rows.length} ticket{rows.length===1?'':'s'}</span>
+        <span className="group-card-count" style={{marginLeft:0}} title="Média de dias em aberto dos tickets exibidos neste cliente">
+          Média {mediaDiasAberto === null ? '—' : mediaDiasAberto.toFixed(1) + 'd'} em aberto
+        </span>
       </div>
 
       {expanded && (
@@ -6656,6 +6831,23 @@ function App(){
         count: rows.length,
       },
     }), `Base do Movidesk atualizada (${rows.length} tickets)`),
+
+    // substitui o P&L do ano vigente (puxado da aba Finance da planilha Gestão Metas) — compartilhado em tempo real
+    importMargemBrutaBase: (monthsData) => mutate(d => {
+      const financeiro = {...(d.financeiro||{})};
+      const pnl = {...(financeiro.pnl||{})};
+      pnl[CURRENT_YEAR] = monthsData;
+      financeiro.pnl = pnl;
+      return {
+        ...d,
+        financeiro,
+        financeiroSync: {
+          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+          at: new Date().toISOString(),
+          count: Object.keys(monthsData).length,
+        },
+      };
+    }, `Base de Margem Bruta atualizada (${Object.keys(monthsData).length} mês${Object.keys(monthsData).length===1?'':'es'})`),
   }), [mutate, authUser]);
 
   if(authUser === undefined){
