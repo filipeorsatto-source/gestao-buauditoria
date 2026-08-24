@@ -2306,31 +2306,74 @@ function randomHourSlot(){
 }
 
 const INDICADORES = [
-  {slug:'margem-bruta', titulo:'Margem Bruta & Ticket Médio', descricao:'Margem Bruta = (Receita Líquida - Folha Salarial - Custos Diretos) / Receita Líquida. Ticket Médio = Receita Líquida / número de clientes (7).', unidade:'%', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
+  // titulo é usado no item da barra lateral (Acompanhamento de Metas) e no cabeçalho da própria
+  // página do indicador. metaTitulo (quando definido) é o nome usado só dentro de Gestão de Metas
+  // (cartão e linhas das tabelas-resumo) — aqui os dois divergem de propósito: a aba combinada em
+  // Acompanhamento de Metas continua se chamando "Margem Bruta & Ticket Médio" (mostra as duas
+  // métricas juntas), mas em Gestão de Metas essa linha/cartão deve aparecer só como "Margem Bruta",
+  // já que "Ticket Médio" já tem sua própria linha/cartão separado ali (ver slug 'ticket-medio' abaixo).
+  {slug:'margem-bruta', titulo:'Margem Bruta & Ticket Médio', metaTitulo:'Margem Bruta', area:'Geral', descricao:'Margem Bruta = (Receita Líquida - Folha Salarial - Custos Diretos) / Receita Líquida. Ticket Médio = Receita Líquida / número de clientes (7).', unidade:'%', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
   // Ticket Médio é uma meta própria (com gráfico e linha separados em Gestão de Metas), mas usa os
   // mesmos dados/página de Margem Bruta em Acompanhamento de Metas — por isso "metaOnly:true": essa
   // entrada NÃO ganha um item próprio na barra lateral (ver o filtro em INDICADORES_NAV), só existe
   // para Gestão de Metas e para os cálculos de realizado/budget.
-  {slug:'ticket-medio', titulo:'Ticket Médio', descricao:'Receita Líquida / número de clientes (7). Mesma fonte de dados de "Margem Bruta & Ticket Médio" — veja o detalhamento mês a mês na aba de Margem Bruta, dentro de Acompanhamento de Metas.', unidade:'R$', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing', metaOnly:true},
-  {slug:'upsell-score', titulo:'Relacionamento', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
-  {slug:'contas-finalizadas', titulo:'Contas Finalizadas', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
-  {slug:'subfaturamento', titulo:'Subfaturamento', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
-  {slug:'contas-automatico', titulo:'% Contas Automático', descricao:'Percentual de contas do cliente finalizadas automaticamente, sem intervenção manual.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
-  {slug:'nps', titulo:'NPS', descricao:'Satisfação do cliente medida através de pesquisa bimestral.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/18JDaC4rIPpCGS2_3qgXLV0gwXjJNMaL0'},
-  {slug:'penetracao-regras', titulo:'Penetração Regras', descricao:'Fórmula a definir.', unidade:'%', fonte:'http://central-regras.riviobizdev.com/'},
-  {slug:'efetividade-regras', titulo:'Efetividade Regras', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
-  {slug:'entregas-prazo', titulo:'% Entregas Prazo', descricao:'Escopos Cobertos / Escopos Essenciais', unidade:'%', fonte:'Movidesk + Planning'},
-  {slug:'csat-tech', titulo:'CSAT Tech', descricao:'Avaliação dos tickets de tecnologia provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
-  {slug:'dias-ticket-aberto', titulo:'Média dias ticket em aberto', descricao:'Média de dias em aberto dos tickets provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
-  {slug:'csat-atendimento', titulo:'CSAT Atendimento', descricao:'Avaliação dos tickets de atendimento provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
-  {slug:'cobertura-dados', titulo:'Cobertura de Dados', descricao:'Visuais Criados / Visuais Totais', unidade:'%', fonte:'Metabase'},
-  {slug:'csat-produto', titulo:'CSAT Produto', descricao:'Avaliação dos tickets relacionados a produto provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
+  {slug:'ticket-medio', titulo:'Ticket Médio', area:'Deployment', descricao:'Receita Líquida / número de clientes (7). Mesma fonte de dados de "Margem Bruta & Ticket Médio" — veja o detalhamento mês a mês na aba de Margem Bruta, dentro de Acompanhamento de Metas.', unidade:'R$', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing', metaOnly:true},
+  {slug:'upsell-score', titulo:'Relacionamento', area:'Deployment', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
+  {slug:'contas-finalizadas', titulo:'Contas Finalizadas', area:'Deployment', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
+  {slug:'subfaturamento', titulo:'Subfaturamento', area:'Auditoria', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
+  {slug:'contas-automatico', titulo:'% Contas Automático', area:'Auditoria', descricao:'Percentual de contas do cliente finalizadas automaticamente, sem intervenção manual.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
+  {slug:'nps', titulo:'NPS', area:'Geral', descricao:'Satisfação do cliente medida através de pesquisa bimestral.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/18JDaC4rIPpCGS2_3qgXLV0gwXjJNMaL0'},
+  {slug:'penetracao-regras', titulo:'Penetração Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'http://central-regras.riviobizdev.com/'},
+  {slug:'efetividade-regras', titulo:'Efetividade Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
+  {slug:'entregas-prazo', titulo:'% Entregas Prazo', area:'Desenvolvimento', descricao:'Escopos Cobertos / Escopos Essenciais', unidade:'%', fonte:'Movidesk + Planning'},
+  {slug:'csat-tech', titulo:'CSAT Tech', area:'Desenvolvimento', descricao:'Avaliação dos tickets de tecnologia provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
+  {slug:'dias-ticket-aberto', titulo:'Média dias ticket em aberto', area:'Atendimento', descricao:'Média de dias em aberto dos tickets provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
+  {slug:'csat-atendimento', titulo:'CSAT Atendimento', area:'Atendimento', descricao:'Avaliação dos tickets de atendimento provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
+  {slug:'cobertura-dados', titulo:'Cobertura de Dados', area:'Produto', descricao:'Visuais Criados / Visuais Totais', unidade:'%', fonte:'Metabase'},
+  {slug:'csat-produto', titulo:'CSAT Produto', area:'Produto', descricao:'Avaliação dos tickets relacionados a produto provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
 ];
 
 // Indicadores com item próprio na barra lateral de "Acompanhamento de Metas" — exclui os marcados
 // como metaOnly (ex.: Ticket Médio, que só existe para Gestão de Metas; a página dele em
 // Acompanhamento de Metas é a mesma de Margem Bruta).
 const INDICADORES_NAV = INDICADORES.filter(ind => !ind.metaOnly);
+
+// Lookup por slug (titulo/metaTitulo/area) — usado tanto nas migrações (para gravar o título correto
+// em data.metas) quanto na tela de Gestão de Metas (para exibir "Área / Título" e ordenar as metas).
+const INDICADORES_BY_SLUG = Object.fromEntries(INDICADORES.map(ind => [ind.slug, ind]));
+
+// Ordem de exibição das metas em Gestão de Metas (tabelas-resumo e cartões), agrupada por área —
+// não é a mesma ordem/lista de INDICADORES_NAV (que define a barra lateral de Acompanhamento de
+// Metas). Metas customizadas (sem slug, criadas manualmente pelo usuário) não entram aqui — elas são
+// exibidas depois de todas as listadas, em ordem alfabética.
+const GESTAO_METAS_ORDEM = [
+  'nps', 'margem-bruta',
+  'upsell-score', 'contas-finalizadas', 'ticket-medio',
+  'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico',
+  'dias-ticket-aberto', 'csat-atendimento',
+  'entregas-prazo', 'csat-tech',
+  'csat-produto', 'cobertura-dados',
+];
+const GESTAO_METAS_ORDEM_INDEX = Object.fromEntries(GESTAO_METAS_ORDEM.map((slug, i) => [slug, i]));
+
+// Ordena uma lista de metas (data.metas ou um subconjunto filtrado) na ordem definida acima; metas
+// não listadas (customizadas, ou um indicador novo que ainda não foi adicionado a GESTAO_METAS_ORDEM)
+// vão para o final, em ordem alfabética por título.
+function ordenarMetasGestao(goals){
+  return [...goals].sort((a, b) => {
+    const ia = a.slug && GESTAO_METAS_ORDEM_INDEX[a.slug] !== undefined ? GESTAO_METAS_ORDEM_INDEX[a.slug] : Infinity;
+    const ib = b.slug && GESTAO_METAS_ORDEM_INDEX[b.slug] !== undefined ? GESTAO_METAS_ORDEM_INDEX[b.slug] : Infinity;
+    if(ia !== ib) return ia - ib;
+    return (a.titulo || '').localeCompare(b.titulo || '', 'pt-BR');
+  });
+}
+
+// Label "Área / Título" exibido na coluna da esquerda das tabelas-resumo de Gestão de Metas. Metas
+// sem área definida (customizadas, ou um indicador sem area em INDICADORES) mostram só o título.
+function metaAreaLabel(goal){
+  const area = goal.slug && INDICADORES_BY_SLUG[goal.slug] && INDICADORES_BY_SLUG[goal.slug].area;
+  return area ? area + ' / ' + goal.titulo : goal.titulo;
+}
 
 // Metas cujo Budget mensal é definido direto na tela do próprio indicador (Acompanhamento de Metas),
 // e não mais no card/modal de Gestão de Metas.
@@ -2895,7 +2938,7 @@ function buildDefaultData(){
     metas: INDICADORES.map(ind => ({
       id: uid(),
       slug: ind.slug,
-      titulo: ind.titulo,
+      titulo: ind.metaTitulo || ind.titulo,
       descricao: ind.descricao,
       fonte: ind.fonte,
       unidadeMedida: ind.unidade,
@@ -3059,7 +3102,7 @@ function runMigrations(parsed){
         const faltantes = INDICADORES.filter(ind => !slugsExistentes.has(ind.slug));
         if(faltantes.length){
           parsed.metas = [...parsed.metas, ...faltantes.map(ind => ({
-            id: uid(), slug: ind.slug, titulo: ind.titulo, descricao: ind.descricao,
+            id: uid(), slug: ind.slug, titulo: ind.metaTitulo || ind.titulo, descricao: ind.descricao,
             fonte: ind.fonte, unidadeMedida: ind.unidade, pessoaIds: [], budgets: {},
           }))];
           changed = true;
@@ -3068,6 +3111,9 @@ function runMigrations(parsed){
       // migrate: sincroniza título, descrição, unidade e fonte de cada meta com a definição mais
       // recente do indicador correspondente (por slug) — permite renomear/redefinir um indicador em
       // INDICADORES (ex.: "Upsell Score" -> "Relacionamento") e ter isso refletido em bases já salvas.
+      // Usa ind.metaTitulo quando definido (ex.: 'margem-bruta' aparece só como "Margem Bruta" em
+      // Gestão de Metas, apesar da aba combinada em Acompanhamento de Metas se chamar "Margem Bruta &
+      // Ticket Médio") — ind.titulo continua sendo o nome usado na barra lateral e no cabeçalho da página.
       if(parsed.metas){
         const indBySlug = {};
         INDICADORES.forEach(ind => { indBySlug[ind.slug] = ind; });
@@ -3075,11 +3121,12 @@ function runMigrations(parsed){
         parsed.metas = parsed.metas.map(m => {
           const ind = m.slug && indBySlug[m.slug];
           if(!ind) return m;
-          if(m.titulo === ind.titulo && m.descricao === ind.descricao && m.fonte === ind.fonte && m.unidadeMedida === ind.unidade){
+          const tituloEsperado = ind.metaTitulo || ind.titulo;
+          if(m.titulo === tituloEsperado && m.descricao === ind.descricao && m.fonte === ind.fonte && m.unidadeMedida === ind.unidade){
             return m;
           }
           defsChanged = true;
-          return {...m, titulo: ind.titulo, descricao: ind.descricao, fonte: ind.fonte, unidadeMedida: ind.unidade};
+          return {...m, titulo: tituloEsperado, descricao: ind.descricao, fonte: ind.fonte, unidadeMedida: ind.unidade};
         });
         if(defsChanged) changed = true;
       }
@@ -4419,7 +4466,7 @@ function GoalsSummaryTable({goals, data, clienteNomesFilter}){
               const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter) : null;
               return (
                 <tr key={g.id}>
-                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{g.titulo}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{metaAreaLabel(g)}</td>
                   {MONTHS.map(m => {
                     const rawBudget = budgetByMonth ? budgetByMonth[m.n] : undefined;
                     const hasBudget = rawBudget !== undefined && rawBudget !== null && rawBudget !== '' && Number(rawBudget) !== 0;
@@ -4468,7 +4515,7 @@ function GoalsRealizadoTable({goals, data, clienteNomesFilter}){
               const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter) : null;
               return (
                 <tr key={g.id}>
-                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{g.titulo}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{metaAreaLabel(g)}</td>
                   {MONTHS.map(m => {
                     const raw = realizadoByMonth ? realizadoByMonth[m.n] : null;
                     const has = raw !== null && raw !== undefined;
@@ -4511,7 +4558,7 @@ function GoalsBudgetTable({goals, data, clienteNomesFilter}){
               const budgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(g.slug, data, clienteNomesFilter) : (g.budgets[CURRENT_YEAR] || {});
               return (
                 <tr key={g.id}>
-                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{g.titulo}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{metaAreaLabel(g)}</td>
                   {MONTHS.map(m => {
                     const raw = budgetByMonth ? budgetByMonth[m.n] : undefined;
                     const has = raw !== undefined && raw !== null && raw !== '';
@@ -4592,8 +4639,8 @@ function GoalsPage({data, actions}){
   const clienteNomesFilter = useMemo(() => getPessoaClienteNomes(fPessoa, data), [fPessoa, data]);
 
   const visibleGoals = useMemo(() => {
-    if(!fPessoa) return data.metas;
-    return data.metas.filter(g => (g.pessoaIds||[]).includes(fPessoa));
+    const base = !fPessoa ? data.metas : data.metas.filter(g => (g.pessoaIds||[]).includes(fPessoa));
+    return ordenarMetasGestao(base);
   }, [data.metas, fPessoa]);
 
   return (
