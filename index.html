@@ -2307,6 +2307,11 @@ function randomHourSlot(){
 
 const INDICADORES = [
   {slug:'margem-bruta', titulo:'Margem Bruta & Ticket Médio', descricao:'Margem Bruta = (Receita Líquida - Folha Salarial - Custos Diretos) / Receita Líquida. Ticket Médio = Receita Líquida / número de clientes (7).', unidade:'%', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
+  // Ticket Médio é uma meta própria (com gráfico e linha separados em Gestão de Metas), mas usa os
+  // mesmos dados/página de Margem Bruta em Acompanhamento de Metas — por isso "metaOnly:true": essa
+  // entrada NÃO ganha um item próprio na barra lateral (ver o filtro em INDICADORES_NAV), só existe
+  // para Gestão de Metas e para os cálculos de realizado/budget.
+  {slug:'ticket-medio', titulo:'Ticket Médio', descricao:'Receita Líquida / número de clientes (7). Mesma fonte de dados de "Margem Bruta & Ticket Médio" — veja o detalhamento mês a mês na aba de Margem Bruta, dentro de Acompanhamento de Metas.', unidade:'R$', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing', metaOnly:true},
   {slug:'upsell-score', titulo:'Relacionamento', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
   {slug:'contas-finalizadas', titulo:'Contas Finalizadas', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
   {slug:'subfaturamento', titulo:'Subfaturamento', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
@@ -2321,6 +2326,11 @@ const INDICADORES = [
   {slug:'cobertura-dados', titulo:'Cobertura de Dados', descricao:'Visuais Criados / Visuais Totais', unidade:'%', fonte:'Metabase'},
   {slug:'csat-produto', titulo:'CSAT Produto', descricao:'Avaliação dos tickets relacionados a produto provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
 ];
+
+// Indicadores com item próprio na barra lateral de "Acompanhamento de Metas" — exclui os marcados
+// como metaOnly (ex.: Ticket Médio, que só existe para Gestão de Metas; a página dele em
+// Acompanhamento de Metas é a mesma de Margem Bruta).
+const INDICADORES_NAV = INDICADORES.filter(ind => !ind.metaOnly);
 
 // Metas cujo Budget mensal é definido direto na tela do próprio indicador (Acompanhamento de Metas),
 // e não mais no card/modal de Gestão de Metas.
@@ -3033,9 +3043,8 @@ function runMigrations(parsed){
         });
         changed = true;
       }
-      // migrate: remove metas cujo slug não existe mais em INDICADORES (ex.: 'ticket-medio', que deixou
-      // de ser uma meta própria e passou a ser apenas uma linha dentro da meta "Margem Bruta & Ticket
-      // Médio"). Metas criadas manualmente pelo usuário (sem slug) nunca são afetadas por essa limpeza.
+      // migrate: remove metas cujo slug não existe mais em INDICADORES (ex.: um indicador removido do
+      // painel). Metas criadas manualmente pelo usuário (sem slug) nunca são afetadas por essa limpeza.
       if(parsed.metas){
         const slugsValidos = new Set(INDICADORES.map(i => i.slug));
         const antes = parsed.metas.length;
@@ -3423,8 +3432,8 @@ function Sidebar({route, setRoute}){
           <span>Acompanhamento de Metas</span>
           <IconChevron className={"nav-caret" + (trackingOpen ? ' open' : '')}/>
         </div>
-        <div className="nav-sub" style={{maxHeight: trackingOpen ? (INDICADORES.length*34+6)+'px' : '0px'}}>
-          {INDICADORES.map(ind => (
+        <div className="nav-sub" style={{maxHeight: trackingOpen ? (INDICADORES_NAV.length*34+6)+'px' : '0px'}}>
+          {INDICADORES_NAV.map(ind => (
             <div
               key={ind.slug}
               className={"nav-subitem" + (route.section==='tracking' && route.indicator===ind.slug ? ' active' : '')}
@@ -3986,6 +3995,15 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
       const d = pnlYear[m.n];
       out[m.n] = d ? (d.grossProfit / d.receitaTotal * 100) : null;
     });
+    return out;
+  }
+
+  if(slug === 'ticket-medio'){
+    // Mesma fonte de dados de "margem-bruta" (P&L do ano vigente) — Ticket Médio é uma meta própria
+    // em Gestão de Metas, mas não tem tela/sincronização separada em Acompanhamento de Metas.
+    const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
+    const out = {};
+    MONTHS.forEach(m => { out[m.n] = computeTicketMedio(pnlYear[m.n]); });
     return out;
   }
 
