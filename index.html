@@ -743,6 +743,13 @@ const CURRENT_YEAR = new Date().getFullYear();
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
+// Número de clientes usado como divisor do Ticket Médio (Margem Bruta / Gestão de Metas).
+const TICKET_MEDIO_CLIENTES = 7;
+function computeTicketMedio(pnlMonthData){
+  if(!pnlMonthData || pnlMonthData.receitaTotal === undefined || pnlMonthData.receitaTotal === null) return null;
+  return pnlMonthData.receitaTotal / TICKET_MEDIO_CLIENTES;
+}
+
 // ID do arquivo Movidesk.xlsx no Google Drive (pasta compartilhada pelo Orsatto). O botão "Atualizar
 // base do Movidesk" baixa esse arquivo direto do Drive (usando a permissão do usuário logado) e
 // substitui a base de tickets compartilhada no Firestore.
@@ -2237,8 +2244,11 @@ function randomHourSlot(){
 
 const INDICADORES = [
   {slug:'margem-bruta', titulo:'Margem Bruta', descricao:'(Receita Líquida - Folha Salarial - Custos Diretos) / Receita Líquida', unidade:'%', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
-  {slug:'upsell-score', titulo:'Upsell Score', descricao:'Indicador composto pela avaliação de Dependência, Performance, Relacionamento, Atendimento e Resultado. Metodologia de cálculo a definir.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
+  {slug:'ticket-medio', titulo:'Ticket Médio', descricao:'Receita Líquida / número de clientes (7).', unidade:'R$', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
+  {slug:'upsell-score', titulo:'Relacionamento', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
   {slug:'contas-finalizadas', titulo:'Contas Finalizadas', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
+  {slug:'subfaturamento', titulo:'Subfaturamento', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
+  {slug:'contas-automatico', titulo:'% Contas Automático', descricao:'Percentual de contas do cliente finalizadas automaticamente, sem intervenção manual.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
   {slug:'nps', titulo:'NPS', descricao:'Satisfação do cliente medida através de pesquisa bimestral.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/18JDaC4rIPpCGS2_3qgXLV0gwXjJNMaL0'},
   {slug:'penetracao-regras', titulo:'Penetração Regras', descricao:'Fórmula a definir.', unidade:'%', fonte:'http://central-regras.riviobizdev.com/'},
   {slug:'efetividade-regras', titulo:'Efetividade Regras', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
@@ -2252,7 +2262,7 @@ const INDICADORES = [
 
 // Metas cujo Budget mensal é definido direto na tela do próprio indicador (Acompanhamento de Metas),
 // e não mais no card/modal de Gestão de Metas.
-const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras'];
+const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico'];
 
 const AREA_PALETTE = ['#2C5AA0','#1F8A70','#B8862B','#8A4FBE','#C4432B','#2B8FA6','#6B5BD6','#A85A9E'];
 function colorForArea(area){
@@ -2433,40 +2443,19 @@ function reconcileRotinaParticipants(pessoas, clientes, rotinas){
   return {rotinas: next, changed};
 }
 
+// A partir de Ago/2026, a meta "Relacionamento" (slug interno 'upsell-score', mantido por compatibilidade
+// com dados já salvos) considera apenas o pilar de Relacionamento — os demais pilares (Dependência,
+// Performance, Atendimento, Resultado) foram descontinuados dessa meta.
 const UPSELL_PILLARS = [
-  {n:1, nome:'Dependência', kpis:[
-    {key:'penetracaoContas', nome:'Penetração Contas', tipo:'pct100', sufixo:'%'},
-    {key:'penetracaoAuditores', nome:'Penetração Auditores', tipo:'pct100', sufixo:'%'},
-  ]},
-  {n:2, nome:'Performance', kpis:[
-    {key:'tempoImportacao', nome:'Tempo Médio Importação', tipo:'tempo', sufixo:'s'},
-    {key:'tempoRecalculo', nome:'Tempo Médio Recálculo', tipo:'tempo', sufixo:'s'},
-  ]},
-  {n:3, nome:'Relacionamento', kpis:[
+  {n:1, nome:'Relacionamento', kpis:[
     {key:'termometroCRM', nome:'Termômetro CRM', tipo:'termometro', subitens:['N1','N2','N3','N4']},
     {key:'ritos', nome:'Ritos', tipo:'ritos', subitens:['Acompanhamento Auditoria','Semanal Status Report','Mensal Resultados','Visitas Presenciais']},
-  ]},
-  {n:4, nome:'Atendimento', kpis:[
-    {key:'mediaCSAT', nome:'Média CSAT', tipo:'csat', sufixo:''},
-    {key:'diasAberto', nome:'Dias em Aberto', tipo:'diasAberto', sufixo:'d'},
-  ]},
-  {n:5, nome:'Resultado', kpis:[
-    {key:'subfaturamento', nome:'Subfaturamento', tipo:'subfat', sufixo:'%'},
-    {key:'contasAutomatico', nome:'Contas Automático', tipo:'contasAuto', sufixo:'%'},
   ]},
 ];
 
 const UPSELL_KPI_RATIONALE = {
-  penetracaoContas: 'Mede o % de contas do cliente cobertas por regras de auditoria automatizada. Normalização: o valor informado (0–100%) é convertido linearmente para uma escala de 0 a 10 (ex.: 80% → nota 8).',
-  penetracaoAuditores: 'Mede o % de auditores do cliente que efetivamente utilizam a ferramenta. Normalização: o valor informado (0–100%) é convertido linearmente para uma escala de 0 a 10 (ex.: 80% → nota 8).',
-  tempoImportacao: 'Tempo médio (em segundos) para importar as contas do cliente. Normalização: até 30s a nota é 10; a cada 30s adicionais, perde-se 1 ponto, até o mínimo de 0 — quanto mais rápido, melhor.',
-  tempoRecalculo: 'Tempo médio (em segundos) para recalcular as contas do cliente. Normalização: até 30s a nota é 10; a cada 30s adicionais, perde-se 1 ponto, até o mínimo de 0 — quanto mais rápido, melhor.',
   termometroCRM: 'Percepção de relacionamento junto aos contatos-chave (N1 a N4). Normalização: cada contato marcado como "Quente" soma 2,5 pontos, "Morno" soma 2 pontos e "Frio" soma 0, com o total limitado a 10.',
   ritos: 'Cadência de ritos de relacionamento realizados com o cliente (Acompanhamento Auditoria, Semanal Status Report, Mensal Resultados, Visitas Presenciais). Normalização: cada rito realizado soma 2,5 pontos, até o máximo de 10.',
-  mediaCSAT: 'Nota média de satisfação coletada com o cliente (escala de 0 a 5). Normalização: o valor informado é multiplicado por 2, resultando em um score de 0 a 10.',
-  diasAberto: 'Média de dias que os tickets do cliente ficam em aberto. Normalização: quanto menor o tempo, melhor a nota — até 5 dias = nota 10, caindo em faixas (8d→9, 10d→8, 12d→7 ...) até 0 a partir de 24 dias.',
-  subfaturamento: 'Percentual de subfaturamento identificado e corrigido pela auditoria. Normalização: por faixas crescentes de valor (quanto maior o % capturado, maior a nota), de 0 a 10.',
-  contasAutomatico: 'Percentual de contas do cliente finalizadas automaticamente, sem intervenção manual. Normalização: por faixas crescentes de valor (quanto maior o %, maior a nota), de 0 a 10.',
 };
 
 function clampNum(v, min, max){ return Math.min(max, Math.max(min, v)); }
@@ -2774,7 +2763,11 @@ function buildSeedFinanceiro(){
         'AC Camargo': {4:1546, 5:1162, 6:1446, 7:1414},
       }
     },
-    contasFinalizadasBudget: {}
+    contasFinalizadasBudget: {},
+    subfaturamento: {},
+    subfaturamentoBudget: {},
+    contasAutomatico: {},
+    contasAutomaticoBudget: {},
   };
 }
 
@@ -2910,6 +2903,12 @@ function runMigrations(parsed){
         parsed.financeiro.contasFinalizadasBudget = {};
         changed = true;
       }
+      // migrate: ensure Subfaturamento / % Contas Automático fields exist (metas criadas em Ago/2026)
+      if(parsed.financeiro){
+        ['subfaturamento','subfaturamentoBudget','contasAutomatico','contasAutomaticoBudget'].forEach(k => {
+          if(!parsed.financeiro[k]){ parsed.financeiro[k] = {}; changed = true; }
+        });
+      }
       // migrate: seed/convert NPS data to the manual per-client editable format
       if(!parsed.nps || Object.keys(parsed.nps).length === 0){
         parsed.nps = buildSeedNPSManual(parsed.clientes);
@@ -2972,20 +2971,37 @@ function runMigrations(parsed){
         });
         changed = true;
       }
-      // migrate: atualiza a Fonte de cada meta para o valor correto mais recente, pelo slug do indicador
+      // migrate: adiciona em "Gestão de Metas" as metas novas que passaram a existir em INDICADORES
+      // (ex.: Relacionamento reaproveita o slug 'upsell-score' já existente; Subfaturamento,
+      // % Contas Automático e Ticket Médio são metas novas de Ago/2026) — idempotente, por slug.
       if(parsed.metas){
-        const fonteBySlug = {};
-        INDICADORES.forEach(ind => { fonteBySlug[ind.slug] = ind.fonte; });
-        let fonteChanged = false;
+        const slugsExistentes = new Set(parsed.metas.map(m => m.slug).filter(Boolean));
+        const faltantes = INDICADORES.filter(ind => !slugsExistentes.has(ind.slug));
+        if(faltantes.length){
+          parsed.metas = [...parsed.metas, ...faltantes.map(ind => ({
+            id: uid(), slug: ind.slug, titulo: ind.titulo, descricao: ind.descricao,
+            fonte: ind.fonte, unidadeMedida: ind.unidade, pessoaIds: [], budgets: {},
+          }))];
+          changed = true;
+        }
+      }
+      // migrate: sincroniza título, descrição, unidade e fonte de cada meta com a definição mais
+      // recente do indicador correspondente (por slug) — permite renomear/redefinir um indicador em
+      // INDICADORES (ex.: "Upsell Score" -> "Relacionamento") e ter isso refletido em bases já salvas.
+      if(parsed.metas){
+        const indBySlug = {};
+        INDICADORES.forEach(ind => { indBySlug[ind.slug] = ind; });
+        let defsChanged = false;
         parsed.metas = parsed.metas.map(m => {
-          const fonteCorreta = m.slug && fonteBySlug[m.slug];
-          if(fonteCorreta && m.fonte !== fonteCorreta){
-            fonteChanged = true;
-            return {...m, fonte: fonteCorreta};
+          const ind = m.slug && indBySlug[m.slug];
+          if(!ind) return m;
+          if(m.titulo === ind.titulo && m.descricao === ind.descricao && m.fonte === ind.fonte && m.unidadeMedida === ind.unidade){
+            return m;
           }
-          return m;
+          defsChanged = true;
+          return {...m, titulo: ind.titulo, descricao: ind.descricao, fonte: ind.fonte, unidadeMedida: ind.unidade};
         });
-        if(fonteChanged) changed = true;
+        if(defsChanged) changed = true;
       }
       return {data: parsed, changed};
 }
@@ -3200,7 +3216,9 @@ function EmptyState({icon, title, sub, action}){
 --------------------------------------------------------------- */
 function fmtChartValue(v, unidade){
   if(v === null || v === undefined || isNaN(v)) return '—';
-  return unidade === '%' ? fmtPercent(v) : fmtNumber(v);
+  if(unidade === '%') return fmtPercent(v);
+  if(unidade === 'R$') return fmtCurrency(v);
+  return fmtNumber(v);
 }
 
 function BudgetChart({budgetsByMonth, realizedByMonth, unidade}){
@@ -3900,6 +3918,13 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
     return out;
   }
 
+  if(slug === 'ticket-medio'){
+    const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
+    const out = {};
+    MONTHS.forEach(m => { out[m.n] = computeTicketMedio(pnlYear[m.n]); });
+    return out;
+  }
+
   if(slug === 'upsell-score'){
     const yearData = (data.upsellScore && data.upsellScore[CURRENT_YEAR]) || {};
     const out = {};
@@ -3917,6 +3942,19 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
     MONTHS.forEach(m => {
       const has = clientNames.some(c => (yearData[c]||{})[m.n] !== undefined);
       out[m.n] = has ? clientNames.reduce((sum, c) => sum + (((yearData[c]||{})[m.n]) || 0), 0) : null;
+    });
+    return out;
+  }
+
+  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
+    const dataKey = slug === 'subfaturamento' ? 'subfaturamento' : 'contasAutomatico';
+    const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo']
+      .filter(c => !clienteNomesFilter || clienteNomesFilter.has(c));
+    const yearData = (data.financeiro && data.financeiro[dataKey] && data.financeiro[dataKey][CURRENT_YEAR]) || {};
+    const out = {};
+    MONTHS.forEach(m => {
+      const vals = clientNames.map(c => (yearData[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      out[m.n] = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
     });
     return out;
   }
@@ -4039,16 +4077,29 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
     return out;
   }
 
+  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
+    const budgetKey = slug === 'subfaturamento' ? 'subfaturamentoBudget' : 'contasAutomaticoBudget';
+    const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo']
+      .filter(c => !clienteNomesFilter || clienteNomesFilter.has(c));
+    const yearData = (data.financeiro && data.financeiro[budgetKey] && data.financeiro[budgetKey][CURRENT_YEAR]) || {};
+    const out = {};
+    MONTHS.forEach(m => {
+      const vals = clientNames.map(c => (yearData[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      out[m.n] = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+    });
+    return out;
+  }
+
   return null;
 }
 
 // Indicadores para os quais existe granularidade por cliente (Realizado, e às vezes Budget).
-// Os demais (ex.: Margem Bruta, que é uma razão do P&L da empresa como um todo) não têm quebra
-// por cliente e por isso não exibem a tabela Clientes x Meses.
+// Os demais (ex.: Margem Bruta e Ticket Médio, que são razões do P&L da empresa como um todo) não têm
+// quebra por cliente e por isso não exibem a tabela Clientes x Meses.
 const META_GRANULAR_CLIENTE_SLUGS = [
   'upsell-score','contas-finalizadas','penetracao-regras','efetividade-regras',
   'cobertura-dados','entregas-prazo','csat-tech','csat-atendimento','csat-produto',
-  'dias-ticket-aberto','nps',
+  'dias-ticket-aberto','nps','subfaturamento','contas-automatico',
 ];
 
 // Realizado de um indicador, para um cliente e mês específicos. Retorna null se não aplicável.
@@ -4059,6 +4110,12 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN)
   }
   if(slug === 'contas-finalizadas'){
     const yearData = (data.financeiro && data.financeiro.contasFinalizadas && data.financeiro.contasFinalizadas[CURRENT_YEAR]) || {};
+    const v = (yearData[clienteNome]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
+  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
+    const dataKey = slug === 'subfaturamento' ? 'subfaturamento' : 'contasAutomatico';
+    const yearData = (data.financeiro && data.financeiro[dataKey] && data.financeiro[dataKey][CURRENT_YEAR]) || {};
     const v = (yearData[clienteNome]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
   }
@@ -4115,6 +4172,12 @@ function getMetaBudgetPorClienteMes(slug, data, clienteId, clienteNome, mesN){
     const v = (yearData[clienteNome]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
   }
+  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
+    const budgetKey = slug === 'subfaturamento' ? 'subfaturamentoBudget' : 'contasAutomaticoBudget';
+    const yearData = (data.financeiro && data.financeiro[budgetKey] && data.financeiro[budgetKey][CURRENT_YEAR]) || {};
+    const v = (yearData[clienteNome]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
   if(slug === 'penetracao-regras' || slug === 'efetividade-regras'){
     const dataKey = slug === 'penetracao-regras' ? 'penetracaoRegrasBudget' : 'efetividadeRegrasBudget';
     const yearData = (data[dataKey] && data[dataKey][CURRENT_YEAR]) || {};
@@ -4133,7 +4196,7 @@ function GoalClienteMesTable({goal, data, clienteNomesFilter}){
 
   const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(goal.slug);
   const flatBudgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(goal.slug, data, clienteNomesFilter) : (goal.budgets[CURRENT_YEAR] || {});
-  const budgetIsPerCliente = ['contas-finalizadas','penetracao-regras','efetividade-regras'].includes(goal.slug);
+  const budgetIsPerCliente = ['contas-finalizadas','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico'].includes(goal.slug);
 
   return (
     <div style={{marginTop:14}}>
@@ -4219,6 +4282,7 @@ function GoalModal({initial, pessoas, onSave, onClose}){
           <select className="select" value={unidadeMedida} onChange={e=>setUnidadeMedida(e.target.value)}>
             <option value="%">%</option>
             <option value="Absoluto">Absoluto</option>
+            <option value="R$">R$</option>
           </select>
         </div>
       </div>
@@ -4287,6 +4351,91 @@ function GoalsSummaryTable({goals, data, clienteNomesFilter}){
                     return (
                       <td key={m.n} style={{fontWeight:600, color, fontFamily:'IBM Plex Mono, monospace'}}>
                         {pct >= 0 ? '+' : ''}{pct.toLocaleString('pt-BR', {maximumFractionDigits:0})}%
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Tabela-resumo com o valor Realizado de cada meta, mês a mês (mesmo formato de GoalsSummaryTable,
+// sem o cálculo de variação percentual).
+function GoalsRealizadoTable({goals, data, clienteNomesFilter}){
+  if(!goals.length) return null;
+  return (
+    <div className="card" style={{marginBottom:20}}>
+      <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+        <div>
+          <div className="section-block-title">Realizado · por mês</div>
+          <div className="section-block-desc">Valor realizado de cada meta, mês a mês.</div>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="upsell-tbl">
+          <thead>
+            <tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {goals.map(g => {
+              const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter) : null;
+              return (
+                <tr key={g.id}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{g.titulo}</td>
+                  {MONTHS.map(m => {
+                    const raw = realizadoByMonth ? realizadoByMonth[m.n] : null;
+                    const has = raw !== null && raw !== undefined;
+                    return (
+                      <td key={m.n} style={has ? {fontFamily:'IBM Plex Mono, monospace'} : {color:'#B7BACB'}}>
+                        {has ? fmtChartValue(raw, g.unidadeMedida) : '—'}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// Tabela-resumo com o valor de Budget de cada meta, mês a mês (mesmo formato de GoalsSummaryTable,
+// sem o cálculo de variação percentual).
+function GoalsBudgetTable({goals, data, clienteNomesFilter}){
+  if(!goals.length) return null;
+  return (
+    <div className="card" style={{marginBottom:20}}>
+      <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+        <div>
+          <div className="section-block-title">Budget · por mês</div>
+          <div className="section-block-desc">Valor de budget de cada meta, mês a mês.</div>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="upsell-tbl">
+          <thead>
+            <tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {goals.map(g => {
+              const isExterno = g.slug && META_BUDGET_EXTERNO_SLUGS.includes(g.slug);
+              const budgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(g.slug, data, clienteNomesFilter) : (g.budgets[CURRENT_YEAR] || {});
+              return (
+                <tr key={g.id}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{g.titulo}</td>
+                  {MONTHS.map(m => {
+                    const raw = budgetByMonth ? budgetByMonth[m.n] : undefined;
+                    const has = raw !== undefined && raw !== null && raw !== '';
+                    return (
+                      <td key={m.n} style={has ? {fontFamily:'IBM Plex Mono, monospace'} : {color:'#B7BACB'}}>
+                        {has ? fmtChartValue(Number(raw), g.unidadeMedida) : '—'}
                       </td>
                     );
                   })}
@@ -4400,6 +4549,8 @@ function GoalsPage({data, actions}){
       ) : (
         <>
           <GoalsSummaryTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter}/>
+          <GoalsRealizadoTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter}/>
+          <GoalsBudgetTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter}/>
           <div>
             {visibleGoals.map(g => (
               <GoalFullCard key={g.id} goal={g} pessoas={data.pessoas} data={data} clienteNomesFilter={clienteNomesFilter}
@@ -4798,6 +4949,39 @@ function MargemBrutaPage({financeiro, financeiroSync, actions}){
           </table>
         </div>
       </div>
+
+      <div className="card" style={{marginTop:16}}>
+        <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+          <div>
+            <div className="section-block-title">Ticket Médio · {CURRENT_YEAR}</div>
+            <div className="section-block-desc">Receita Líquida / número de clientes ({TICKET_MEDIO_CLIENTES}).</div>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="pnl-tbl">
+            <thead>
+              <tr>
+                <th></th>
+                {MONTHS.map(m => <th key={m.n}>{m.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="pnl-row-total">
+                <td>Ticket Médio</td>
+                {MONTHS.map(m => {
+                  const val = computeTicketMedio(pnlYear[m.n]);
+                  const formatted = fmtCurrency(val);
+                  return (
+                    <td key={m.n} className={formatted === null ? 'empty-val' : ''}>
+                      {formatted === null ? '—' : formatted}
+                    </td>
+                  );
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
@@ -4950,7 +5134,7 @@ function UpsellScorePage({upsellScore, clientes, actions}){
       <div className="section-block">
         <div className="kpi-hero">
           {lastMonth && <div className="kpi-hero-period">Última leitura · {lastMonth.label}/{CURRENT_YEAR}</div>}
-          <div className="kpi-hero-label">Upsell Score</div>
+          <div className="kpi-hero-label">Relacionamento</div>
           {lastTotal !== null ? (
             <div className={"kpi-hero-value" + (lastTotal >= 7 ? ' positive' : (lastTotal < 4 ? ' negative' : ''))} style={lastTotal>=4 && lastTotal<7 ? {color:'#F2CB8A'} : undefined}>
               {fmtScore(lastTotal)}<span style={{fontSize:20, opacity:0.6}}> / 10</span>
@@ -4958,7 +5142,7 @@ function UpsellScorePage({upsellScore, clientes, actions}){
           ) : (
             <div className="kpi-hero-value" style={{fontSize:22, color:'#9BA0B8'}}>Sem dados preenchidos</div>
           )}
-          <div className="kpi-hero-formula">Média simples dos 5 pilares, por cliente — total é a média das médias entre clientes</div>
+          <div className="kpi-hero-formula">Média entre Termômetro CRM e Ritos, por cliente — total é a média das médias entre clientes</div>
         </div>
       </div>
 
@@ -5113,6 +5297,148 @@ function ContasFinalizadasPage({financeiro, actions}){
       </div>
     </div>
   );
+}
+
+// Página genérica para metas percentuais preenchidas manualmente por cliente e mês (Realizado + Budget),
+// seguindo o mesmo modelo visual de ContasFinalizadasPage — usada por Subfaturamento e % Contas Automático.
+function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget}){
+  const data = (financeiro && financeiro[dataKey] && financeiro[dataKey][CURRENT_YEAR]) || {};
+  const budgetData = (financeiro && financeiro[budgetKey] && financeiro[budgetKey][CURRENT_YEAR]) || {};
+  const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
+
+  const colAvg = (source, m) => {
+    const vals = clientNames.map(c => (source[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+    return vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+  };
+
+  const filledMonths = MONTHS.filter(m => colAvg(data, m) !== null);
+  const lastMonth = filledMonths.length ? filledMonths[filledMonths.length - 1] : null;
+  const lastTotal = lastMonth ? colAvg(data, lastMonth) : null;
+
+  return (
+    <div>
+      <div className="section-block">
+        <div className="kpi-hero">
+          {lastMonth && <div className="kpi-hero-period">Último mês · {lastMonth.label}/{CURRENT_YEAR}</div>}
+          <div className="kpi-hero-label">{titulo}</div>
+          {lastTotal !== null ? (
+            <div className="kpi-hero-value positive">{fmtPercent(lastTotal)}</div>
+          ) : (
+            <div className="kpi-hero-value" style={{fontSize:22, color:'#9BA0B8'}}>Sem dados preenchidos</div>
+          )}
+          <div className="kpi-hero-formula">Média entre clientes, no mês</div>
+        </div>
+      </div>
+
+      <div className="card" style={{marginBottom:16}}>
+        <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+          <div>
+            <div className="section-block-title">{titulo} · {CURRENT_YEAR}</div>
+            <div className="section-block-desc">Preenchimento manual por cliente e mês.</div>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="upsell-tbl">
+            <thead>
+              <tr>
+                <th></th>
+                {MONTHS.map(m => <th key={m.n}>{m.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {clientNames.map(cliente => (
+                <tr key={cliente}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{cliente}</td>
+                  {MONTHS.map(m => {
+                    const raw = (data[cliente]||{})[m.n];
+                    return (
+                      <td key={m.n}>
+                        <input
+                          type="number"
+                          className="upsell-input"
+                          defaultValue={isEmptyVal(raw) ? '' : raw}
+                          key={m.n + '-' + (raw ?? '')}
+                          placeholder="—"
+                          step="0.1"
+                          onBlur={e => setRealizado(m.n, cliente, e.target.value === '' ? null : e.target.value)}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr className="upsell-pillar-row">
+                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                {MONTHS.map(m => {
+                  const t = colAvg(data, m);
+                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtPercent(t)}</td>;
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+          <div>
+            <div className="section-block-title">Budget · {titulo} · {CURRENT_YEAR}</div>
+            <div className="section-block-desc">Preenchimento manual por cliente e mês. Esse é o valor usado como Budget da meta em Gestão de Metas.</div>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="upsell-tbl">
+            <thead>
+              <tr>
+                <th></th>
+                {MONTHS.map(m => <th key={m.n}>{m.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {clientNames.map(cliente => (
+                <tr key={cliente}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{cliente}</td>
+                  {MONTHS.map(m => {
+                    const raw = (budgetData[cliente]||{})[m.n];
+                    return (
+                      <td key={m.n}>
+                        <input
+                          type="number"
+                          className="upsell-input"
+                          defaultValue={isEmptyVal(raw) ? '' : raw}
+                          key={m.n + '-' + (raw ?? '')}
+                          placeholder="—"
+                          step="0.1"
+                          onBlur={e => setBudget(m.n, cliente, e.target.value === '' ? null : e.target.value)}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr className="upsell-pillar-row">
+                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                {MONTHS.map(m => {
+                  const t = colAvg(budgetData, m);
+                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtPercent(t)}</td>;
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SubfaturamentoPage({financeiro, actions}){
+  return <PercentClientGoalPage titulo="Subfaturamento" financeiro={financeiro} dataKey="subfaturamento" budgetKey="subfaturamentoBudget"
+    setRealizado={actions.setSubfaturamentoRealizado} setBudget={actions.setSubfaturamentoBudget}/>;
+}
+
+function ContasAutomaticoPage({financeiro, actions}){
+  return <PercentClientGoalPage titulo="% Contas Automático" financeiro={financeiro} dataKey="contasAutomatico" budgetKey="contasAutomaticoBudget"
+    setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}/>;
 }
 
 function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKey, budgetSetActionName, titulo, formulaHint}){
@@ -5869,7 +6195,7 @@ function DiasTicketAbertoPage({data}){
 function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   const ind = INDICADORES.find(i => i.slug === slug);
   if(!ind) return <TrackingIndexPage/>;
-  if(slug === 'margem-bruta'){
+  if(slug === 'margem-bruta' || slug === 'ticket-medio'){
     return <MargemBrutaPage financeiro={financeiro} financeiroSync={data.financeiroSync} actions={actions}/>;
   }
   if(slug === 'upsell-score'){
@@ -5877,6 +6203,12 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   }
   if(slug === 'contas-finalizadas'){
     return <ContasFinalizadasPage financeiro={financeiro} actions={actions}/>;
+  }
+  if(slug === 'subfaturamento'){
+    return <SubfaturamentoPage financeiro={financeiro} actions={actions}/>;
+  }
+  if(slug === 'contas-automatico'){
+    return <ContasAutomaticoPage financeiro={financeiro} actions={actions}/>;
   }
   if(slug === 'efetividade-regras'){
     return <ManualPercentTablePage data={data} actions={actions} dataKey="efetividadeRegras" setActionName="setEfetividadeRegras"
@@ -6761,6 +7093,57 @@ function App(){
       yearData[clienteNome] = clienteData;
       contasFinalizadasBudget[CURRENT_YEAR] = yearData;
       financeiro.contasFinalizadasBudget = contasFinalizadasBudget;
+      return {...d, financeiro};
+    }, null),
+
+    // Subfaturamento e % Contas Automático (manual, por cliente/mês — Realizado e Budget),
+    // seguindo o mesmo modelo de dados de Contas Finalizadas.
+    setSubfaturamentoRealizado: (mesN, clienteNome, value) => mutate(d => {
+      const financeiro = {...d.financeiro};
+      const subfaturamento = {...(financeiro.subfaturamento||{})};
+      const yearData = {...(subfaturamento[CURRENT_YEAR]||{})};
+      const clienteData = {...(yearData[clienteNome]||{})};
+      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+      else { clienteData[mesN] = value; }
+      yearData[clienteNome] = clienteData;
+      subfaturamento[CURRENT_YEAR] = yearData;
+      financeiro.subfaturamento = subfaturamento;
+      return {...d, financeiro};
+    }, null),
+    setSubfaturamentoBudget: (mesN, clienteNome, value) => mutate(d => {
+      const financeiro = {...d.financeiro};
+      const subfaturamentoBudget = {...(financeiro.subfaturamentoBudget||{})};
+      const yearData = {...(subfaturamentoBudget[CURRENT_YEAR]||{})};
+      const clienteData = {...(yearData[clienteNome]||{})};
+      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+      else { clienteData[mesN] = value; }
+      yearData[clienteNome] = clienteData;
+      subfaturamentoBudget[CURRENT_YEAR] = yearData;
+      financeiro.subfaturamentoBudget = subfaturamentoBudget;
+      return {...d, financeiro};
+    }, null),
+    setContasAutomaticoRealizado: (mesN, clienteNome, value) => mutate(d => {
+      const financeiro = {...d.financeiro};
+      const contasAutomatico = {...(financeiro.contasAutomatico||{})};
+      const yearData = {...(contasAutomatico[CURRENT_YEAR]||{})};
+      const clienteData = {...(yearData[clienteNome]||{})};
+      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+      else { clienteData[mesN] = value; }
+      yearData[clienteNome] = clienteData;
+      contasAutomatico[CURRENT_YEAR] = yearData;
+      financeiro.contasAutomatico = contasAutomatico;
+      return {...d, financeiro};
+    }, null),
+    setContasAutomaticoBudget: (mesN, clienteNome, value) => mutate(d => {
+      const financeiro = {...d.financeiro};
+      const contasAutomaticoBudget = {...(financeiro.contasAutomaticoBudget||{})};
+      const yearData = {...(contasAutomaticoBudget[CURRENT_YEAR]||{})};
+      const clienteData = {...(yearData[clienteNome]||{})};
+      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+      else { clienteData[mesN] = value; }
+      yearData[clienteNome] = clienteData;
+      contasAutomaticoBudget[CURRENT_YEAR] = yearData;
+      financeiro.contasAutomaticoBudget = contasAutomaticoBudget;
       return {...d, financeiro};
     }, null),
 
