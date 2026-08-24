@@ -2205,6 +2205,7 @@ function buildDemandasMerged(customMap, baseRows){
       concluidoEm: concluidoEm,
       mesPlanning: c.mesPlanning || '',
       prioridade: c.prioridade || '',
+      esforco: (c.esforco === undefined || c.esforco === null || c.esforco === '') ? null : Number(c.esforco),
       atrasado: isDemandaAtrasado(prazo, o.s, concluidoEm),
       concluidaNoPrazo: isDemandaConcluidaNoPrazo(prazo, o.s, concluidoEm),
       editMeta: c._editMeta || {},
@@ -2243,8 +2244,7 @@ function randomHourSlot(){
 }
 
 const INDICADORES = [
-  {slug:'margem-bruta', titulo:'Margem Bruta', descricao:'(Receita Líquida - Folha Salarial - Custos Diretos) / Receita Líquida', unidade:'%', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
-  {slug:'ticket-medio', titulo:'Ticket Médio', descricao:'Receita Líquida / número de clientes (7).', unidade:'R$', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
+  {slug:'margem-bruta', titulo:'Margem Bruta & Ticket Médio', descricao:'Margem Bruta = (Receita Líquida - Folha Salarial - Custos Diretos) / Receita Líquida. Ticket Médio = Receita Líquida / número de clientes (7).', unidade:'%', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing'},
   {slug:'upsell-score', titulo:'Relacionamento', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
   {slug:'contas-finalizadas', titulo:'Contas Finalizadas', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
   {slug:'subfaturamento', titulo:'Subfaturamento', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
@@ -2971,9 +2971,18 @@ function runMigrations(parsed){
         });
         changed = true;
       }
+      // migrate: remove metas cujo slug não existe mais em INDICADORES (ex.: 'ticket-medio', que deixou
+      // de ser uma meta própria e passou a ser apenas uma linha dentro da meta "Margem Bruta & Ticket
+      // Médio"). Metas criadas manualmente pelo usuário (sem slug) nunca são afetadas por essa limpeza.
+      if(parsed.metas){
+        const slugsValidos = new Set(INDICADORES.map(i => i.slug));
+        const antes = parsed.metas.length;
+        parsed.metas = parsed.metas.filter(m => !m.slug || slugsValidos.has(m.slug));
+        if(parsed.metas.length !== antes) changed = true;
+      }
       // migrate: adiciona em "Gestão de Metas" as metas novas que passaram a existir em INDICADORES
-      // (ex.: Relacionamento reaproveita o slug 'upsell-score' já existente; Subfaturamento,
-      // % Contas Automático e Ticket Médio são metas novas de Ago/2026) — idempotente, por slug.
+      // (ex.: Relacionamento reaproveita o slug 'upsell-score' já existente; Subfaturamento e
+      // % Contas Automático são metas novas de Ago/2026) — idempotente, por slug.
       if(parsed.metas){
         const slugsExistentes = new Set(parsed.metas.map(m => m.slug).filter(Boolean));
         const faltantes = INDICADORES.filter(ind => !slugsExistentes.has(ind.slug));
@@ -3915,13 +3924,6 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
       const d = pnlYear[m.n];
       out[m.n] = d ? (d.grossProfit / d.receitaTotal * 100) : null;
     });
-    return out;
-  }
-
-  if(slug === 'ticket-medio'){
-    const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
-    const out = {};
-    MONTHS.forEach(m => { out[m.n] = computeTicketMedio(pnlYear[m.n]); });
     return out;
   }
 
@@ -6195,7 +6197,7 @@ function DiasTicketAbertoPage({data}){
 function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   const ind = INDICADORES.find(i => i.slug === slug);
   if(!ind) return <TrackingIndexPage/>;
-  if(slug === 'margem-bruta' || slug === 'ticket-medio'){
+  if(slug === 'margem-bruta'){
     return <MargemBrutaPage financeiro={financeiro} financeiroSync={data.financeiroSync} actions={actions}/>;
   }
   if(slug === 'upsell-score'){
@@ -6297,8 +6299,9 @@ function weekLabel(mondayDate){
   return dd + '/' + mm;
 }
 
-// Gráfico de barras (semana a semana) do nº de tickets abertos, com hover interativo.
-function WeeklyTicketsChart({weeks}){
+// Gráfico de barras (semana a semana) da métrica escolhida (Tickets ou Esforço), com hover interativo.
+function WeeklyTicketsChart({weeks, metricaLabel}){
+  const label = metricaLabel || 'Tickets';
   const wrapRef = useRef(null);
   const [hoverIdx, setHoverIdx] = useState(null);
   const [tooltipLeftPct, setTooltipLeftPct] = useState(50);
@@ -6365,7 +6368,7 @@ function WeeklyTicketsChart({weeks}){
         {hovered && (
           <div className="chart-tooltip" style={{left: tooltipLeftPct + '%'}}>
             <div className="chart-tooltip-title">Semana de {hovered.label}</div>
-            <div className="chart-tooltip-row"><span className="chart-tooltip-dot" style={{background:'var(--accent)'}}></span>Tickets abertos: <b>{hovered.count}</b></div>
+            <div className="chart-tooltip-row"><span className="chart-tooltip-dot" style={{background:'var(--accent)'}}></span>{label}: <b>{fmtNumber(hovered.count)}</b></div>
           </div>
         )}
       </div>
@@ -6374,16 +6377,20 @@ function WeeklyTicketsChart({weeks}){
 }
 
 // Quebra semana a semana (mesmas semanas do gráfico) para uma dimensão qualquer (pessoa, classificação, cliente...).
-function buildWeeklyBreakdown(filtered, keyFn){
+// dateField define qual data usar para o bucket semanal ('abertoEm', 'concluidoEm' ou 'prazo').
+// valueFn (opcional) define o valor somado por ticket; sem ele, cada ticket conta como 1 (contagem de tickets).
+function buildWeeklyBreakdown(filtered, keyFn, dateField, valueFn){
+  const campo = dateField || 'abertoEm';
   const rowsMap = {};
   filtered.forEach(m => {
-    if(!m.abertoEm) return;
-    const d = new Date(m.abertoEm);
+    if(!m[campo]) return;
+    const d = new Date(m[campo]);
     if(isNaN(d.getTime())) return;
     const weekKey = startOfWeekMonday(d).getTime();
     const nome = keyFn(m);
     if(!rowsMap[nome]) rowsMap[nome] = {};
-    rowsMap[nome][weekKey] = (rowsMap[nome][weekKey]||0) + 1;
+    const inc = valueFn ? valueFn(m) : 1;
+    rowsMap[nome][weekKey] = (rowsMap[nome][weekKey]||0) + inc;
   });
   const rows = Object.entries(rowsMap).map(([nome, counts]) => {
     const total = Object.values(counts).reduce((a,b)=>a+b,0);
@@ -6415,9 +6422,9 @@ function WeeklyBreakdownTable({titulo, weeks, rows}){
                   <td style={{textAlign:'left', paddingLeft:12, whiteSpace:'nowrap'}}>{r.nome}</td>
                   {weeks.map(w => {
                     const v = r.counts[w.key] || 0;
-                    return <td key={w.key} style={{fontFamily:'IBM Plex Mono, monospace', color: v ? 'var(--ink)' : '#C7CAD6'}}>{v || '—'}</td>;
+                    return <td key={w.key} style={{fontFamily:'IBM Plex Mono, monospace', color: v ? 'var(--ink)' : '#C7CAD6'}}>{v ? fmtNumber(v) : '—'}</td>;
                   })}
-                  <td style={{fontFamily:'IBM Plex Mono, monospace', fontWeight:700}}>{r.total}</td>
+                  <td style={{fontFamily:'IBM Plex Mono, monospace', fontWeight:700}}>{fmtNumber(r.total)}</td>
                 </tr>
               ))}
             </tbody>
@@ -6428,18 +6435,34 @@ function WeeklyBreakdownTable({titulo, weeks, rows}){
   );
 }
 
+// Campos de data disponíveis para os cálculos do resumo (bucket semanal).
+const DEMANDAS_RESUMO_CAMPOS_DATA = [
+  {key:'abertoEm', label:'Data Abertura', descLabel:'data de abertura'},
+  {key:'concluidoEm', label:'Data Conclusão', descLabel:'data de conclusão'},
+  {key:'prazo', label:'Data Prazo', descLabel:'data de prazo'},
+];
+
 // Resumo (gráfico semanal + tabelas de contagem) exibido entre os filtros e a listagem por cliente.
-// Responde aos mesmos filtros da tela (recebe a lista já filtrada).
+// Responde aos mesmos filtros da tela (recebe a lista já filtrada), além de dois seletores próprios:
+// a métrica exibida (Tickets = contagem, ou Esforço = soma do campo esforço) e o campo de data usado
+// para agrupar os tickets em semanas (Data Abertura, Data Conclusão ou Data Prazo).
 function DemandasResumoSection({filtered, devTeam}){
+  const [metrica, setMetrica] = useState('tickets'); // 'tickets' | 'esforco'
+  const [campoData, setCampoData] = useState('abertoEm'); // 'abertoEm' | 'concluidoEm' | 'prazo'
+
+  const valueFn = metrica === 'esforco' ? (m => Number(m.esforco) || 0) : null;
+  const metricaLabel = metrica === 'esforco' ? 'Esforço' : 'Tickets';
+
   const semanas = useMemo(() => {
     const buckets = {};
     filtered.forEach(m => {
-      if(!m.abertoEm) return;
-      const d = new Date(m.abertoEm);
+      if(!m[campoData]) return;
+      const d = new Date(m[campoData]);
       if(isNaN(d.getTime())) return;
       const monday = startOfWeekMonday(d);
       const key = monday.getTime();
-      buckets[key] = (buckets[key]||0) + 1;
+      const inc = valueFn ? valueFn(m) : 1;
+      buckets[key] = (buckets[key]||0) + inc;
     });
     const keys = Object.keys(buckets).map(Number);
     if(!keys.length) return [];
@@ -6450,35 +6473,57 @@ function DemandasResumoSection({filtered, devTeam}){
       out.push({ key: t, label: weekLabel(new Date(t)), count: buckets[t] || 0 });
     }
     return out;
-  }, [filtered]);
+  }, [filtered, campoData, metrica]);
 
-  const porSuporte = useMemo(() => buildWeeklyBreakdown(filtered, m => m.responsavel || 'Sem responsável'), [filtered]);
+  const porSuporte = useMemo(() => buildWeeklyBreakdown(filtered, m => m.responsavel || 'Sem responsável', campoData, valueFn), [filtered, campoData, metrica]);
   const porDev = useMemo(() => {
     const devById = Object.fromEntries(devTeam.map(p => [p.id, p.nome]));
-    return buildWeeklyBreakdown(filtered, m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído');
-  }, [filtered, devTeam]);
-  const porClassificacao = useMemo(() => buildWeeklyBreakdown(filtered, m => m.classificacao || 'Sem classificação'), [filtered]);
-  const porCliente = useMemo(() => buildWeeklyBreakdown(filtered, m => m.cliente || 'Sem cliente'), [filtered]);
+    return buildWeeklyBreakdown(filtered, m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído', campoData, valueFn);
+  }, [filtered, devTeam, campoData, metrica]);
+  const porClassificacao = useMemo(() => buildWeeklyBreakdown(filtered, m => m.classificacao || 'Sem classificação', campoData, valueFn), [filtered, campoData, metrica]);
+  const porCliente = useMemo(() => buildWeeklyBreakdown(filtered, m => m.cliente || 'Sem cliente', campoData, valueFn), [filtered, campoData, metrica]);
 
   const mediaDiasAberto = useMemo(() => avgOf(filtered.map(m => m.diasEmAberto)), [filtered]);
+  const totalMetrica = useMemo(() => metrica === 'esforco'
+    ? filtered.reduce((acc, m) => acc + (Number(m.esforco) || 0), 0)
+    : filtered.length, [filtered, metrica]);
 
   if(!filtered.length) return null;
 
   return (
     <div className="card card-pad" style={{marginBottom:20}}>
+      <div style={{display:'flex', flexWrap:'wrap', alignItems:'center', gap:10, marginBottom:16}}>
+        <div className="demandas-filter-label" style={{marginBottom:0}}>Variável:</div>
+        <div className="chip-row" style={{marginBottom:0}}>
+          <button type="button" className={"status-filter-chip" + (metrica==='tickets' ? ' active' : '')}
+            style={metrica==='tickets' ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : undefined}
+            onClick={()=>setMetrica('tickets')}>Tickets</button>
+          <button type="button" className={"status-filter-chip" + (metrica==='esforco' ? ' active' : '')}
+            style={metrica==='esforco' ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : undefined}
+            onClick={()=>setMetrica('esforco')}>Esforço</button>
+        </div>
+        <div className="demandas-filter-label" style={{marginBottom:0, marginLeft:10}}>Data considerada:</div>
+        <div className="chip-row" style={{marginBottom:0}}>
+          {DEMANDAS_RESUMO_CAMPOS_DATA.map(c => (
+            <button key={c.key} type="button" className={"status-filter-chip" + (campoData===c.key ? ' active' : '')}
+              style={campoData===c.key ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : undefined}
+              onClick={()=>setCampoData(c.key)}>{c.label}</button>
+          ))}
+        </div>
+      </div>
       <div style={{display:'flex', gap:14, marginBottom:18}}>
         <div style={{flex:1, background:'var(--accent-soft)', borderRadius:'var(--radius-md)', padding:'14px 18px'}}>
-          <div style={{fontFamily:'var(--font-mono)', fontSize:11, color:'var(--accent-ink)', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:4}}>Total Tickets</div>
-          <div style={{fontFamily:'var(--font-display)', fontSize:26, fontWeight:600, color:'var(--ink)'}}>{filtered.length}</div>
+          <div style={{fontFamily:'var(--font-mono)', fontSize:11, color:'var(--accent-ink)', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:4}}>Total {metricaLabel}</div>
+          <div style={{fontFamily:'var(--font-display)', fontSize:26, fontWeight:600, color:'var(--ink)'}}>{fmtNumber(totalMetrica)}</div>
         </div>
         <div style={{flex:1, background:'var(--accent-soft)', borderRadius:'var(--radius-md)', padding:'14px 18px'}}>
           <div style={{fontFamily:'var(--font-mono)', fontSize:11, color:'var(--accent-ink)', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:4}}>Média dias aberto</div>
           <div style={{fontFamily:'var(--font-display)', fontSize:26, fontWeight:600, color:'var(--ink)'}}>{mediaDiasAberto === null ? '—' : mediaDiasAberto.toFixed(1)}</div>
         </div>
       </div>
-      <div className="section-block-title" style={{marginBottom:4}}>Tickets abertos por semana</div>
-      <div className="section-block-desc" style={{marginBottom:12}}>Considera os tickets que respeitam os filtros acima, pela data de abertura (nº {filtered.length}).</div>
-      <WeeklyTicketsChart weeks={semanas}/>
+      <div className="section-block-title" style={{marginBottom:4}}>{metricaLabel} por semana</div>
+      <div className="section-block-desc" style={{marginBottom:12}}>Considera os tickets que respeitam os filtros acima, pela {(DEMANDAS_RESUMO_CAMPOS_DATA.find(c => c.key === campoData) || DEMANDAS_RESUMO_CAMPOS_DATA[0]).descLabel} (nº {filtered.length}).</div>
+      <WeeklyTicketsChart weeks={semanas} metricaLabel={metricaLabel}/>
 
       <WeeklyBreakdownTable titulo="Por pessoa de suporte" weeks={semanas} rows={porSuporte}/>
       <WeeklyBreakdownTable titulo="Por pessoa de desenvolvimento" weeks={semanas} rows={porDev}/>
@@ -6735,6 +6780,7 @@ function DemandasClienteTable({cliente, rows, devTeam, actions}){
                 <th>Status</th>
                 <th>Urgência</th>
                 <th>Prioridade</th>
+                <th>Esforço</th>
                 <th>Prazo</th>
                 <th>Concluído em</th>
                 <th>CSAT</th>
@@ -6775,6 +6821,18 @@ function DemandaRow({row, devTeam, actions}){
           <option value="">—</option>
           {DEMANDA_PRIORIDADE_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
         </select>
+      </td>
+      <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.esforco) || undefined}>
+        <input
+          type="number"
+          className="upsell-input"
+          defaultValue={row.esforco === null ? '' : row.esforco}
+          key={row.numero + '-esforco-' + (row.esforco ?? '')}
+          placeholder="—"
+          step="0.5"
+          min="0"
+          onBlur={e => actions.updateDemandaCustom(row.numero, {esforco: e.target.value === '' ? null : e.target.value})}
+        />
       </td>
       <td className="demanda-prazo-cell">
         <input
