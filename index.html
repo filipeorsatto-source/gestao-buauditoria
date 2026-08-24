@@ -769,6 +769,23 @@ const MOVIDESK_CLIENT_MAP = {
   'Rivio': 'Interno',
 };
 
+// Remove acentuação, normaliza espaços/traços e caixa — usado para casar o nome de cliente da
+// planilha com MOVIDESK_CLIENT_MAP mesmo quando o Movidesk exporta com pequenas variações de
+// grafia (ex.: "Sírio Libanes - São Paulo" sem o acento em "Libanês", espaçamento diferente ao
+// redor do traço etc.), que antes faziam a linha ser silenciosamente ignorada.
+const DIACRITICS_RE = new RegExp('[̀-ͯ]', 'g');
+function normalizeClientName(s){
+  return String(s || '')
+    .normalize('NFD').replace(DIACRITICS_RE, '')
+    .toLowerCase()
+    .replace(/\s*-\s*/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const MOVIDESK_CLIENT_MAP_NORMALIZED = Object.fromEntries(
+  Object.entries(MOVIDESK_CLIENT_MAP).map(([nome, mapped]) => [normalizeClientName(nome), mapped])
+);
+
 // Converte as linhas cruas da planilha (array de arrays, cabeçalho na linha 0) no mesmo formato
 // usado por DEMANDAS_SEED: {n, a, s, u, c, r, d}. Colunas esperadas (nessa ordem): Número, Assunto,
 // Categoria, Status, Urgência, Serviço (1º Nível), Cliente (Organização), Responsável, Aberto em.
@@ -794,7 +811,10 @@ function transformMovideskRows(rows){
     const abertoEmRaw = row[8];
     if(numero === undefined || numero === null || numero === '' || !clienteRaw || !status || !abertoEmRaw){ skippedMissingFields++; continue; }
     const firstClient = String(clienteRaw).split(',')[0].trim();
-    const mapped = MOVIDESK_CLIENT_MAP[firstClient];
+    // Casa primeiro pelo nome exato; se não bater, tenta pelo nome normalizado (sem acento, sem
+    // diferenças de espaçamento/maiúsculas) — cobre pequenas variações de grafia na exportação do
+    // Movidesk sem precisar atualizar o mapeamento a cada mudança cosmética.
+    const mapped = MOVIDESK_CLIENT_MAP[firstClient] || MOVIDESK_CLIENT_MAP_NORMALIZED[normalizeClientName(firstClient)];
     if(!mapped){ unmappedClients[firstClient] = (unmappedClients[firstClient]||0) + 1; continue; }
     const d = (abertoEmRaw instanceof Date) ? abertoEmRaw : new Date(abertoEmRaw);
     if(isNaN(d.getTime())){ skippedInvalidDate++; continue; }
