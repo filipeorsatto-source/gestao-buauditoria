@@ -750,13 +750,19 @@ function computeTicketMedio(pnlMonthData){
   return pnlMonthData.receitaTotal / TICKET_MEDIO_CLIENTES;
 }
 
-// Pasta do Drive + nome do arquivo "Movidesk.xlsx" que o Orsatto atualiza periodicamente (exporta do
-// Movidesk, exclui o arquivo antigo nessa pasta e sobe um novo com o mesmo nome). Como excluir e
-// subir de novo cria um ARQUIVO NOVO no Drive (com um ID diferente a cada vez, mesmo com o nome
-// idêntico), o botão "Atualizar base do Movidesk" não pode depender de um ID fixo — em vez disso,
-// ele busca pelo nome dentro dessa pasta a cada sincronização (ver handleSyncMovidesk) e usa sempre
-// o arquivo mais recente encontrado. Isso também cobre o caso do Drive converter automaticamente o
-// upload para uma planilha nativa do Google Sheets (troca o método de download conforme o mimeType).
+// Nome do arquivo "Movidesk.xlsx" que o Orsatto atualiza periodicamente (exporta do Movidesk, exclui
+// o arquivo antigo e sobe um novo com o mesmo nome). Como excluir e subir de novo cria um ARQUIVO
+// NOVO no Drive (com um ID diferente a cada vez, mesmo com o nome idêntico), o botão "Atualizar base
+// do Movidesk" não pode depender de um ID fixo — em vez disso, ele busca pelo nome a cada
+// sincronização (ver handleSyncMovidesk) e usa sempre o arquivo mais recente encontrado. Isso também
+// cobre o caso do Drive converter automaticamente o upload para uma planilha nativa do Google Sheets
+// (troca o método de download conforme o mimeType).
+//
+// A busca tenta primeiro dentro de MOVIDESK_DRIVE_FOLDER_ID (mais rápido e específico); se não achar
+// nada lá, cai para uma busca pelo nome em todo o Drive do usuário (sem restrição de pasta). Esse
+// fallback existe porque uma pasta acessada via "Compartilhados comigo" no Drive costuma ser um
+// ATALHO (shortcut), que tem um ID PRÓPRIO diferente do ID real da pasta de destino — então o ID
+// copiado da barra de endereço pode não bater com o "in parents" de fato usado pela API.
 const MOVIDESK_DRIVE_FOLDER_ID = '1IpVv7L7U3UvSxPoTqZTXoL9ZbKsWBwAK';
 const MOVIDESK_DRIVE_FILENAME = 'Movidesk.xlsx';
 
@@ -6610,21 +6616,28 @@ function DemandasPage({data, actions}){
       const accessToken = credential && credential.accessToken;
       if(!accessToken) throw new Error('Não foi possível obter permissão de acesso ao Google Drive.');
 
-      // Busca o arquivo pelo NOME dentro da pasta (em vez de um ID fixo): o Orsatto atualiza a base
-      // excluindo o arquivo antigo e subindo um novo com o mesmo nome, e isso gera um ID novo no Drive
-      // a cada vez — um ID fixo no código ficaria desatualizado no próximo replace.
-      const query = `'${MOVIDESK_DRIVE_FOLDER_ID}' in parents and name = '${MOVIDESK_DRIVE_FILENAME}' and trashed = false`;
-      const listRes = await fetch(
-        'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(query)
-        + '&fields=' + encodeURIComponent('files(id,name,mimeType,modifiedTime)')
-        + '&orderBy=' + encodeURIComponent('modifiedTime desc')
-        + '&pageSize=5',
-        { headers: { Authorization: 'Bearer ' + accessToken } }
-      );
-      if(!listRes.ok) throw new Error('Não foi possível localizar o arquivo "' + MOVIDESK_DRIVE_FILENAME + '" no Drive (HTTP ' + listRes.status + ').');
-      const listData = await listRes.json();
-      const file = listData.files && listData.files[0];
-      if(!file) throw new Error('Nenhum arquivo chamado "' + MOVIDESK_DRIVE_FILENAME + '" foi encontrado na pasta configurada. Confirme se o nome e a pasta continuam os mesmos.');
+      // Busca o arquivo pelo NOME (em vez de um ID fixo): o Orsatto atualiza a base excluindo o
+      // arquivo antigo e subindo um novo com o mesmo nome, e isso gera um ID novo no Drive a cada vez
+      // — um ID fixo no código ficaria desatualizado no próximo replace.
+      const driveFilesQuery = async (query) => {
+        const listRes = await fetch(
+          'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(query)
+          + '&fields=' + encodeURIComponent('files(id,name,mimeType,modifiedTime)')
+          + '&orderBy=' + encodeURIComponent('modifiedTime desc')
+          + '&pageSize=5',
+          { headers: { Authorization: 'Bearer ' + accessToken } }
+        );
+        if(!listRes.ok) throw new Error('Não foi possível localizar o arquivo "' + MOVIDESK_DRIVE_FILENAME + '" no Drive (HTTP ' + listRes.status + ').');
+        const listData = await listRes.json();
+        return (listData.files && listData.files[0]) || null;
+      };
+      // 1ª tentativa: restrita à pasta configurada (mais específica). 2ª tentativa (fallback): busca
+      // pelo nome em todo o Drive do usuário, sem restrição de pasta — cobre o caso comum de a pasta
+      // ter sido acessada via "Compartilhados comigo" como um ATALHO, cujo ID não é o mesmo ID real
+      // usado internamente pela API como "parent" do arquivo.
+      let file = await driveFilesQuery(`'${MOVIDESK_DRIVE_FOLDER_ID}' in parents and name = '${MOVIDESK_DRIVE_FILENAME}' and trashed = false`);
+      if(!file) file = await driveFilesQuery(`name = '${MOVIDESK_DRIVE_FILENAME}' and trashed = false`);
+      if(!file) throw new Error('Nenhum arquivo chamado "' + MOVIDESK_DRIVE_FILENAME + '" foi encontrado no Drive (nem na pasta configurada, nem em uma busca geral). Confirme se o nome do arquivo continua exatamente "' + MOVIDESK_DRIVE_FILENAME + '".');
 
       // O arquivo pode ser um .xlsx binário de verdade (mimeType do Office) ou ter sido convertido
       // automaticamente pelo Drive para uma planilha nativa do Google Sheets no upload — cada um exige
