@@ -6620,11 +6620,16 @@ function DemandasPage({data, actions}){
       // arquivo antigo e subindo um novo com o mesmo nome, e isso gera um ID novo no Drive a cada vez
       // — um ID fixo no código ficaria desatualizado no próximo replace.
       const driveFilesQuery = async (query) => {
+        // supportsAllDrives/includeItemsFromAllDrives/corpora=allDrives: sem isso, a busca da API do
+        // Drive por padrão só enxerga "Meu Drive" + itens compartilhados diretamente — arquivos que
+        // vivem dentro de um Drive Compartilhado (Shared Drive) da organização (comum em contas
+        // Workspace como a da Rivio) ficam de fora da busca mesmo aparecendo normalmente na interface.
         const listRes = await fetch(
           'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(query)
           + '&fields=' + encodeURIComponent('files(id,name,mimeType,modifiedTime)')
           + '&orderBy=' + encodeURIComponent('modifiedTime desc')
-          + '&pageSize=5',
+          + '&pageSize=5'
+          + '&supportsAllDrives=true&includeItemsFromAllDrives=true&corpora=allDrives',
           { headers: { Authorization: 'Bearer ' + accessToken } }
         );
         if(!listRes.ok) throw new Error('Não foi possível localizar o arquivo "' + MOVIDESK_DRIVE_FILENAME + '" no Drive (HTTP ' + listRes.status + ').');
@@ -6643,9 +6648,11 @@ function DemandasPage({data, actions}){
       // automaticamente pelo Drive para uma planilha nativa do Google Sheets no upload — cada um exige
       // um jeito diferente de baixar o conteúdo.
       const isGoogleSheet = file.mimeType === 'application/vnd.google-apps.spreadsheet';
+      // supportsAllDrives=true é necessário no download binário (?alt=media) quando o arquivo vive
+      // dentro de um Drive Compartilhado; o endpoint de export não usa/aceita esse parâmetro.
       const downloadUrl = isGoogleSheet
         ? 'https://www.googleapis.com/drive/v3/files/' + file.id + '/export?mimeType=' + encodeURIComponent('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        : 'https://www.googleapis.com/drive/v3/files/' + file.id + '?alt=media';
+        : 'https://www.googleapis.com/drive/v3/files/' + file.id + '?alt=media&supportsAllDrives=true';
       const res = await fetch(downloadUrl, { headers: { Authorization: 'Bearer ' + accessToken } });
       if(!res.ok) throw new Error('Não foi possível baixar a planilha do Drive (HTTP ' + res.status + ').');
       const buf = await res.arrayBuffer();
