@@ -747,7 +747,9 @@ const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','
 const TICKET_MEDIO_CLIENTES = 7;
 function computeTicketMedio(pnlMonthData){
   if(!pnlMonthData || pnlMonthData.receitaTotal === undefined || pnlMonthData.receitaTotal === null) return null;
-  return pnlMonthData.receitaTotal / TICKET_MEDIO_CLIENTES;
+  // Sempre arredondado, sem casas decimais — usado em toda exibição de Ticket Médio (Margem Bruta,
+  // Gestão de Metas, gráficos).
+  return Math.round(pnlMonthData.receitaTotal / TICKET_MEDIO_CLIENTES);
 }
 
 // Nome do arquivo "Movidesk.xlsx" que o Orsatto atualiza periodicamente (exporta do Movidesk, exclui
@@ -810,6 +812,13 @@ function transformMovideskRows(rows){
   let skippedMissingFields = 0;
   let skippedInvalidDate = 0;
   const totalDataRows = Math.max(0, rows.length - 1);
+
+  // Coluna "Resolvido Em" localizada pelo nome do cabeçalho (linha 0), em vez de uma posição fixa —
+  // diferente das colunas históricas acima (Número, Assunto, ...), essa foi adicionada depois e pode
+  // estar em qualquer posição da planilha, além de poder não existir ainda em exportações antigas.
+  const headerRow = rows[0] || [];
+  const resolvidoEmCol = headerRow.findIndex(h => normalizeClientName(String(h||'')) === 'resolvido em');
+
   for(let i = 1; i < rows.length; i++){
     const row = rows[i];
     if(!row) continue;
@@ -831,6 +840,21 @@ function transformMovideskRows(rows){
     if(isNaN(d.getTime())){ skippedInvalidDate++; continue; }
     const iso = d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate()) + 'T'
       + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+
+    // "Resolvido Em" — se a coluna existe e tem um valor legível como data, vira a data de conclusão
+    // automática do ticket (substitui o preenchimento manual de "Concluído em" nas Demandas).
+    let resolvidoEmIso = '';
+    if(resolvidoEmCol !== -1){
+      const raw = row[resolvidoEmCol];
+      if(raw){
+        const rd = (raw instanceof Date) ? raw : new Date(raw);
+        if(!isNaN(rd.getTime())){
+          resolvidoEmIso = rd.getFullYear() + '-' + pad2(rd.getMonth()+1) + '-' + pad2(rd.getDate()) + 'T'
+            + pad2(rd.getHours()) + ':' + pad2(rd.getMinutes()) + ':' + pad2(rd.getSeconds());
+        }
+      }
+    }
+
     out.push({
       n: String(numero).trim(),
       a: (assunto || '').toString().trim(),
@@ -839,6 +863,7 @@ function transformMovideskRows(rows){
       c: mapped,
       r: (responsavel || '').toString().trim(),
       d: iso,
+      re: resolvidoEmIso,
     });
   }
   const stats = {
@@ -892,7 +917,9 @@ const FINANCE_ROW_MAP = {
   '(=) EBITDA / burn': 'ebitda',
 };
 
-const FINANCE_CLIENT_ROWS = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
+// Lista histórica de clientes (usada apenas como fallback quando ainda não há nenhuma sincronização —
+// a partir da sincronização, a lista real de sub-linhas é detectada dinamicamente a partir da planilha).
+const FINANCE_CLIENT_ROWS_FALLBACK = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
 
 // Números no formato brasileiro (ponto = separador de milhar, vírgula = decimal). Também aceita
 // negativos com "-" na frente.
@@ -930,7 +957,16 @@ function parseCSVText(text){
 }
 
 // Converte as linhas cruas do CSV exportado da aba Finance no formato { [mesN]: {receitaTotal,
-// receitaPorCliente:{...}, taxasReceita, cogs, payroll, grossProfit, gea, sem, ebitda} }.
+// receitaPorCliente:{...}, taxasReceita, cogs, payroll, grossProfit, gea, sem, ebitda,
+// subLinhas:{ [mainKey]: {label: valor} }, subLinhasOrder:{ [mainKey]: [label, ...] }} }.
+//
+// Qualquer linha da aba que não seja uma das linhas principais conhecidas (FINANCE_ROW_MAP) é tratada
+// como um detalhamento (sub-linha) da última linha principal encontrada acima dela — por exemplo, os
+// clientes listados logo abaixo de "Total revenues", ou categorias como "Tecnologia"/"Viagens" logo
+// abaixo de "(-) COGS". Isso é detectado dinamicamente a partir da própria planilha, então novas linhas
+// adicionadas na aba Finance (sob qualquer linha principal) aparecem automaticamente no painel, sem
+// precisar de alteração de código. Sub-linhas de "Total revenues" continuam no campo `receitaPorCliente`
+// por compatibilidade com dados já sincronizados antes desta mudança; as demais vão em `subLinhas`.
 function transformFinanceRows(rows){
   let headerRowIdx = -1, monthStartCol = -1;
   for(let i = 0; i < rows.length && headerRowIdx === -1; i++){
@@ -952,26 +988,151 @@ function transformFinanceRows(rows){
   const labelCol = monthStartCol - 1;
   const monthsData = {};
   let foundTotalRevenues = false;
+  let lastMainKey = null;
+  const subLinhasOrder = {}; // { mainKey: [label, ...] } — mesma ordem/estrutura para o ano inteiro
+
+  const ensureMonth = (n) => {
+    if(!monthsData[n]) monthsData[n] = {receitaPorCliente:{}, subLinhas:{}};
+  };
 
   for(let i = headerRowIdx + 1; i < rows.length; i++){
     const row = rows[i] || [];
     const label = String(row[labelCol] || '').trim();
     if(!label) continue;
     const key = FINANCE_ROW_MAP[label];
-    const isClientRow = FINANCE_CLIENT_ROWS.includes(label);
-    if(!key && !isClientRow) continue;
-    if(label === 'Total revenues') foundTotalRevenues = true;
+
+    if(key){
+      lastMainKey = key;
+      if(label === 'Total revenues') foundTotalRevenues = true;
+      monthCols.forEach(({col, n}) => {
+        const val = parseBRNumber(row[col]);
+        if(val === null) return;
+        ensureMonth(n);
+        monthsData[n][key] = val;
+      });
+      continue;
+    }
+
+    if(!lastMainKey) continue; // linha antes de qualquer linha principal reconhecida — ignora
+    if(!subLinhasOrder[lastMainKey]) subLinhasOrder[lastMainKey] = [];
+    if(!subLinhasOrder[lastMainKey].includes(label)) subLinhasOrder[lastMainKey].push(label);
+
     monthCols.forEach(({col, n}) => {
       const val = parseBRNumber(row[col]);
       if(val === null) return;
-      if(!monthsData[n]) monthsData[n] = {receitaPorCliente:{}};
-      if(isClientRow) monthsData[n].receitaPorCliente[label] = val;
-      else monthsData[n][key] = val;
+      ensureMonth(n);
+      if(lastMainKey === 'receitaTotal') monthsData[n].receitaPorCliente[label] = val;
+      else{
+        if(!monthsData[n].subLinhas[lastMainKey]) monthsData[n].subLinhas[lastMainKey] = {};
+        monthsData[n].subLinhas[lastMainKey][label] = val;
+      }
     });
   }
 
   if(!foundTotalRevenues) throw new Error('A aba não contém a linha "Total revenues" — confirme se a primeira aba da planilha "Gestão Metas" é a aba "Finance".');
+  Object.keys(monthsData).forEach(n => { monthsData[n].subLinhasOrder = subLinhasOrder; });
   return monthsData;
+}
+
+/* ---------------------------------------------------------------
+   CONTAS FINALIZADAS / % CONTAS AUTOMÁTICO / PENETRAÇÃO REGRAS / EFETIVIDADE REGRAS —
+   sincronização com abas dedicadas na mesma planilha "Gestão Metas" usada pela Margem Bruta. Cada
+   aba tem uma linha por cliente e os meses (abreviados: Jan, Fev, ...) nas colunas. Diferente da
+   Margem Bruta (que exporta a aba Finance como CSV via Drive — só funciona para a primeira aba do
+   arquivo), aqui é usada a API do Google Sheets para ler cada aba pelo nome.
+--------------------------------------------------------------- */
+const MONTH_ABBR_TO_N = {
+  'Jan':1, 'Fev':2, 'Mar':3, 'Abr':4, 'Mai':5, 'Jun':6,
+  'Jul':7, 'Ago':8, 'Set':9, 'Out':10, 'Nov':11, 'Dez':12,
+};
+
+// Nome da aba, na planilha "Gestão Metas", de onde vem o Realizado de cada uma dessas 4 metas.
+const REALIZADO_SHEET_TAB = {
+  'contas-finalizadas': 'Contas Finalizadas',
+  'contas-automatico': 'Contas Automáticas',
+  'penetracao-regras': 'Penetração Regras',
+  'efetividade-regras': 'Efetividade Regras',
+};
+
+// Nomes canônicos de cliente usados no restante do painel — usado para casar com o nome como aparece
+// nas abas de sincronização, de forma insensível a acento/maiúsculas (ex.: evita divergências sutis
+// como "Sírio SP" vs "Sirio SP").
+const CANONICAL_CLIENT_NAMES_NORMALIZED = Object.fromEntries(FINANCE_CLIENT_ROWS_FALLBACK.map(n => [normalizeClientName(n), n]));
+function canonicalizeClientName(nome){
+  return CANONICAL_CLIENT_NAMES_NORMALIZED[normalizeClientName(nome)] || nome;
+}
+
+// Obtém um access token do Google com permissão de leitura no Drive — mesmo fluxo usado pelas
+// sincronizações de Margem Bruta e do Movidesk, reaproveitado aqui.
+async function getGoogleDriveAccessToken(){
+  const fb = await waitForFirebase();
+  const provider = new fb.GoogleAuthProvider();
+  provider.addScope('https://www.googleapis.com/auth/drive.readonly');
+  const result = await fb.signInWithPopup(fb.auth, provider);
+  const credential = fb.credentialFromResult ? fb.credentialFromResult(result) : null;
+  const accessToken = credential && credential.accessToken;
+  if(!accessToken) throw new Error('Não foi possível obter permissão de acesso ao Google Drive.');
+  return accessToken;
+}
+
+// Lê uma aba específica (por nome) da planilha "Gestão Metas" via API do Google Sheets — diferente do
+// export de CSV do Drive (usado pela Margem Bruta), que só consegue exportar a primeira aba do
+// arquivo. O escopo de leitura do Drive (acima) já é suficiente para essa chamada.
+async function fetchSheetTabValues(accessToken, sheetName){
+  const range = encodeURIComponent(`'${sheetName}'!A1:Z300`);
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${MARGEM_BRUTA_SHEET_ID}/values/${range}`, {
+    headers: { Authorization: 'Bearer ' + accessToken },
+  });
+  if(!res.ok) throw new Error(`Não foi possível ler a aba "${sheetName}" da planilha (HTTP ${res.status}). Confirme se o nome da aba continua o mesmo.`);
+  const json = await res.json();
+  return json.values || [];
+}
+
+// Como parseBRNumber, mas também aceita valores percentuais (ex.: "67%" -> 67).
+function parseBRNumberOrPercent(str){
+  if(str === undefined || str === null) return null;
+  const s = String(str).replace('%', '').trim();
+  if(s === '') return null;
+  return parseBRNumber(s);
+}
+
+// Converte os valores brutos de uma aba no formato "cliente nas linhas, Jan..Dez (abreviado) nas
+// colunas" em { [nomeCanônicoDoCliente]: {mesN: valor} }. Ignora a linha "Total" (calculada pelo
+// próprio painel) e qualquer linha sem uma das colunas de mês reconhecida.
+function parseClienteMesSheet(values){
+  let headerRowIdx = -1, monthStartCol = -1;
+  for(let i = 0; i < values.length && headerRowIdx === -1; i++){
+    const row = values[i] || [];
+    for(let j = 0; j < row.length; j++){
+      if(MONTH_ABBR_TO_N[String(row[j]).trim()]){ headerRowIdx = i; monthStartCol = j; break; }
+    }
+  }
+  if(headerRowIdx === -1) throw new Error('Não foi possível localizar o cabeçalho de meses (Jan, Fev, ...) na aba.');
+
+  const headerRow = values[headerRowIdx];
+  const monthCols = [];
+  for(let j = monthStartCol; j < headerRow.length; j++){
+    const n = MONTH_ABBR_TO_N[String(headerRow[j]).trim()];
+    if(n) monthCols.push({col: j, n});
+  }
+  if(!monthCols.length) throw new Error('Nenhum mês reconhecido no cabeçalho da aba.');
+
+  const labelCol = monthStartCol - 1;
+  const porCliente = {};
+  for(let i = headerRowIdx + 1; i < values.length; i++){
+    const row = values[i] || [];
+    const label = String((labelCol >= 0 ? row[labelCol] : '') || '').trim();
+    if(!label || normalizeClientName(label) === 'total') continue;
+    const nomeCanonico = canonicalizeClientName(label);
+    monthCols.forEach(({col, n}) => {
+      const val = parseBRNumberOrPercent(row[col]);
+      if(val === null) return;
+      if(!porCliente[nomeCanonico]) porCliente[nomeCanonico] = {};
+      porCliente[nomeCanonico][n] = val;
+    });
+  }
+  if(!Object.keys(porCliente).length) throw new Error('Nenhum dado de cliente encontrado na aba (confirme se há uma linha por cliente, com Jan..Dez nas colunas).');
+  return porCliente;
 }
 
 const DEMANDAS_SEED = [
@@ -2188,6 +2349,30 @@ function daysBetween(iso, now){
   return Math.round((b - a) / 86400000);
 }
 
+// Último dia do mês `mesN` (1-12) do ano `ano`.
+function endOfMonth(ano, mesN){
+  return new Date(ano, mesN, 0);
+}
+
+// "Dias em aberto" de um ticket avaliados como se o mês `mesN`/`ano` tivesse acabado de terminar —
+// ou seja, o ticket só entra na média daquele mês se, no fim daquele mês, ele ainda estivesse aberto
+// (nunca finalizado, ou finalizado só depois do fim daquele mês). A contribuição é sempre
+// (fim do mês) - (Aberto em), em dias — mesmo para meses já passados, "congelando" o cenário de como
+// o mês terminou (por isso o histórico de meses anteriores não muda depois que um ticket é concluído).
+// Retorna null quando o ticket não se aplica a esse mês (ainda não tinha sido aberto até o fim dele,
+// ou já tinha sido finalizado até o fim dele).
+function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, ano, mesN){
+  const abertoDate = new Date(abertoEmIso);
+  if(isNaN(abertoDate.getTime())) return null;
+  const fimDoMes = endOfMonth(ano, mesN);
+  if(abertoDate > fimDoMes) return null;
+  if(concluidoEmIso){
+    const concluidoDate = new Date(concluidoEmIso.includes('T') ? concluidoEmIso : concluidoEmIso + 'T00:00:00');
+    if(!isNaN(concluidoDate.getTime()) && concluidoDate <= fimDoMes) return null;
+  }
+  return daysBetween(abertoEmIso, fimDoMes);
+}
+
 function fmtDataAbertura(iso){
   if(!iso) return '—';
   const d = new Date(iso);
@@ -2240,7 +2425,10 @@ function buildDemandasMerged(customMap, baseRows){
   return base.map(o => {
     const c = custom[o.n] || {};
     const prazo = c.prazo || '';
-    const concluidoEm = c.concluidoEm || '';
+    // "Concluído em" agora vem direto da coluna "Resolvido Em" do Movidesk (campo `re` do ticket
+    // sincronizado). O valor manual antigo (c.concluidoEm) fica só como fallback, para não perder
+    // histórico de tickets preenchidos à mão antes dessa mudança e que ainda não foram ressincronizados.
+    const concluidoEm = o.re || c.concluidoEm || '';
     // Dias em Aberto: se o ticket já foi finalizado (Fechado/Resolvido/Cancelado), usa o tempo até a
     // data de conclusão informada (senão fica indefinido — não dá pra saber quanto tempo ficou aberto).
     // Se ainda está aberto, usa o tempo decorrido até hoje.
@@ -2368,11 +2556,11 @@ function ordenarMetasGestao(goals){
   });
 }
 
-// Label "Área / Título" exibido na coluna da esquerda das tabelas-resumo de Gestão de Metas. Metas
-// sem área definida (customizadas, ou um indicador sem area em INDICADORES) mostram só o título.
-function metaAreaLabel(goal){
-  const area = goal.slug && INDICADORES_BY_SLUG[goal.slug] && INDICADORES_BY_SLUG[goal.slug].area;
-  return area ? area + ' / ' + goal.titulo : goal.titulo;
+// Área da meta (coluna própria à esquerda nas tabelas-resumo de Gestão de Metas). Metas sem área
+// definida (customizadas, ou um indicador sem area em INDICADORES) retornam string vazia — a célula
+// fica em branco em vez de mostrar "undefined".
+function metaArea(goal){
+  return (goal.slug && INDICADORES_BY_SLUG[goal.slug] && INDICADORES_BY_SLUG[goal.slug].area) || '';
 }
 
 // Metas cujo Budget mensal é definido direto na tela do próprio indicador (Acompanhamento de Metas),
@@ -2458,6 +2646,21 @@ function findPessoaId(pessoas, needle){
 function findClienteId(clientes, nome){
   const c = clientes.find(x => x.nome.toLowerCase() === nome.toLowerCase());
   return c ? c.id : null;
+}
+
+// Converte { [nomeCliente]: {mesN: valor} } (como vem das sincronizações de Penetração/Efetividade
+// Regras, cujo nome já foi canonicalizado por canonicalizeClientName) em { [clienteId]: {mesN: valor} },
+// reportando quaisquer nomes que não batam com nenhum cliente cadastrado (em vez de descartá-los
+// silenciosamente — mesma lição aprendida na sincronização do Movidesk).
+function mapClienteNomeParaId(porClienteNome, clientes){
+  const porClienteId = {};
+  const naoMapeados = [];
+  Object.keys(porClienteNome).forEach(nome => {
+    const id = findClienteId(clientes, nome);
+    if(id) porClienteId[id] = porClienteNome[nome];
+    else naoMapeados.push(nome);
+  });
+  return {porClienteId, naoMapeados};
 }
 
 function buildRotinaSpecs(pessoas){
@@ -4162,12 +4365,13 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
 
   if(slug === 'dias-ticket-aberto'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
-    const scoped = merged.filter(m => !!m.mesPlanning && m.diasEmAberto !== null && m.diasEmAberto !== undefined
-      && (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
+    const scoped = merged.filter(m => !clienteNomesFilter || clienteNomesFilter.has(m.cliente));
     const out = {};
     MONTHS.forEach(m => {
-      const subset = scoped.filter(x => String(x.mesPlanning) === String(m.n));
-      out[m.n] = avgOf(subset.map(x => x.diasEmAberto));
+      const dias = scoped
+        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, m.n))
+        .filter(v => v !== null);
+      out[m.n] = dias.length ? avgOf(dias) : null;
     });
     return out;
   }
@@ -4281,8 +4485,11 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN)
   }
   if(slug === 'dias-ticket-aberto'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
-    const subset = merged.filter(x => !!x.mesPlanning && x.diasEmAberto !== null && x.diasEmAberto !== undefined && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome);
-    return avgOf(subset.map(x => x.diasEmAberto));
+    const subset = merged.filter(x => x.cliente === clienteNome);
+    const dias = subset
+      .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, mesN))
+      .filter(v => v !== null);
+    return dias.length ? avgOf(dias) : null;
   }
   if(slug === 'nps'){
     const yearData = (data.nps && data.nps[CURRENT_YEAR]) || {};
@@ -4457,7 +4664,7 @@ function GoalsSummaryTable({goals, data, clienteNomesFilter}){
       <div className="table-wrap">
         <table className="upsell-tbl">
           <thead>
-            <tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
+            <tr><th style={{textAlign:'left'}}>Área</th><th style={{textAlign:'left'}}>Meta</th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
           </thead>
           <tbody>
             {goals.map(g => {
@@ -4466,7 +4673,8 @@ function GoalsSummaryTable({goals, data, clienteNomesFilter}){
               const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter) : null;
               return (
                 <tr key={g.id}>
-                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{metaAreaLabel(g)}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, color:'var(--ink-soft)', whiteSpace:'nowrap'}}>{metaArea(g)}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{g.titulo}</td>
                   {MONTHS.map(m => {
                     const rawBudget = budgetByMonth ? budgetByMonth[m.n] : undefined;
                     const hasBudget = rawBudget !== undefined && rawBudget !== null && rawBudget !== '' && Number(rawBudget) !== 0;
@@ -4508,14 +4716,15 @@ function GoalsRealizadoTable({goals, data, clienteNomesFilter}){
       <div className="table-wrap">
         <table className="upsell-tbl">
           <thead>
-            <tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
+            <tr><th style={{textAlign:'left'}}>Área</th><th style={{textAlign:'left'}}>Meta</th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
           </thead>
           <tbody>
             {goals.map(g => {
               const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter) : null;
               return (
                 <tr key={g.id}>
-                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{metaAreaLabel(g)}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, color:'var(--ink-soft)', whiteSpace:'nowrap'}}>{metaArea(g)}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{g.titulo}</td>
                   {MONTHS.map(m => {
                     const raw = realizadoByMonth ? realizadoByMonth[m.n] : null;
                     const has = raw !== null && raw !== undefined;
@@ -4550,7 +4759,7 @@ function GoalsBudgetTable({goals, data, clienteNomesFilter}){
       <div className="table-wrap">
         <table className="upsell-tbl">
           <thead>
-            <tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
+            <tr><th style={{textAlign:'left'}}>Área</th><th style={{textAlign:'left'}}>Meta</th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
           </thead>
           <tbody>
             {goals.map(g => {
@@ -4558,7 +4767,8 @@ function GoalsBudgetTable({goals, data, clienteNomesFilter}){
               const budgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(g.slug, data, clienteNomesFilter) : (g.budgets[CURRENT_YEAR] || {});
               return (
                 <tr key={g.id}>
-                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{metaAreaLabel(g)}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, color:'var(--ink-soft)', whiteSpace:'nowrap'}}>{metaArea(g)}</td>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600, whiteSpace:'nowrap'}}>{g.titulo}</td>
                   {MONTHS.map(m => {
                     const raw = budgetByMonth ? budgetByMonth[m.n] : undefined;
                     const has = raw !== undefined && raw !== null && raw !== '';
@@ -4970,26 +5180,52 @@ function MargemBrutaPage({financeiro, financeiroSync, actions}){
   const lastData = lastMonth ? pnlYear[lastMonth.n] : null;
   const kpi = lastData ? (lastData.grossProfit / lastData.receitaTotal) * 100 : null;
 
-  const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
+  // Descobre dinamicamente quais sub-linhas existem sob cada linha principal (ex.: clientes sob "Total
+  // revenues", categorias como "Tecnologia"/"Viagens" sob "(-) COGS"), mesclando a ordem de todos os
+  // meses já sincronizados — assim, uma linha nova adicionada na aba Finance aparece automaticamente,
+  // sem precisar editar o painel.
+  const subLinhasPorMain = {};
+  filledMonths.forEach(m => {
+    const order = pnlYear[m.n] && pnlYear[m.n].subLinhasOrder;
+    if(!order) return;
+    Object.keys(order).forEach(mainKey => {
+      if(!subLinhasPorMain[mainKey]) subLinhasPorMain[mainKey] = [];
+      order[mainKey].forEach(label => {
+        if(!subLinhasPorMain[mainKey].includes(label)) subLinhasPorMain[mainKey].push(label);
+      });
+    });
+  });
 
-  const rows = [
-    {key:'receitaTotal', label:'Total revenues', type:'main'},
-    ...clientNames.map(c => ({key:'cliente:'+c, label:c, type:'sub'})),
-    {key:'taxasReceita', label:'(-) Taxes on revenues', type:'main'},
-    {key:'cogs', label:'(-) COGS', type:'main'},
-    {key:'payroll', label:'(-) Payroll', type:'main'},
-    {key:'grossProfit', label:'(=) Gross profit', type:'total'},
-    {key:'gea', label:'(-) G&A', type:'main'},
-    {key:'sem', label:'(-) S&M', type:'main'},
-    {key:'ebitda', label:'(=) EBITDA / burn', type:'total'},
-  ];
+  const clientNames = (subLinhasPorMain.receitaTotal && subLinhasPorMain.receitaTotal.length)
+    ? subLinhasPorMain.receitaTotal
+    : FINANCE_CLIENT_ROWS_FALLBACK;
+
+  const rows = [];
+  const pushMainRow = (key, label, type) => {
+    rows.push({key, label, type});
+    if(key === 'receitaTotal'){
+      clientNames.forEach(nome => rows.push({key:'cliente:'+nome, label:nome, type:'sub', subOf:'receitaTotal', subLabel:nome}));
+    }else if(subLinhasPorMain[key] && subLinhasPorMain[key].length){
+      subLinhasPorMain[key].forEach((label2, idx) => rows.push({key:'sub:'+key+':'+idx, label:label2, type:'sub', subOf:key, subLabel:label2}));
+    }
+  };
+  pushMainRow('receitaTotal', 'Total revenues', 'main');
+  pushMainRow('taxasReceita', '(-) Taxes on revenues', 'main');
+  pushMainRow('cogs', '(-) COGS', 'main');
+  pushMainRow('payroll', '(-) Payroll', 'main');
+  pushMainRow('grossProfit', '(=) Gross profit', 'total');
+  pushMainRow('gea', '(-) G&A', 'main');
+  pushMainRow('sem', '(-) S&M', 'main');
+  pushMainRow('ebitda', '(=) EBITDA / burn', 'total');
 
   const cellValue = (row, month) => {
     const data = pnlYear[month.n];
     if(!data) return null;
-    if(row.key.startsWith('cliente:')){
-      const nome = row.key.slice(8);
-      return data.receitaPorCliente ? data.receitaPorCliente[nome] : null;
+    if(row.subOf === 'receitaTotal'){
+      return data.receitaPorCliente ? data.receitaPorCliente[row.subLabel] : null;
+    }
+    if(row.subOf){
+      return data.subLinhas && data.subLinhas[row.subOf] ? data.subLinhas[row.subOf][row.subLabel] : null;
     }
     return data[row.key];
   };
@@ -5297,10 +5533,64 @@ function UpsellScorePage({upsellScore, clientes, actions}){
   );
 }
 
-function ContasFinalizadasPage({financeiro, actions}){
+// Botão + status de sincronização reutilizado pelas 4 metas cujo Realizado vem de uma aba dedicada na
+// planilha "Gestão Metas" (mesmo padrão visual do botão "Atualizar base Margem Bruta"). `onSync` deve
+// retornar uma string de aviso (não bloqueante, exibida em âmbar) ou nada; erros devem ser lançados
+// (exibidos em vermelho).
+function SyncRealizadoButton({label, onSync}){
+  const [syncing, setSyncing] = useState(false);
+  const [error, setError] = useState(null);
+  const [warning, setWarning] = useState(null);
+
+  const handleClick = async () => {
+    setSyncing(true);
+    setError(null);
+    setWarning(null);
+    try{
+      const warn = await onSync();
+      if(warn) setWarning(warn);
+    }catch(e){
+      console.error('Sync realizado error', e);
+      setError(e.message || 'Erro ao atualizar a base.');
+    }finally{
+      setSyncing(false);
+    }
+  };
+
+  return (
+    <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end', gap:6}}>
+      <button
+        type="button"
+        className="btn btn-primary btn-sm"
+        disabled={syncing}
+        onClick={handleClick}
+        style={{whiteSpace:'nowrap', opacity: syncing ? 0.6 : 1, cursor: syncing ? 'not-allowed' : 'pointer'}}
+      >
+        {syncing ? 'Atualizando…' : label}
+      </button>
+      {error && <div style={{fontSize:12.5, color:'#c0392b', maxWidth:320, textAlign:'right'}}>{error}</div>}
+      {warning && <div style={{fontSize:12.5, color:'#9a6b00', maxWidth:320, textAlign:'right'}}>{warning}</div>}
+    </div>
+  );
+}
+
+function syncStatusText(sync){
+  return sync
+    ? `Última atualização: ${sync.by} em ${fmtDataAbertura(sync.at)} · ${sync.count} cliente${sync.count===1?'':'s'}`
+    : 'Base ainda não atualizada a partir da planilha — exibindo dados existentes.';
+}
+
+function ContasFinalizadasPage({financeiro, actions, sync}){
   const data = (financeiro && financeiro.contasFinalizadas && financeiro.contasFinalizadas[CURRENT_YEAR]) || {};
   const budgetData = (financeiro && financeiro.contasFinalizadasBudget && financeiro.contasFinalizadasBudget[CURRENT_YEAR]) || {};
   const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
+
+  const handleSync = async () => {
+    const token = await getGoogleDriveAccessToken();
+    const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['contas-finalizadas']);
+    const porCliente = parseClienteMesSheet(values);
+    actions.importContasFinalizadasRealizado(porCliente);
+  };
 
   const filledMonths = MONTHS.filter(m => clientNames.some(c => (data[c]||{})[m.n] !== undefined));
   const lastMonth = filledMonths.length ? filledMonths[filledMonths.length - 1] : null;
@@ -5339,8 +5629,10 @@ function ContasFinalizadasPage({financeiro, actions}){
         <div className="section-block-head" style={{padding:'18px 22px 0'}}>
           <div>
             <div className="section-block-title">Contas Finalizadas · {CURRENT_YEAR}</div>
-            <div className="section-block-desc">Dados carregados da aba Contas do Monitoramento de Auditoria.</div>
+            <div className="section-block-desc">Dados sincronizados da aba "Contas Finalizadas" da planilha Gestão Metas.</div>
+            <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>{syncStatusText(sync)}</div>
           </div>
+          <SyncRealizadoButton label="Atualizar base Contas Finalizadas" onSync={handleSync}/>
         </div>
         <div className="table-wrap">
           <table className="pnl-tbl">
@@ -5428,12 +5720,15 @@ function ContasFinalizadasPage({financeiro, actions}){
   );
 }
 
-// Página genérica para metas percentuais preenchidas manualmente por cliente e mês (Realizado + Budget),
-// seguindo o mesmo modelo visual de ContasFinalizadasPage — usada por Subfaturamento e % Contas Automático.
-function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget}){
+// Página genérica para metas percentuais por cliente e mês (Realizado + Budget), seguindo o mesmo
+// modelo visual de ContasFinalizadasPage — usada por Subfaturamento (Realizado manual) e % Contas
+// Automático (Realizado sincronizado da planilha — passe `sync`/`onSync`/`descRealizado` nesse caso;
+// o Budget continua sempre manual, para as duas).
+function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget, sync, onSync, descRealizado}){
   const data = (financeiro && financeiro[dataKey] && financeiro[dataKey][CURRENT_YEAR]) || {};
   const budgetData = (financeiro && financeiro[budgetKey] && financeiro[budgetKey][CURRENT_YEAR]) || {};
   const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
+  const realizadoReadOnly = !!onSync;
 
   const colAvg = (source, m) => {
     const vals = clientNames.map(c => (source[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
@@ -5463,8 +5758,10 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
         <div className="section-block-head" style={{padding:'18px 22px 0'}}>
           <div>
             <div className="section-block-title">{titulo} · {CURRENT_YEAR}</div>
-            <div className="section-block-desc">Preenchimento manual por cliente e mês.</div>
+            <div className="section-block-desc">{descRealizado || 'Preenchimento manual por cliente e mês.'}</div>
+            {realizadoReadOnly && <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>{syncStatusText(sync)}</div>}
           </div>
+          {realizadoReadOnly && <SyncRealizadoButton label={`Atualizar base ${titulo}`} onSync={onSync}/>}
         </div>
         <div className="table-wrap">
           <table className="upsell-tbl">
@@ -5480,6 +5777,13 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
                   <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{cliente}</td>
                   {MONTHS.map(m => {
                     const raw = (data[cliente]||{})[m.n];
+                    if(realizadoReadOnly){
+                      return (
+                        <td key={m.n} className={isEmptyVal(raw) ? 'empty-val' : ''} style={{textAlign:'center'}}>
+                          {isEmptyVal(raw) ? '—' : fmtPercent(Number(raw))}
+                        </td>
+                      );
+                    }
                     return (
                       <td key={m.n}>
                         <input
@@ -5565,17 +5869,25 @@ function SubfaturamentoPage({financeiro, actions}){
     setRealizado={actions.setSubfaturamentoRealizado} setBudget={actions.setSubfaturamentoBudget}/>;
 }
 
-function ContasAutomaticoPage({financeiro, actions}){
+function ContasAutomaticoPage({financeiro, actions, sync}){
+  const handleSync = async () => {
+    const token = await getGoogleDriveAccessToken();
+    const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['contas-automatico']);
+    const porCliente = parseClienteMesSheet(values);
+    actions.importContasAutomaticoRealizado(porCliente);
+  };
   return <PercentClientGoalPage titulo="% Contas Automático" financeiro={financeiro} dataKey="contasAutomatico" budgetKey="contasAutomaticoBudget"
-    setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}/>;
+    setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}
+    sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Contas Automáticas" da planilha Gestão Metas.'/>;
 }
 
-function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKey, budgetSetActionName, titulo, formulaHint}){
+function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKey, budgetSetActionName, titulo, formulaHint, sync, onSync, descRealizado}){
   const clientesCols = useMemo(() => data.clientes.filter(c => c.nome.toLowerCase() !== 'interno'), [data.clientes]);
   const yearData = (data[dataKey] && data[dataKey][CURRENT_YEAR]) || {};
   const budgetYearData = (data[budgetKey] && data[budgetKey][CURRENT_YEAR]) || {};
   const setValue = actions[setActionName];
   const setBudgetValue = actions[budgetSetActionName];
+  const realizadoReadOnly = !!onSync;
 
   const monthAvgOf = (yd, m) => {
     const vals = clientesCols
@@ -5613,8 +5925,10 @@ function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKe
         <div className="section-block-head" style={{padding:'18px 22px 0'}}>
           <div>
             <div className="section-block-title">{titulo} · {CURRENT_YEAR}</div>
-            <div className="section-block-desc">Preenchimento manual por cliente e mês. O total do mês é calculado automaticamente.</div>
+            <div className="section-block-desc">{descRealizado || 'Preenchimento manual por cliente e mês. O total do mês é calculado automaticamente.'}</div>
+            {realizadoReadOnly && <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>{syncStatusText(sync)}</div>}
           </div>
+          {realizadoReadOnly && <SyncRealizadoButton label={`Atualizar base ${titulo}`} onSync={onSync}/>}
         </div>
         <div className="table-wrap">
           <table className="upsell-tbl">
@@ -5630,6 +5944,13 @@ function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKe
                   <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{c.nome}</td>
                   {MONTHS.map(m => {
                     const raw = (yearData[c.id]||{})[m.n];
+                    if(realizadoReadOnly){
+                      return (
+                        <td key={m.n} className={isEmptyVal(raw) ? 'empty-val' : ''} style={{textAlign:'center'}}>
+                          {isEmptyVal(raw) ? '—' : fmtPercent(Number(raw))}
+                        </td>
+                      );
+                    }
                     return (
                       <td key={m.n}>
                         <input
@@ -6263,33 +6584,47 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint}){
 function DiasTicketAbertoPage({data}){
   const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
 
-  // considera qualquer classificação; só entram tickets com Mês Planning definido e Dias em Aberto conhecido
-  // (para tickets já finalizados, isso só existe quando "Concluído em" foi preenchido)
-  const scoped = useMemo(() =>
-    merged.filter(m => !!m.mesPlanning && m.diasEmAberto !== null && m.diasEmAberto !== undefined),
-  [merged]);
+  // Para cada mês civil, a média considera os tickets que — no fim daquele mês — já tinham sido
+  // abertos e ainda não tinham sido finalizados (ou nunca chegaram a ser). Isso "congela" o cenário de
+  // como o mês terminou, então o histórico de meses passados não muda depois que um ticket é concluído.
+  const mesAvg = useMemo(() => {
+    const out = {};
+    MONTHS.forEach(m => {
+      const dias = merged
+        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, m.n))
+        .filter(v => v !== null);
+      out[m.n] = dias.length ? avgOf(dias) : null;
+    });
+    return out;
+  }, [merged]);
 
-  const overallAvg = useMemo(() => avgOf(scoped.map(m => m.diasEmAberto)), [scoped]);
+  const filledMonths = MONTHS.filter(m => mesAvg[m.n] !== null);
+  const lastMonth = filledMonths.length ? filledMonths[filledMonths.length - 1] : null;
+  const overallAvg = lastMonth ? mesAvg[lastMonth.n] : null;
 
   const personRows = useMemo(() => {
-    const names = Array.from(new Set(scoped.map(m => m.responsavel).filter(Boolean))).sort();
+    const names = Array.from(new Set(merged.map(m => m.responsavel).filter(Boolean))).sort();
     const rows = names.map(n => ({key:n, label:n, match:(m)=>m.responsavel===n}));
-    if(scoped.some(m => !m.responsavel)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavel});
+    if(merged.some(m => !m.responsavel)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavel});
     return rows;
-  }, [scoped]);
+  }, [merged]);
 
   const clienteRows = useMemo(() =>
-    DEMANDAS_CLIENTES_ORDEM.filter(c => scoped.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c})),
-  [scoped]);
+    DEMANDAS_CLIENTES_ORDEM.filter(c => merged.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c})),
+  [merged]);
 
   function avgForRowMes(row, mesN){
-    const subset = scoped.filter(m => row.match(m) && String(m.mesPlanning) === String(mesN));
-    return avgOf(subset.map(m => m.diasEmAberto));
+    const dias = merged
+      .filter(row.match)
+      .map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, CURRENT_YEAR, mesN))
+      .filter(v => v !== null);
+    return dias.length ? avgOf(dias) : null;
   }
 
   return (
     <div>
       <div className="kpi-hero" style={{marginBottom:16}}>
+        {lastMonth && <div className="kpi-hero-period">Fechamento · {mesPlanningNome(lastMonth.n)}/{CURRENT_YEAR}</div>}
         <div className="kpi-hero-label">Média Dias Ticket em Aberto</div>
         {overallAvg !== null ? (
           <div className="kpi-hero-value">{overallAvg.toLocaleString('pt-BR', {maximumFractionDigits:1})}</div>
@@ -6297,25 +6632,25 @@ function DiasTicketAbertoPage({data}){
           <div className="kpi-hero-value" style={{fontSize:20, color:'#9BA0B8'}}>Sem dados ainda</div>
         )}
         <div className="kpi-hero-formula">
-          Média de dias em aberto dos tickets, agrupados por Mês Planning. Para tickets ainda abertos, considera até hoje;
-          para tickets já finalizados (Fechado/Resolvido/Cancelado), considera o tempo até a data de "Concluído em"
-          informada na aba Demandas — assim a série mantém o histórico mesmo depois que o ticket é encerrado.
+          Para cada mês, considera os tickets abertos até o fim daquele mês e finalizados só depois dele (ou
+          ainda em aberto) — a contribuição de cada ticket é (fim do mês) − (Aberto em). "Concluído em" vem
+          direto da coluna "Resolvido Em" do Movidesk.
         </div>
       </div>
 
       <CsatMatrixTable
         title="Média de dias em aberto por pessoa e mês"
-        desc="Colunas = Mês Planning do ticket. Linhas = Responsável (Movidesk)."
+        desc="Colunas = mês civil (situação no fim de cada mês). Linhas = Responsável (Movidesk)."
         rows={personRows}
         avgFn={avgForRowMes}
-        emptyText="Nenhum ticket com Mês Planning definido para esse recorte, ou ainda sem tickets com Dias em Aberto calculável (finalizados sem 'Concluído em' preenchido)."
+        emptyText="Nenhum ticket aplicável a esse recorte ainda."
       />
       <CsatMatrixTable
         title="Média de dias em aberto por cliente e mês"
-        desc="Colunas = Mês Planning do ticket. Linhas = clientes."
+        desc="Colunas = mês civil (situação no fim de cada mês). Linhas = clientes."
         rows={clienteRows}
         avgFn={avgForRowMes}
-        emptyText="Nenhum ticket com Mês Planning definido para esse recorte, ou ainda sem tickets com Dias em Aberto calculável (finalizados sem 'Concluído em' preenchido)."
+        emptyText="Nenhum ticket aplicável a esse recorte ainda."
       />
     </div>
   );
@@ -6331,23 +6666,43 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
     return <UpsellScorePage upsellScore={upsellScore} clientes={clientes} actions={actions}/>;
   }
   if(slug === 'contas-finalizadas'){
-    return <ContasFinalizadasPage financeiro={financeiro} actions={actions}/>;
+    return <ContasFinalizadasPage financeiro={financeiro} actions={actions} sync={data.contasFinalizadasSync}/>;
   }
   if(slug === 'subfaturamento'){
     return <SubfaturamentoPage financeiro={financeiro} actions={actions}/>;
   }
   if(slug === 'contas-automatico'){
-    return <ContasAutomaticoPage financeiro={financeiro} actions={actions}/>;
+    return <ContasAutomaticoPage financeiro={financeiro} actions={actions} sync={data.contasAutomaticoSync}/>;
   }
   if(slug === 'efetividade-regras'){
+    const handleSyncEfetividade = async () => {
+      const token = await getGoogleDriveAccessToken();
+      const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['efetividade-regras']);
+      const porClienteNome = parseClienteMesSheet(values);
+      const {porClienteId, naoMapeados} = mapClienteNomeParaId(porClienteNome, data.clientes);
+      actions.importEfetividadeRegrasRealizado(porClienteId);
+      if(naoMapeados.length) return `Cliente(s) da planilha não reconhecido(s) na lista de clientes, ignorado(s): ${naoMapeados.join(', ')}.`;
+    };
     return <ManualPercentTablePage data={data} actions={actions} dataKey="efetividadeRegras" setActionName="setEfetividadeRegras"
       budgetKey="efetividadeRegrasBudget" budgetSetActionName="setEfetividadeRegrasBudget"
-      titulo="Efetividade Regras" formulaHint="Média simples dos percentuais informados por cliente no mês"/>;
+      titulo="Efetividade Regras" formulaHint="Média simples dos percentuais informados por cliente no mês"
+      sync={data.efetividadeRegrasSync} onSync={handleSyncEfetividade}
+      descRealizado='Dados sincronizados da aba "Efetividade Regras" da planilha Gestão Metas. O total do mês é calculado automaticamente.'/>;
   }
   if(slug === 'penetracao-regras'){
+    const handleSyncPenetracao = async () => {
+      const token = await getGoogleDriveAccessToken();
+      const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['penetracao-regras']);
+      const porClienteNome = parseClienteMesSheet(values);
+      const {porClienteId, naoMapeados} = mapClienteNomeParaId(porClienteNome, data.clientes);
+      actions.importPenetracaoRegrasRealizado(porClienteId);
+      if(naoMapeados.length) return `Cliente(s) da planilha não reconhecido(s) na lista de clientes, ignorado(s): ${naoMapeados.join(', ')}.`;
+    };
     return <ManualPercentTablePage data={data} actions={actions} dataKey="penetracaoRegras" setActionName="setPenetracaoRegras"
       budgetKey="penetracaoRegrasBudget" budgetSetActionName="setPenetracaoRegrasBudget"
-      titulo="Penetração Regras" formulaHint="Média simples dos percentuais informados por cliente no mês"/>;
+      titulo="Penetração Regras" formulaHint="Média simples dos percentuais informados por cliente no mês"
+      sync={data.penetracaoRegrasSync} onSync={handleSyncPenetracao}
+      descRealizado='Dados sincronizados da aba "Penetração Regras" da planilha Gestão Metas. O total do mês é calculado automaticamente.'/>;
   }
   if(slug === 'nps'){
     return <NPSPage data={data} actions={actions}/>;
@@ -6842,7 +7197,7 @@ function DemandasPage({data, actions}){
       <div className="section-block-head">
         <div>
           <div className="section-block-title">Demandas</div>
-          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo, Concluído em, Mês Planning e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. CSAT ainda não está disponível na exportação do Movidesk — a coluna fica com placeholder até a base trazer essa informação.</div>
+          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo, Mês Planning e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. "Concluído em" vem direto da coluna "Resolvido Em" do Movidesk. CSAT ainda não está disponível na exportação do Movidesk — a coluna fica com placeholder até a base trazer essa informação.</div>
           <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>
             {data.demandasBaseSync
               ? `Última atualização: ${data.demandasBaseSync.by} em ${fmtDataAbertura(data.demandasBaseSync.at)} · ${data.demandasBaseSync.count} tickets`
@@ -7044,14 +7399,7 @@ function DemandaRow({row, devTeam, actions}){
         />
         {row.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
       </td>
-      <td className="demanda-prazo-cell">
-        <input
-          type="date"
-          className="demanda-date-input"
-          value={row.concluidoEm}
-          onChange={e => actions.updateDemandaCustom(row.numero, {concluidoEm: e.target.value})}
-        />
-      </td>
+      <td className="demanda-dias">{row.concluidoEm ? fmtDataAbertura(row.concluidoEm) : '—'}</td>
       <td className="demanda-csat">{row.csat || '—'}</td>
       <td className="demanda-resp">{row.responsavel || '—'}</td>
       <td className="demanda-dias">{fmtDataAbertura(row.abertoEm)}</td>
@@ -7490,6 +7838,64 @@ function App(){
         },
       };
     }, `Base de Margem Bruta atualizada (${Object.keys(monthsData).length} mês${Object.keys(monthsData).length===1?'':'es'})`),
+
+    // Realizado sincronizado da aba "Contas Finalizadas" da planilha Gestão Metas (por cliente, nome como chave).
+    importContasFinalizadasRealizado: (porCliente) => mutate(d => {
+      const financeiro = {...(d.financeiro||{})};
+      const contasFinalizadas = {...(financeiro.contasFinalizadas||{})};
+      contasFinalizadas[CURRENT_YEAR] = porCliente;
+      financeiro.contasFinalizadas = contasFinalizadas;
+      return {
+        ...d,
+        financeiro,
+        contasFinalizadasSync: {
+          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+          at: new Date().toISOString(),
+          count: Object.keys(porCliente).length,
+        },
+      };
+    }, `Base de Contas Finalizadas atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
+
+    // Realizado sincronizado da aba "Contas Automáticas" da planilha Gestão Metas (por cliente, nome como chave).
+    importContasAutomaticoRealizado: (porCliente) => mutate(d => {
+      const financeiro = {...(d.financeiro||{})};
+      const contasAutomatico = {...(financeiro.contasAutomatico||{})};
+      contasAutomatico[CURRENT_YEAR] = porCliente;
+      financeiro.contasAutomatico = contasAutomatico;
+      return {
+        ...d,
+        financeiro,
+        contasAutomaticoSync: {
+          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+          at: new Date().toISOString(),
+          count: Object.keys(porCliente).length,
+        },
+      };
+    }, `Base de % Contas Automático atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
+
+    // Realizado sincronizado da aba "Penetração Regras" (por cliente, já convertido para clienteId
+    // antes de chegar aqui — ver mapClienteNomeParaId).
+    importPenetracaoRegrasRealizado: (porClienteId) => mutate(d => ({
+      ...d,
+      penetracaoRegras: {...(d.penetracaoRegras||{}), [CURRENT_YEAR]: porClienteId},
+      penetracaoRegrasSync: {
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(porClienteId).length,
+      },
+    }), `Base de Penetração Regras atualizada (${Object.keys(porClienteId).length} cliente${Object.keys(porClienteId).length===1?'':'s'})`),
+
+    // Realizado sincronizado da aba "Efetividade Regras" (por cliente, já convertido para clienteId
+    // antes de chegar aqui — ver mapClienteNomeParaId).
+    importEfetividadeRegrasRealizado: (porClienteId) => mutate(d => ({
+      ...d,
+      efetividadeRegras: {...(d.efetividadeRegras||{}), [CURRENT_YEAR]: porClienteId},
+      efetividadeRegrasSync: {
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(porClienteId).length,
+      },
+    }), `Base de Efetividade Regras atualizada (${Object.keys(porClienteId).length} cliente${Object.keys(porClienteId).length===1?'':'s'})`),
   }), [mutate, authUser]);
 
   if(authUser === undefined){
