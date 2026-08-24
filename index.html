@@ -750,10 +750,15 @@ function computeTicketMedio(pnlMonthData){
   return pnlMonthData.receitaTotal / TICKET_MEDIO_CLIENTES;
 }
 
-// ID do arquivo Movidesk.xlsx no Google Drive (pasta compartilhada pelo Orsatto). O botão "Atualizar
-// base do Movidesk" baixa esse arquivo direto do Drive (usando a permissão do usuário logado) e
-// substitui a base de tickets compartilhada no Firestore.
-const MOVIDESK_DRIVE_FILE_ID = '1ajGLe8T9M8w64_n72REyJ9kjUjHpL9AI';
+// Pasta do Drive + nome do arquivo "Movidesk.xlsx" que o Orsatto atualiza periodicamente (exporta do
+// Movidesk, exclui o arquivo antigo nessa pasta e sobe um novo com o mesmo nome). Como excluir e
+// subir de novo cria um ARQUIVO NOVO no Drive (com um ID diferente a cada vez, mesmo com o nome
+// idêntico), o botão "Atualizar base do Movidesk" não pode depender de um ID fixo — em vez disso,
+// ele busca pelo nome dentro dessa pasta a cada sincronização (ver handleSyncMovidesk) e usa sempre
+// o arquivo mais recente encontrado. Isso também cobre o caso do Drive converter automaticamente o
+// upload para uma planilha nativa do Google Sheets (troca o método de download conforme o mimeType).
+const MOVIDESK_DRIVE_FOLDER_ID = '1IpVv7L7U3UvSxPoTqZTXoL9ZbKsWBwAK';
+const MOVIDESK_DRIVE_FILENAME = 'Movidesk.xlsx';
 
 // Mapeia o nome da organização como aparece no Movidesk para o nome de cliente usado neste painel.
 // Organizações fora dessa lista (outras contas do Movidesk que não são desta BU) são ignoradas.
@@ -838,6 +843,22 @@ function transformMovideskRows(rows){
     unmappedClients: Object.entries(unmappedClients).map(([nome, count]) => ({nome, count})).sort((a,b) => b.count - a.count),
   };
   return {rows: out, stats};
+}
+
+// A planilha "Movidesk" pode ter mais de uma aba (o link do Orsatto, por exemplo, abre direto numa
+// aba específica via "#gid=..."), e a ordem das abas no arquivo exportado nem sempre corresponde à
+// aba que está sendo vista no navegador. Em vez de sempre pegar a primeira aba do workbook (o que
+// pode pegar a aba errada silenciosamente), procura a aba cujo cabeçalho da primeira coluna é
+// "Número" (com ou sem acento) — que é a aba com os tickets. Se nenhuma bater, cai para a primeira
+// aba mesmo, para não travar a sincronização por completo.
+function findMovideskSheetRows(wb){
+  for(const nome of wb.SheetNames){
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: true, defval: null });
+    if(rows.length && normalizeClientName(rows[0] && rows[0][0]) === 'numero'){
+      return rows;
+    }
+  }
+  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null });
 }
 
 /* ---------------------------------------------------------------
@@ -6588,14 +6609,35 @@ function DemandasPage({data, actions}){
       const credential = fb.credentialFromResult ? fb.credentialFromResult(result) : null;
       const accessToken = credential && credential.accessToken;
       if(!accessToken) throw new Error('Não foi possível obter permissão de acesso ao Google Drive.');
-      const res = await fetch('https://www.googleapis.com/drive/v3/files/' + MOVIDESK_DRIVE_FILE_ID + '?alt=media', {
-        headers: { Authorization: 'Bearer ' + accessToken },
-      });
+
+      // Busca o arquivo pelo NOME dentro da pasta (em vez de um ID fixo): o Orsatto atualiza a base
+      // excluindo o arquivo antigo e subindo um novo com o mesmo nome, e isso gera um ID novo no Drive
+      // a cada vez — um ID fixo no código ficaria desatualizado no próximo replace.
+      const query = `'${MOVIDESK_DRIVE_FOLDER_ID}' in parents and name = '${MOVIDESK_DRIVE_FILENAME}' and trashed = false`;
+      const listRes = await fetch(
+        'https://www.googleapis.com/drive/v3/files?q=' + encodeURIComponent(query)
+        + '&fields=' + encodeURIComponent('files(id,name,mimeType,modifiedTime)')
+        + '&orderBy=' + encodeURIComponent('modifiedTime desc')
+        + '&pageSize=5',
+        { headers: { Authorization: 'Bearer ' + accessToken } }
+      );
+      if(!listRes.ok) throw new Error('Não foi possível localizar o arquivo "' + MOVIDESK_DRIVE_FILENAME + '" no Drive (HTTP ' + listRes.status + ').');
+      const listData = await listRes.json();
+      const file = listData.files && listData.files[0];
+      if(!file) throw new Error('Nenhum arquivo chamado "' + MOVIDESK_DRIVE_FILENAME + '" foi encontrado na pasta configurada. Confirme se o nome e a pasta continuam os mesmos.');
+
+      // O arquivo pode ser um .xlsx binário de verdade (mimeType do Office) ou ter sido convertido
+      // automaticamente pelo Drive para uma planilha nativa do Google Sheets no upload — cada um exige
+      // um jeito diferente de baixar o conteúdo.
+      const isGoogleSheet = file.mimeType === 'application/vnd.google-apps.spreadsheet';
+      const downloadUrl = isGoogleSheet
+        ? 'https://www.googleapis.com/drive/v3/files/' + file.id + '/export?mimeType=' + encodeURIComponent('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        : 'https://www.googleapis.com/drive/v3/files/' + file.id + '?alt=media';
+      const res = await fetch(downloadUrl, { headers: { Authorization: 'Bearer ' + accessToken } });
       if(!res.ok) throw new Error('Não foi possível baixar a planilha do Drive (HTTP ' + res.status + ').');
       const buf = await res.arrayBuffer();
       const wb = XLSX.read(buf, { type: 'array', cellDates: true });
-      const sheet = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+      const rows = findMovideskSheetRows(wb);
       const {rows: parsedRows, stats} = transformMovideskRows(rows);
       if(!parsedRows.length){
         // Nenhum ticket reconhecido — quase sempre porque a coluna de Cliente na planilha tem nomes
