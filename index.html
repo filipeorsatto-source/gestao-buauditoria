@@ -799,6 +799,33 @@ const MOVIDESK_CLIENT_MAP_NORMALIZED = Object.fromEntries(
   Object.entries(MOVIDESK_CLIENT_MAP).map(([nome, mapped]) => [normalizeClientName(nome), mapped])
 );
 
+// Como normalizeClientName, mas também remove qualquer caractere que não seja letra/número (inclusive
+// símbolos como "º"/"ª" de "1º Resposta") — usado para casar nomes de coluna do cabeçalho da planilha
+// de forma tolerante a pequenas variações de pontuação/símbolo.
+function normalizeHeaderName(s){
+  return normalizeClientName(s).replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Converte o valor bruto da coluna "Tempo 1º Resposta" (duração) em minutos. Aceita os formatos mais
+// comuns de exportação: "H:MM:SS" / "H:MM" (texto), um horário (a planilha às vezes formata duração
+// como se fosse um horário do dia — nesse caso os componentes de hora/min/seg já SÃO a duração), ou um
+// número puro (assumido já em minutos).
+function parseDuracaoParaMinutos(raw){
+  if(raw === undefined || raw === null || raw === '') return null;
+  if(raw instanceof Date){
+    return raw.getHours()*60 + raw.getMinutes() + raw.getSeconds()/60;
+  }
+  const s = String(raw).trim();
+  if(s === '') return null;
+  const m = s.match(/^(\d+):(\d{1,2})(?::(\d{1,2}))?$/);
+  if(m){
+    const h = Number(m[1]), min = Number(m[2]), sec = m[3] ? Number(m[3]) : 0;
+    return h*60 + min + sec/60;
+  }
+  const n = parseBRNumber(s);
+  return (n === null || isNaN(n)) ? null : n;
+}
+
 // Converte as linhas cruas da planilha (array de arrays, cabeçalho na linha 0) no mesmo formato
 // usado por DEMANDAS_SEED: {n, a, s, u, c, r, d}. Colunas esperadas (nessa ordem): Número, Assunto,
 // Categoria, Status, Urgência, Serviço (1º Nível), Cliente (Organização), Responsável, Aberto em.
@@ -813,11 +840,13 @@ function transformMovideskRows(rows){
   let skippedInvalidDate = 0;
   const totalDataRows = Math.max(0, rows.length - 1);
 
-  // Coluna "Resolvido Em" localizada pelo nome do cabeçalho (linha 0), em vez de uma posição fixa —
-  // diferente das colunas históricas acima (Número, Assunto, ...), essa foi adicionada depois e pode
-  // estar em qualquer posição da planilha, além de poder não existir ainda em exportações antigas.
+  // Colunas "Resolvido Em" e "Tempo 1º Resposta" localizadas pelo nome do cabeçalho (linha 0), em vez
+  // de uma posição fixa — diferente das colunas históricas acima (Número, Assunto, ...), essas foram
+  // adicionadas depois e podem estar em qualquer posição da planilha, além de poderem não existir
+  // ainda em exportações antigas.
   const headerRow = rows[0] || [];
-  const resolvidoEmCol = headerRow.findIndex(h => normalizeClientName(String(h||'')) === 'resolvido em');
+  const resolvidoEmCol = headerRow.findIndex(h => normalizeHeaderName(h) === 'resolvido em');
+  const tempo1aRespostaCol = headerRow.findIndex(h => normalizeHeaderName(h) === 'tempo 1 resposta');
 
   for(let i = 1; i < rows.length; i++){
     const row = rows[i];
@@ -855,6 +884,10 @@ function transformMovideskRows(rows){
       }
     }
 
+    // "Tempo 1º Resposta" — convertido para minutos (ver parseDuracaoParaMinutos). null quando a
+    // coluna não existe na exportação ou está vazia para o ticket.
+    const tempo1aResposta = tempo1aRespostaCol !== -1 ? parseDuracaoParaMinutos(row[tempo1aRespostaCol]) : null;
+
     out.push({
       n: String(numero).trim(),
       a: (assunto || '').toString().trim(),
@@ -864,6 +897,7 @@ function transformMovideskRows(rows){
       r: (responsavel || '').toString().trim(),
       d: iso,
       re: resolvidoEmIso,
+      tr: tempo1aResposta,
     });
   }
   const stats = {
@@ -2364,6 +2398,9 @@ function endOfMonth(ano, mesN){
 function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, ano, mesN){
   const abertoDate = new Date(abertoEmIso);
   if(isNaN(abertoDate.getTime())) return null;
+  // Considera apenas tickets abertos dentro do próprio ano `ano` — tickets abertos em anos anteriores
+  // não entram nessa média (a partir do pedido do usuário de restringir a métrica aos tickets de 2026).
+  if(abertoDate.getFullYear() !== ano) return null;
   const fimDoMes = endOfMonth(ano, mesN);
   if(abertoDate > fimDoMes) return null;
   if(concluidoEmIso){
@@ -2373,6 +2410,25 @@ function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, ano, mesN){
   return daysBetween(abertoEmIso, fimDoMes);
 }
 
+// Formata um valor em minutos como "Xh Ymin" (ou só "Ymin" quando < 1h) — usado para exibir o Tempo
+// 1ª Resposta de um ticket na tabela de Demandas.
+function fmtDuracaoMinutos(min){
+  if(min === null || min === undefined || isNaN(min)) return '—';
+  const totalMin = Math.round(min);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return h > 0 ? `${h}h ${m}min` : `${m}min`;
+}
+
+// Retorna true se abertoEmIso caiu no mês `mesN` do ano corrente (CURRENT_YEAR) — usado para agrupar
+// métricas pela data de abertura do ticket (diferente de diasAbertoNoFimDoMes, que agrupa pelo
+// cenário de fim de mês; aqui o agrupamento é simplesmente "em que mês civil o ticket foi aberto").
+function mesAnoAbertura(abertoEmIso, mesN){
+  const d = new Date(abertoEmIso);
+  if(isNaN(d.getTime())) return false;
+  return d.getFullYear() === CURRENT_YEAR && (d.getMonth()+1) === mesN;
+}
+
 function fmtDataAbertura(iso){
   if(!iso) return '—';
   const d = new Date(iso);
@@ -2380,6 +2436,14 @@ function fmtDataAbertura(iso){
   const dd = String(d.getDate()).padStart(2,'0');
   const mm = String(d.getMonth()+1).padStart(2,'0');
   return dd + '/' + mm + '/' + d.getFullYear();
+}
+
+// "Concluído em" pode vir como data pura "YYYY-MM-DD" (preenchimento manual antigo) ou como
+// timestamp ISO completo "YYYY-MM-DDTHH:MM:SS" (sincronizado da coluna "Resolvido Em" do Movidesk) —
+// só completa com hora zero quando ainda não tem um "T", em vez de sempre concatenar.
+function parseConcluidoEmDate(concluidoEm){
+  if(!concluidoEm) return null;
+  return new Date(concluidoEm.includes('T') ? concluidoEm : concluidoEm + 'T00:00:00');
 }
 
 // Atrasado: se o ticket ainda está aberto, compara o prazo com hoje;
@@ -2392,8 +2456,8 @@ function isDemandaAtrasado(prazo, status, concluidoEm){
   if(isNaN(prazoDate.getTime())) return false;
   if(DEMANDA_STATUS_TERMINAL.includes(status)){
     if(!concluidoEm) return false;
-    const concluidoDate = new Date(concluidoEm + 'T00:00:00');
-    if(isNaN(concluidoDate.getTime())) return false;
+    const concluidoDate = parseConcluidoEmDate(concluidoEm);
+    if(!concluidoDate || isNaN(concluidoDate.getTime())) return false;
     return concluidoDate > prazoDate;
   }
   const now = new Date();
@@ -2434,7 +2498,7 @@ function buildDemandasMerged(customMap, baseRows){
     // Se ainda está aberto, usa o tempo decorrido até hoje.
     let dias;
     if(DEMANDA_STATUS_TERMINAL.includes(o.s)){
-      dias = concluidoEm ? daysBetween(o.d, new Date(concluidoEm + 'T00:00:00')) : null;
+      dias = concluidoEm ? daysBetween(o.d, parseConcluidoEmDate(concluidoEm)) : null;
     } else {
       dias = daysBetween(o.d, now);
     }
@@ -2447,6 +2511,7 @@ function buildDemandasMerged(customMap, baseRows){
       responsavel: o.r,
       abertoEm: o.d,
       diasEmAberto: dias,
+      tempoPrimeiraResposta: (o.tr === undefined || o.tr === null) ? null : o.tr, // minutos, vem direto do Movidesk
       csat: o.csat || '', // ainda não disponível na base do Movidesk; placeholder até a coluna existir na exportação
       classificacao: c.classificacao || '',
       tipo: c.tipo || '',
@@ -2517,6 +2582,7 @@ const INDICADORES = [
   {slug:'csat-tech', titulo:'CSAT Tech', area:'Desenvolvimento', descricao:'Avaliação dos tickets de tecnologia provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'dias-ticket-aberto', titulo:'Média dias ticket em aberto', area:'Atendimento', descricao:'Média de dias em aberto dos tickets provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'csat-atendimento', titulo:'CSAT Atendimento', area:'Atendimento', descricao:'Avaliação dos tickets de atendimento provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
+  {slug:'sla-primeira-resposta', titulo:'SLA 1ª Resposta', area:'Atendimento', descricao:'Tempo médio (em minutos) até a primeira resposta do ticket, agrupado pela Data de Abertura.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'cobertura-dados', titulo:'Cobertura de Dados', area:'Produto', descricao:'Visuais Criados / Visuais Totais', unidade:'%', fonte:'Metabase'},
   {slug:'csat-produto', titulo:'CSAT Produto', area:'Produto', descricao:'Avaliação dos tickets relacionados a produto provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
 ];
@@ -2538,7 +2604,7 @@ const GESTAO_METAS_ORDEM = [
   'nps', 'margem-bruta',
   'upsell-score', 'contas-finalizadas', 'ticket-medio',
   'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico',
-  'dias-ticket-aberto', 'csat-atendimento',
+  'dias-ticket-aberto', 'csat-atendimento', 'sla-primeira-resposta',
   'entregas-prazo', 'csat-tech',
   'csat-produto', 'cobertura-dados',
 ];
@@ -4376,6 +4442,18 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
     return out;
   }
 
+  if(slug === 'sla-primeira-resposta'){
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const scoped = merged.filter(m => m.tempoPrimeiraResposta !== null
+      && (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
+    const out = {};
+    MONTHS.forEach(m => {
+      const subset = scoped.filter(x => mesAnoAbertura(x.abertoEm, m.n));
+      out[m.n] = subset.length ? avgOf(subset.map(x => x.tempoPrimeiraResposta)) : null;
+    });
+    return out;
+  }
+
   return null;
 }
 
@@ -4432,7 +4510,7 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
 const META_GRANULAR_CLIENTE_SLUGS = [
   'upsell-score','contas-finalizadas','penetracao-regras','efetividade-regras',
   'cobertura-dados','entregas-prazo','csat-tech','csat-atendimento','csat-produto',
-  'dias-ticket-aberto','nps','subfaturamento','contas-automatico',
+  'dias-ticket-aberto','nps','subfaturamento','contas-automatico','sla-primeira-resposta',
 ];
 
 // Realizado de um indicador, para um cliente e mês específicos. Retorna null se não aplicável.
@@ -4495,6 +4573,11 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN)
     const yearData = (data.nps && data.nps[CURRENT_YEAR]) || {};
     const v = (yearData[clienteId]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
+  if(slug === 'sla-primeira-resposta'){
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const subset = merged.filter(x => x.cliente === clienteNome && x.tempoPrimeiraResposta !== null && mesAnoAbertura(x.abertoEm, mesN));
+    return subset.length ? avgOf(subset.map(x => x.tempoPrimeiraResposta)) : null;
   }
   return null;
 }
@@ -6656,6 +6739,80 @@ function DiasTicketAbertoPage({data}){
   );
 }
 
+/* ---------------------------------------------------------------
+   SLA 1ª RESPOSTA
+--------------------------------------------------------------- */
+function SlaPrimeiraRespostaPage({data}){
+  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
+
+  // Agrupado pela Data de Abertura do ticket (mês civil em que ele foi aberto) — diferente de "Média
+  // dias ticket em aberto", que agrupa pelo cenário de fim de mês. Aqui cada ticket contribui só para
+  // o mês em que foi aberto, com o tempo (em minutos) até a primeira resposta.
+  const scoped = useMemo(() => merged.filter(m => m.tempoPrimeiraResposta !== null), [merged]);
+
+  const mesAvg = useMemo(() => {
+    const out = {};
+    MONTHS.forEach(m => {
+      const subset = scoped.filter(x => mesAnoAbertura(x.abertoEm, m.n));
+      out[m.n] = subset.length ? avgOf(subset.map(x => x.tempoPrimeiraResposta)) : null;
+    });
+    return out;
+  }, [scoped]);
+
+  const filledMonths = MONTHS.filter(m => mesAvg[m.n] !== null);
+  const lastMonth = filledMonths.length ? filledMonths[filledMonths.length - 1] : null;
+  const overallAvg = lastMonth ? mesAvg[lastMonth.n] : null;
+
+  const personRows = useMemo(() => {
+    const names = Array.from(new Set(scoped.map(m => m.responsavel).filter(Boolean))).sort();
+    const rows = names.map(n => ({key:n, label:n, match:(m)=>m.responsavel===n}));
+    if(scoped.some(m => !m.responsavel)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavel});
+    return rows;
+  }, [scoped]);
+
+  const clienteRows = useMemo(() =>
+    DEMANDAS_CLIENTES_ORDEM.filter(c => scoped.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c})),
+  [scoped]);
+
+  function avgForRowMes(row, mesN){
+    const subset = scoped.filter(m => row.match(m) && mesAnoAbertura(m.abertoEm, mesN));
+    return subset.length ? avgOf(subset.map(m => m.tempoPrimeiraResposta)) : null;
+  }
+
+  return (
+    <div>
+      <div className="kpi-hero" style={{marginBottom:16}}>
+        {lastMonth && <div className="kpi-hero-period">Fechamento · {mesPlanningNome(lastMonth.n)}/{CURRENT_YEAR}</div>}
+        <div className="kpi-hero-label">SLA 1ª Resposta</div>
+        {overallAvg !== null ? (
+          <div className="kpi-hero-value">{fmtDuracaoMinutos(overallAvg)}</div>
+        ) : (
+          <div className="kpi-hero-value" style={{fontSize:20, color:'#9BA0B8'}}>Sem dados ainda</div>
+        )}
+        <div className="kpi-hero-formula">
+          Tempo médio (em minutos) até a primeira resposta do ticket, agrupado pelo mês da Data de Abertura.
+          Vem direto da coluna "Tempo 1º Resposta" do Movidesk.
+        </div>
+      </div>
+
+      <CsatMatrixTable
+        title="SLA 1ª Resposta por pessoa e mês"
+        desc="Colunas = mês da Data de Abertura. Linhas = Responsável (Movidesk). Valores em minutos."
+        rows={personRows}
+        avgFn={avgForRowMes}
+        emptyText="Nenhum ticket com Tempo 1º Resposta disponível para esse recorte ainda."
+      />
+      <CsatMatrixTable
+        title="SLA 1ª Resposta por cliente e mês"
+        desc="Colunas = mês da Data de Abertura. Linhas = clientes. Valores em minutos."
+        rows={clienteRows}
+        avgFn={avgForRowMes}
+        emptyText="Nenhum ticket com Tempo 1º Resposta disponível para esse recorte ainda."
+      />
+    </div>
+  );
+}
+
 function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   const ind = INDICADORES.find(i => i.slug === slug);
   if(!ind) return <TrackingIndexPage/>;
@@ -6731,6 +6888,9 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   if(slug === 'dias-ticket-aberto'){
     return <DiasTicketAbertoPage data={data}/>;
   }
+  if(slug === 'sla-primeira-resposta'){
+    return <SlaPrimeiraRespostaPage data={data}/>;
+  }
   return (
     <div className="card placeholder-card">
       <span className="placeholder-badge">Em construção</span>
@@ -6781,9 +6941,11 @@ function weekLabel(mondayDate){
   return dd + '/' + mm;
 }
 
-// Gráfico de barras (semana a semana) da métrica escolhida (Tickets ou Esforço), com hover interativo.
-function WeeklyTicketsChart({weeks, metricaLabel}){
+// Gráfico de barras (semana a semana, ou mês a mês para "Média dias aberto") da métrica escolhida,
+// com hover interativo. `unitLabel` prefixa o título do tooltip (ex.: "Semana de " ou "Mês: ").
+function WeeklyTicketsChart({weeks, metricaLabel, unitLabel}){
   const label = metricaLabel || 'Tickets';
+  const prefix = unitLabel === undefined ? 'Semana de ' : unitLabel;
   const wrapRef = useRef(null);
   const [hoverIdx, setHoverIdx] = useState(null);
   const [tooltipLeftPct, setTooltipLeftPct] = useState(50);
@@ -6849,7 +7011,7 @@ function WeeklyTicketsChart({weeks, metricaLabel}){
         </svg>
         {hovered && (
           <div className="chart-tooltip" style={{left: tooltipLeftPct + '%'}}>
-            <div className="chart-tooltip-title">Semana de {hovered.label}</div>
+            <div className="chart-tooltip-title">{prefix}{hovered.label}</div>
             <div className="chart-tooltip-row"><span className="chart-tooltip-dot" style={{background:'var(--accent)'}}></span>{label}: <b>{fmtNumber(hovered.count)}</b></div>
           </div>
         )}
@@ -6876,6 +7038,32 @@ function buildWeeklyBreakdown(filtered, keyFn, dateField, valueFn){
   });
   const rows = Object.entries(rowsMap).map(([nome, counts]) => {
     const total = Object.values(counts).reduce((a,b)=>a+b,0);
+    return {nome, counts, total};
+  });
+  rows.sort((a,b) => b.total - a.total);
+  return rows;
+}
+
+// Quebra mensal (mesmos meses do gráfico) da "Média dias aberto" para uma dimensão qualquer (pessoa,
+// classificação, cliente...) — segue a MESMA lógica de agrupamento da KPI "Média dias ticket em
+// aberto" (fim de cada mês civil, via diasAbertoNoFimDoMes), em vez de contar/somar por semana.
+function buildMonthlyDiasAbertoBreakdown(filtered, keyFn){
+  const rowsMap = {};
+  filtered.forEach(m => {
+    const nome = keyFn(m);
+    if(!rowsMap[nome]) rowsMap[nome] = [];
+    rowsMap[nome].push(m);
+  });
+  const rows = Object.entries(rowsMap).map(([nome, tickets]) => {
+    const counts = {};
+    MONTHS.forEach(mo => {
+      const dias = tickets
+        .map(t => diasAbertoNoFimDoMes(t.abertoEm, t.concluidoEm, CURRENT_YEAR, mo.n))
+        .filter(v => v !== null);
+      counts[mo.n] = dias.length ? avgOf(dias) : null;
+    });
+    const filledVals = Object.values(counts).filter(v => v !== null);
+    const total = filledVals.length ? avgOf(filledVals) : 0;
     return {nome, counts, total};
   });
   rows.sort((a,b) => b.total - a.total);
@@ -6924,18 +7112,30 @@ const DEMANDAS_RESUMO_CAMPOS_DATA = [
   {key:'prazo', label:'Data Prazo', descLabel:'data de prazo'},
 ];
 
-// Resumo (gráfico semanal + tabelas de contagem) exibido entre os filtros e a listagem por cliente.
+// Resumo (gráfico + tabelas de contagem) exibido entre os filtros e a listagem por cliente.
 // Responde aos mesmos filtros da tela (recebe a lista já filtrada), além de dois seletores próprios:
-// a métrica exibida (Tickets = contagem, ou Esforço = soma do campo esforço) e o campo de data usado
-// para agrupar os tickets em semanas (Data Abertura, Data Conclusão ou Data Prazo).
+// a métrica exibida (Tickets = contagem, Esforço = soma do campo esforço, ou Média dias aberto) e,
+// para Tickets/Esforço, o campo de data usado para agrupar os tickets em semanas (Data Abertura,
+// Data Conclusão ou Data Prazo). Quando a métrica é "Média dias aberto", o seletor de data não se
+// aplica — o agrupamento segue sempre a mesma lógica de fim de mês civil da KPI "Média dias ticket
+// em aberto" (diasAbertoNoFimDoMes), por isso os pontos do gráfico passam a ser meses, não semanas.
 function DemandasResumoSection({filtered, devTeam}){
-  const [metrica, setMetrica] = useState('tickets'); // 'tickets' | 'esforco'
+  const [metrica, setMetrica] = useState('tickets'); // 'tickets' | 'esforco' | 'dias-aberto'
   const [campoData, setCampoData] = useState('abertoEm'); // 'abertoEm' | 'concluidoEm' | 'prazo'
 
+  const isDiasAberto = metrica === 'dias-aberto';
   const valueFn = metrica === 'esforco' ? (m => Number(m.esforco) || 0) : null;
-  const metricaLabel = metrica === 'esforco' ? 'Esforço' : 'Tickets';
+  const metricaLabel = metrica === 'esforco' ? 'Esforço' : isDiasAberto ? 'Média dias aberto' : 'Tickets';
 
   const semanas = useMemo(() => {
+    if(isDiasAberto){
+      return MONTHS.map(m => {
+        const dias = filtered
+          .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, m.n))
+          .filter(v => v !== null);
+        return { key: m.n, label: m.label, count: dias.length ? avgOf(dias) : 0, semDados: !dias.length };
+      });
+    }
     const buckets = {};
     filtered.forEach(m => {
       if(!m[campoData]) return;
@@ -6957,15 +7157,30 @@ function DemandasResumoSection({filtered, devTeam}){
     return out;
   }, [filtered, campoData, metrica]);
 
-  const porSuporte = useMemo(() => buildWeeklyBreakdown(filtered, m => m.responsavel || 'Sem responsável', campoData, valueFn), [filtered, campoData, metrica]);
+  const porSuporte = useMemo(() => {
+    const keyFn = m => m.responsavel || 'Sem responsável';
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
+  }, [filtered, campoData, metrica]);
   const porDev = useMemo(() => {
     const devById = Object.fromEntries(devTeam.map(p => [p.id, p.nome]));
-    return buildWeeklyBreakdown(filtered, m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído', campoData, valueFn);
+    const keyFn = m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído';
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
   }, [filtered, devTeam, campoData, metrica]);
-  const porClassificacao = useMemo(() => buildWeeklyBreakdown(filtered, m => m.classificacao || 'Sem classificação', campoData, valueFn), [filtered, campoData, metrica]);
-  const porCliente = useMemo(() => buildWeeklyBreakdown(filtered, m => m.cliente || 'Sem cliente', campoData, valueFn), [filtered, campoData, metrica]);
+  const porClassificacao = useMemo(() => {
+    const keyFn = m => m.classificacao || 'Sem classificação';
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
+  }, [filtered, campoData, metrica]);
+  const porCliente = useMemo(() => {
+    const keyFn = m => m.cliente || 'Sem cliente';
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
+  }, [filtered, campoData, metrica]);
 
   const mediaDiasAberto = useMemo(() => avgOf(filtered.map(m => m.diasEmAberto)), [filtered]);
+  const diasAbertoUltimoMes = useMemo(() => {
+    if(!isDiasAberto) return null;
+    const filledMonths = semanas.filter(s => !s.semDados);
+    return filledMonths.length ? filledMonths[filledMonths.length - 1].count : null;
+  }, [semanas, isDiasAberto]);
   const totalMetrica = useMemo(() => metrica === 'esforco'
     ? filtered.reduce((acc, m) => acc + (Number(m.esforco) || 0), 0)
     : filtered.length, [filtered, metrica]);
@@ -6983,29 +7198,40 @@ function DemandasResumoSection({filtered, devTeam}){
           <button type="button" className={"status-filter-chip" + (metrica==='esforco' ? ' active' : '')}
             style={metrica==='esforco' ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : undefined}
             onClick={()=>setMetrica('esforco')}>Esforço</button>
+          <button type="button" className={"status-filter-chip" + (isDiasAberto ? ' active' : '')}
+            style={isDiasAberto ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : undefined}
+            onClick={()=>setMetrica('dias-aberto')}>Média dias aberto</button>
         </div>
-        <div className="demandas-filter-label" style={{marginBottom:0, marginLeft:10}}>Data considerada:</div>
-        <div className="chip-row" style={{marginBottom:0}}>
-          {DEMANDAS_RESUMO_CAMPOS_DATA.map(c => (
-            <button key={c.key} type="button" className={"status-filter-chip" + (campoData===c.key ? ' active' : '')}
-              style={campoData===c.key ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : undefined}
-              onClick={()=>setCampoData(c.key)}>{c.label}</button>
-          ))}
-        </div>
+        {!isDiasAberto && (
+          <>
+            <div className="demandas-filter-label" style={{marginBottom:0, marginLeft:10}}>Data considerada:</div>
+            <div className="chip-row" style={{marginBottom:0}}>
+              {DEMANDAS_RESUMO_CAMPOS_DATA.map(c => (
+                <button key={c.key} type="button" className={"status-filter-chip" + (campoData===c.key ? ' active' : '')}
+                  style={campoData===c.key ? {background:'var(--accent)', color:'#fff', borderColor:'var(--accent)'} : undefined}
+                  onClick={()=>setCampoData(c.key)}>{c.label}</button>
+              ))}
+            </div>
+          </>
+        )}
       </div>
       <div style={{display:'flex', gap:14, marginBottom:18}}>
         <div style={{flex:1, background:'var(--accent-soft)', borderRadius:'var(--radius-md)', padding:'14px 18px'}}>
-          <div style={{fontFamily:'var(--font-mono)', fontSize:11, color:'var(--accent-ink)', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:4}}>Total {metricaLabel}</div>
-          <div style={{fontFamily:'var(--font-display)', fontSize:26, fontWeight:600, color:'var(--ink)'}}>{fmtNumber(totalMetrica)}</div>
+          <div style={{fontFamily:'var(--font-mono)', fontSize:11, color:'var(--accent-ink)', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:4}}>{isDiasAberto ? 'Média dias aberto (mês mais recente)' : ('Total ' + metricaLabel)}</div>
+          <div style={{fontFamily:'var(--font-display)', fontSize:26, fontWeight:600, color:'var(--ink)'}}>{isDiasAberto ? (diasAbertoUltimoMes === null ? '—' : diasAbertoUltimoMes.toLocaleString('pt-BR', {maximumFractionDigits:1})) : fmtNumber(totalMetrica)}</div>
         </div>
         <div style={{flex:1, background:'var(--accent-soft)', borderRadius:'var(--radius-md)', padding:'14px 18px'}}>
-          <div style={{fontFamily:'var(--font-mono)', fontSize:11, color:'var(--accent-ink)', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:4}}>Média dias aberto</div>
+          <div style={{fontFamily:'var(--font-mono)', fontSize:11, color:'var(--accent-ink)', textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:4}}>{isDiasAberto ? 'Média geral (todos os tickets filtrados)' : 'Média dias aberto'}</div>
           <div style={{fontFamily:'var(--font-display)', fontSize:26, fontWeight:600, color:'var(--ink)'}}>{mediaDiasAberto === null ? '—' : mediaDiasAberto.toFixed(1)}</div>
         </div>
       </div>
-      <div className="section-block-title" style={{marginBottom:4}}>{metricaLabel} por semana</div>
-      <div className="section-block-desc" style={{marginBottom:12}}>Considera os tickets que respeitam os filtros acima, pela {(DEMANDAS_RESUMO_CAMPOS_DATA.find(c => c.key === campoData) || DEMANDAS_RESUMO_CAMPOS_DATA[0]).descLabel} (nº {filtered.length}).</div>
-      <WeeklyTicketsChart weeks={semanas} metricaLabel={metricaLabel}/>
+      <div className="section-block-title" style={{marginBottom:4}}>{metricaLabel} por {isDiasAberto ? 'mês' : 'semana'}</div>
+      <div className="section-block-desc" style={{marginBottom:12}}>
+        {isDiasAberto
+          ? 'Segue a mesma lógica de agrupamento da meta "Média dias ticket em aberto": para cada mês civil, considera os tickets (dentre os filtrados acima) abertos até o fim daquele mês e finalizados só depois dele (ou ainda em aberto), e só tickets abertos em ' + CURRENT_YEAR + '.'
+          : <>Considera os tickets que respeitam os filtros acima, pela {(DEMANDAS_RESUMO_CAMPOS_DATA.find(c => c.key === campoData) || DEMANDAS_RESUMO_CAMPOS_DATA[0]).descLabel} (nº {filtered.length}).</>}
+      </div>
+      <WeeklyTicketsChart weeks={semanas} metricaLabel={metricaLabel} unitLabel={isDiasAberto ? 'Mês: ' : undefined}/>
 
       <WeeklyBreakdownTable titulo="Por pessoa de suporte" weeks={semanas} rows={porSuporte}/>
       <WeeklyBreakdownTable titulo="Por pessoa de desenvolvimento" weeks={semanas} rows={porDev}/>
@@ -7342,6 +7568,7 @@ function DemandasClienteTable({cliente, rows, devTeam, actions}){
                 <th>CSAT</th>
                 <th>Responsável</th>
                 <th>Data de Abertura</th>
+                <th>Tempo 1ª Resposta</th>
                 <th>Dias em Aberto</th>
                 <th>Classificação</th>
                 <th>Tipo</th>
@@ -7403,6 +7630,7 @@ function DemandaRow({row, devTeam, actions}){
       <td className="demanda-csat">{row.csat || '—'}</td>
       <td className="demanda-resp">{row.responsavel || '—'}</td>
       <td className="demanda-dias">{fmtDataAbertura(row.abertoEm)}</td>
+      <td className="demanda-dias">{fmtDuracaoMinutos(row.tempoPrimeiraResposta)}</td>
       <td className="demanda-dias">{row.diasEmAberto === null ? '—' : row.diasEmAberto}</td>
       <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.classificacao) || undefined}>
         <select
