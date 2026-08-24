@@ -6610,14 +6610,26 @@ function DemandasPage({data, actions}){
         );
       }
       actions.importDemandasBase(parsedRows);
-      // Aviso (não bloqueante): parte da planilha foi ignorada por ter cliente não reconhecido.
-      // Isso é o cenário mais comum de "sincronizei e os dados não mudaram" — os tickets desses
-      // clientes nunca chegam a entrar na base, mesmo a sincronização "dando certo".
+      // Aviso (não bloqueante): parte da planilha foi ignorada. Isso é o cenário mais comum de
+      // "sincronizei e os dados não mudaram" — esses tickets nunca chegam a entrar na base, mesmo a
+      // sincronização "dando certo". Lista TODOS os nomes de cliente não reconhecidos (sem cortar em
+      // top-5) e também os outros motivos de descarte (linha com campo essencial vazio, ou data de
+      // abertura ilegível), já que um ticket específico pode estar caindo em qualquer uma dessas
+      // categorias — não só na de cliente não mapeado.
+      const avisos = [];
       if(stats.unmappedClients.length){
-        const top = stats.unmappedClients.slice(0, 5).map(c => `"${c.nome}" (${c.count} ticket${c.count===1?'':'s'})`).join(', ');
-        const resto = stats.unmappedClients.length > 5 ? ` e mais ${stats.unmappedClients.length - 5} nome(s)` : '';
+        const lista = stats.unmappedClients.map(c => `"${c.nome}" (${c.count} ticket${c.count===1?'':'s'})`).join(', ');
+        avisos.push(`Cliente não reconhecido: ${lista}.`);
+      }
+      if(stats.skippedMissingFields){
+        avisos.push(`${stats.skippedMissingFields} linha(s) ignorada(s) por Número/Status/Cliente/Data de Abertura vazio.`);
+      }
+      if(stats.skippedInvalidDate){
+        avisos.push(`${stats.skippedInvalidDate} linha(s) ignorada(s) por Data de Abertura ilegível.`);
+      }
+      if(avisos.length){
         setSyncWarning(
-          `${stats.imported} de ${stats.totalDataRows} linhas importadas. Ignorados por cliente não reconhecido: ${top}${resto}. `
+          `${stats.imported} de ${stats.totalDataRows} linhas importadas. ${avisos.join(' ')} `
           + 'Se algum desses for um cliente válido da BU, peça para adicionar o mapeamento em MOVIDESK_CLIENT_MAP.'
         );
       }
@@ -6724,7 +6736,7 @@ function DemandasPage({data, actions}){
             <div style={{fontSize:12.5, color:'#c0392b', maxWidth:420, textAlign:'right'}}>{syncError}</div>
           )}
           {syncWarning && (
-            <div style={{fontSize:12.5, color:'#9a6b00', maxWidth:420, textAlign:'right'}}>{syncWarning}</div>
+            <div style={{fontSize:12.5, color:'#9a6b00', maxWidth:520, textAlign:'right'}}>{syncWarning}</div>
           )}
         </div>
       </div>
