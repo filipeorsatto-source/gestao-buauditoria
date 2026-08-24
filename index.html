@@ -772,8 +772,16 @@ const MOVIDESK_CLIENT_MAP = {
 // Converte as linhas cruas da planilha (array de arrays, cabeçalho na linha 0) no mesmo formato
 // usado por DEMANDAS_SEED: {n, a, s, u, c, r, d}. Colunas esperadas (nessa ordem): Número, Assunto,
 // Categoria, Status, Urgência, Serviço (1º Nível), Cliente (Organização), Responsável, Aberto em.
+// Retorna também "stats" com diagnóstico de quantas linhas foram ignoradas e por quê — em especial
+// quais nomes de cliente apareceram na planilha mas não têm correspondência em MOVIDESK_CLIENT_MAP,
+// já que isso historicamente é a causa mais comum de "sincronizei e nada mudou" (a planilha mudou o
+// nome da organização, ou tem uma organização nova, e as linhas ficam sendo ignoradas silenciosamente).
 function transformMovideskRows(rows){
   const out = [];
+  const unmappedClients = {}; // nome cru (primeira organização da célula) -> contagem de linhas
+  let skippedMissingFields = 0;
+  let skippedInvalidDate = 0;
+  const totalDataRows = Math.max(0, rows.length - 1);
   for(let i = 1; i < rows.length; i++){
     const row = rows[i];
     if(!row) continue;
@@ -784,12 +792,12 @@ function transformMovideskRows(rows){
     const clienteRaw = row[6];
     const responsavel = row[7];
     const abertoEmRaw = row[8];
-    if(numero === undefined || numero === null || numero === '' || !clienteRaw || !status || !abertoEmRaw) continue;
+    if(numero === undefined || numero === null || numero === '' || !clienteRaw || !status || !abertoEmRaw){ skippedMissingFields++; continue; }
     const firstClient = String(clienteRaw).split(',')[0].trim();
     const mapped = MOVIDESK_CLIENT_MAP[firstClient];
-    if(!mapped) continue;
+    if(!mapped){ unmappedClients[firstClient] = (unmappedClients[firstClient]||0) + 1; continue; }
     const d = (abertoEmRaw instanceof Date) ? abertoEmRaw : new Date(abertoEmRaw);
-    if(isNaN(d.getTime())) continue;
+    if(isNaN(d.getTime())){ skippedInvalidDate++; continue; }
     const iso = d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate()) + 'T'
       + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
     out.push({
@@ -802,7 +810,14 @@ function transformMovideskRows(rows){
       d: iso,
     });
   }
-  return out;
+  const stats = {
+    totalDataRows,
+    imported: out.length,
+    skippedMissingFields,
+    skippedInvalidDate,
+    unmappedClients: Object.entries(unmappedClients).map(([nome, count]) => ({nome, count})).sort((a,b) => b.count - a.count),
+  };
+  return {rows: out, stats};
 }
 
 /* ---------------------------------------------------------------
@@ -6539,10 +6554,12 @@ function DemandasPage({data, actions}){
 
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState(null);
+  const [syncWarning, setSyncWarning] = useState(null);
 
   const handleSyncMovidesk = async () => {
     setSyncing(true);
     setSyncError(null);
+    setSyncWarning(null);
     try{
       const fb = await waitForFirebase();
       const provider = new fb.GoogleAuthProvider();
@@ -6559,9 +6576,31 @@ function DemandasPage({data, actions}){
       const wb = XLSX.read(buf, { type: 'array', cellDates: true });
       const sheet = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
-      const parsedRows = transformMovideskRows(rows);
-      if(!parsedRows.length) throw new Error('A planilha foi baixada, mas nenhum ticket reconhecido foi encontrado.');
+      const {rows: parsedRows, stats} = transformMovideskRows(rows);
+      if(!parsedRows.length){
+        // Nenhum ticket reconhecido — quase sempre porque a coluna de Cliente na planilha tem nomes
+        // de organização que não batem com nenhuma entrada de MOVIDESK_CLIENT_MAP (ex.: a organização
+        // foi renomeada no Movidesk, ou é uma organização nova). Lista os nomes encontrados para facilitar o ajuste.
+        const clientesNaoMapeados = stats.unmappedClients.map(c => `"${c.nome}" (${c.count})`).join(', ');
+        throw new Error(
+          'A planilha foi baixada (' + stats.totalDataRows + ' linhas), mas nenhum ticket reconhecido foi encontrado. '
+          + (clientesNaoMapeados
+            ? 'Nomes de cliente na planilha sem correspondência cadastrada: ' + clientesNaoMapeados + '.'
+            : 'Verifique se as colunas da planilha (Número, Status, Cliente, Aberto em) continuam na mesma ordem.')
+        );
+      }
       actions.importDemandasBase(parsedRows);
+      // Aviso (não bloqueante): parte da planilha foi ignorada por ter cliente não reconhecido.
+      // Isso é o cenário mais comum de "sincronizei e os dados não mudaram" — os tickets desses
+      // clientes nunca chegam a entrar na base, mesmo a sincronização "dando certo".
+      if(stats.unmappedClients.length){
+        const top = stats.unmappedClients.slice(0, 5).map(c => `"${c.nome}" (${c.count} ticket${c.count===1?'':'s'})`).join(', ');
+        const resto = stats.unmappedClients.length > 5 ? ` e mais ${stats.unmappedClients.length - 5} nome(s)` : '';
+        setSyncWarning(
+          `${stats.imported} de ${stats.totalDataRows} linhas importadas. Ignorados por cliente não reconhecido: ${top}${resto}. `
+          + 'Se algum desses for um cliente válido da BU, peça para adicionar o mapeamento em MOVIDESK_CLIENT_MAP.'
+        );
+      }
     }catch(e){
       console.error('Movidesk sync error', e);
       setSyncError(e.message || 'Erro ao atualizar a base do Movidesk.');
@@ -6662,7 +6701,10 @@ function DemandasPage({data, actions}){
             {syncing ? 'Atualizando…' : 'Atualizar base do Movidesk'}
           </button>
           {syncError && (
-            <div style={{fontSize:12.5, color:'#c0392b', maxWidth:320, textAlign:'right'}}>{syncError}</div>
+            <div style={{fontSize:12.5, color:'#c0392b', maxWidth:420, textAlign:'right'}}>{syncError}</div>
+          )}
+          {syncWarning && (
+            <div style={{fontSize:12.5, color:'#9a6b00', maxWidth:420, textAlign:'right'}}>{syncWarning}</div>
           )}
         </div>
       </div>
