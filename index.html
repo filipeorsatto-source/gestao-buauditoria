@@ -2408,13 +2408,20 @@ function endOfMonth(ano, mesN){
 // (fim do mês) - (Aberto em), em dias — mesmo para meses já passados, "congelando" o cenário de como
 // o mês terminou (por isso o histórico de meses anteriores não muda depois que um ticket é concluído).
 // Retorna null quando o ticket não se aplica a esse mês (ainda não tinha sido aberto até o fim dele,
-// ou já tinha sido finalizado até o fim dele).
-function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, ano, mesN){
+// já tinha sido finalizado até o fim dele, ou — ver `status` abaixo — o ticket já está num status
+// terminal mas sem data de conclusão confiável, então não dá pra afirmar que ele "ainda está aberto").
+function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, status, ano, mesN){
   const abertoDate = new Date(abertoEmIso);
   if(isNaN(abertoDate.getTime())) return null;
   // Considera apenas tickets abertos dentro do próprio ano `ano` — tickets abertos em anos anteriores
   // não entram nessa média (a partir do pedido do usuário de restringir a métrica aos tickets de 2026).
   if(abertoDate.getFullYear() !== ano) return null;
+  // Ticket com status terminal (Resolvido/Cancelado/Fechado) mas sem "Concluído em" preenchido é uma
+  // lacuna de dados (comum em cancelamentos, que às vezes não passam pelo mesmo fluxo de resolução no
+  // Movidesk) — nesse caso não sabemos a data real de conclusão, então excluímos o ticket da média em
+  // vez de contá-lo como "ainda aberto" indefinidamente (o que inflaria todo mês desde a abertura dele,
+  // inclusive o mês corrente). Isso é diferente de um ticket genuinamente em aberto.
+  if(DEMANDA_STATUS_TERMINAL.includes(status) && !concluidoEmIso) return null;
   // Nunca projeta para o futuro: um mês que ainda nem começou não entra na média, e o mês em curso usa
   // "hoje" como corte em vez do fim do mês (que ainda não aconteceu) — a partir do pedido do usuário de
   // não deixar o cálculo "prever" quantos dias um ticket ainda em aberto teria no fim de um mês futuro.
@@ -4456,7 +4463,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
     const out = {};
     MONTHS.forEach(m => {
       const dias = scoped
-        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, m.n))
+        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, m.n))
         .filter(v => v !== null);
       out[m.n] = dias.length ? avgOf(dias) : null;
     });
@@ -4586,7 +4593,7 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN)
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
     const subset = merged.filter(x => x.cliente === clienteNome);
     const dias = subset
-      .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, mesN))
+      .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, mesN))
       .filter(v => v !== null);
     return dias.length ? avgOf(dias) : null;
   }
@@ -6695,7 +6702,7 @@ function DiasTicketAbertoPage({data}){
     const out = {};
     MONTHS.forEach(m => {
       const dias = merged
-        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, m.n))
+        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, m.n))
         .filter(v => v !== null);
       out[m.n] = dias.length ? avgOf(dias) : null;
     });
@@ -6720,7 +6727,7 @@ function DiasTicketAbertoPage({data}){
   function avgForRowMes(row, mesN){
     const dias = merged
       .filter(row.match)
-      .map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, CURRENT_YEAR, mesN))
+      .map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, m.status, CURRENT_YEAR, mesN))
       .filter(v => v !== null);
     return dias.length ? avgOf(dias) : null;
   }
@@ -7079,7 +7086,7 @@ function buildMonthlyDiasAbertoBreakdown(filtered, keyFn){
     const counts = {};
     MONTHS.forEach(mo => {
       const dias = tickets
-        .map(t => diasAbertoNoFimDoMes(t.abertoEm, t.concluidoEm, CURRENT_YEAR, mo.n))
+        .map(t => diasAbertoNoFimDoMes(t.abertoEm, t.concluidoEm, t.status, CURRENT_YEAR, mo.n))
         .filter(v => v !== null);
       counts[mo.n] = dias.length ? avgOf(dias) : null;
     });
@@ -7152,7 +7159,7 @@ function DemandasResumoSection({filtered, devTeam}){
     if(isDiasAberto){
       return MONTHS.map(m => {
         const dias = filtered
-          .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, CURRENT_YEAR, m.n))
+          .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, m.n))
           .filter(v => v !== null);
         return { key: m.n, label: m.label, count: dias.length ? avgOf(dias) : 0, semDados: !dias.length };
       });
