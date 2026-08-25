@@ -5596,11 +5596,11 @@ function MargemBrutaPage({financeiro, financeiroSync, actions}){
                 </tr>
               ))}
               <tr className="upsell-pillar-row">
-                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                <td style={{textAlign:'left', paddingLeft:12}}>Total</td>
                 {MONTHS.map(m => {
                   const vals = clientNames.map(c => (ticketMedioBudgetYear[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
-                  const avg = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0) / vals.length) : null;
-                  return <td key={m.n} className="upsell-pillar-score">{avg === null ? '—' : fmtCurrency(avg)}</td>;
+                  const soma = vals.length ? vals.reduce((a,b)=>a+b,0) : null;
+                  return <td key={m.n} className="upsell-pillar-score">{soma === null ? '—' : fmtCurrency(soma)}</td>;
                 })}
               </tr>
             </tbody>
