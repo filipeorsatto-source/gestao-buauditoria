@@ -1117,7 +1117,21 @@ async function fetchSheetTabValues(accessToken, sheetName){
   const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${MARGEM_BRUTA_SHEET_ID}/values/${range}`, {
     headers: { Authorization: 'Bearer ' + accessToken },
   });
-  if(!res.ok) throw new Error(`Não foi possível ler a aba "${sheetName}" da planilha (HTTP ${res.status}). Confirme se o nome da aba continua o mesmo.`);
+  if(!res.ok){
+    // Tenta extrair o motivo real que o Google retornou (ex.: "Google Sheets API has not been used in
+    // project ... or it is disabled") em vez de só o código HTTP — isso é diferente da API do Drive
+    // (usada pela Margem Bruta), então um 403 aqui geralmente significa que a Google Sheets API ainda
+    // não foi habilitada no projeto do Google Cloud vinculado a este app, mesmo que a do Drive já esteja.
+    let detail = '';
+    try{
+      const body = await res.json();
+      detail = (body && body.error && body.error.message) ? ` — ${body.error.message.replace(/\.+$/, '')}` : '';
+    }catch(e){ /* corpo não veio como JSON — segue sem detalhe extra */ }
+    const dica = res.status === 403
+      ? ' Se a mensagem acima mencionar a API estar desabilitada, é preciso habilitar a "Google Sheets API" no Google Cloud Console (APIs e Serviços → Biblioteca) do projeto vinculado a este app — a API do Drive, usada pela Margem Bruta, é habilitada separadamente e não cobre isso.'
+      : ' Confirme se o nome da aba continua o mesmo.';
+    throw new Error(`Não foi possível ler a aba "${sheetName}" da planilha (HTTP ${res.status})${detail}.${dica}`);
+  }
   const json = await res.json();
   return json.values || [];
 }
