@@ -2544,11 +2544,19 @@ function buildDemandasMerged(customMap, baseRows){
     // só volta a valer se o campo manual for limpo (revertido).
     const concluidoEmManual = c.concluidoEmManual || '';
     const concluidoEm = concluidoEmManual || o.re || c.concluidoEm || '';
-    const concluidoManualmente = !!concluidoEmManual;
-    // Status "efetivo" para fins de cálculo de KPI: um ticket com Concluído Em manual é tratado como
-    // Resolvido nos cálculos (dias em aberto, atraso, SLA), mesmo que o status real no Movidesk ainda
-    // esteja "Em aberto" — o badge de Status exibido na tabela continua mostrando o valor real do
-    // Movidesk, só o cálculo é que passa a considerar a conclusão manual.
+    // Origem do valor exibido, para a UI saber quando mostrar a tag "manual" e o botão de limpar:
+    // 'manual' = preenchido pelo duplo clique (depois da sincronização com Movidesk existir);
+    // 'manual-legado' = preenchido à mão ANTES dessa sincronização existir (campo antigo c.concluidoEm,
+    // de quando a coluna era 100% manual) — continua editável/limpável do mesmo jeito que o novo campo;
+    // 'movidesk' = veio direto da coluna "Resolvido Em" sincronizada, sem edição manual; '' = vazio.
+    const concluidoEmOrigem = concluidoEmManual ? 'manual' : (o.re ? 'movidesk' : (c.concluidoEm ? 'manual-legado' : ''));
+    // Qualquer dado manual (novo ou legado, de antes desta sincronização existir) conta como "concluído
+    // manualmente" para fins de KPI e de exibição da tag/botão de limpar.
+    const concluidoManualmente = concluidoEmOrigem === 'manual' || concluidoEmOrigem === 'manual-legado';
+    // Status "efetivo" para fins de cálculo de KPI: um ticket com Concluído Em manual (novo ou legado) é
+    // tratado como Resolvido nos cálculos (dias em aberto, atraso, SLA), mesmo que o status real no
+    // Movidesk ainda esteja "Em aberto" — o badge de Status exibido na tabela continua mostrando o valor
+    // real do Movidesk, só o cálculo é que passa a considerar a conclusão manual.
     const statusEfetivo = concluidoManualmente ? 'Resolvido' : o.s;
     // Dias em Aberto: se o ticket já foi finalizado (Fechado/Resolvido/Cancelado, ou com conclusão
     // manual), usa o tempo até a data de conclusão informada (senão fica indefinido — não dá pra saber
@@ -2578,6 +2586,7 @@ function buildDemandasMerged(customMap, baseRows){
       concluidoEm: concluidoEm,
       concluidoEmManual: concluidoEmManual,
       concluidoManualmente: concluidoManualmente,
+      concluidoEmOrigem: concluidoEmOrigem,
       mesPlanning: c.mesPlanning || '',
       prioridade: c.prioridade || '',
       esforco: (c.esforco === undefined || c.esforco === null || c.esforco === '') ? null : Number(c.esforco),
@@ -2690,8 +2699,9 @@ function metaArea(goal){
 }
 
 // Metas cujo Budget mensal é definido direto na tela do próprio indicador (Acompanhamento de Metas),
-// e não mais no card/modal de Gestão de Metas.
-const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico'];
+// e não mais no card/modal de Gestão de Metas. "ticket-medio" é a exceção de local: o budget dela é
+// definido por cliente na aba Margem Bruta (não tem tela própria em Acompanhamento de Metas).
+const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico', 'ticket-medio'];
 
 const AREA_PALETTE = ['#2C5AA0','#1F8A70','#B8862B','#8A4FBE','#C4432B','#2B8FA6','#6B5BD6','#A85A9E'];
 function colorForArea(area){
@@ -4376,10 +4386,22 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
 
   if(slug === 'ticket-medio'){
     // Mesma fonte de dados de "margem-bruta" (P&L do ano vigente) — Ticket Médio é uma meta própria
-    // em Gestão de Metas, mas não tem tela/sincronização separada em Acompanhamento de Metas.
+    // em Gestão de Metas, mas não tem tela/sincronização separada em Acompanhamento de Metas (o
+    // detalhamento e o budget por cliente ficam na aba Margem Bruta). Soma a Receita Líquida SÓ dos
+    // clientes considerados (todos, ou apenas os do responsável filtrado via clienteNomesFilter) e
+    // divide pela quantidade desses clientes — em vez de sempre dividir pelo total da empresa por um
+    // divisor fixo (TICKET_MEDIO_CLIENTES), que só é correto quando não há filtro de pessoa.
     const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
     const out = {};
-    MONTHS.forEach(m => { out[m.n] = computeTicketMedio(pnlYear[m.n]); });
+    MONTHS.forEach(m => {
+      const monthData = pnlYear[m.n];
+      if(!monthData || !monthData.receitaPorCliente || !clientesCols.length){ out[m.n] = null; return; }
+      const vals = clientesCols
+        .map(c => monthData.receitaPorCliente[c.nome])
+        .filter(v => v !== undefined && v !== null)
+        .map(Number);
+      out[m.n] = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0) / vals.length) : null;
+    });
     return out;
   }
 
@@ -4572,16 +4594,31 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
     return out;
   }
 
+  if(slug === 'ticket-medio'){
+    // Budget de receita definido manualmente por cliente e mês (tela de Margem Bruta) — a meta de
+    // Ticket Médio vira a MÉDIA desse budget entre os clientes considerados (todos, ou só os do
+    // responsável filtrado), do mesmo jeito que o Realizado acima usa a receita real por cliente.
+    const yearData = (data.financeiro && data.financeiro.ticketMedioReceitaBudget && data.financeiro.ticketMedioReceitaBudget[CURRENT_YEAR]) || {};
+    const out = {};
+    MONTHS.forEach(m => {
+      const vals = clientesCols.map(c => (yearData[c.nome]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      out[m.n] = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0) / vals.length) : null;
+    });
+    return out;
+  }
+
   return null;
 }
 
 // Indicadores para os quais existe granularidade por cliente (Realizado, e às vezes Budget).
-// Os demais (ex.: Margem Bruta e Ticket Médio, que são razões do P&L da empresa como um todo) não têm
-// quebra por cliente e por isso não exibem a tabela Clientes x Meses.
+// Os demais (ex.: Margem Bruta, que é uma razão do P&L da empresa como um todo) não têm quebra por
+// cliente e por isso não exibem a tabela Clientes x Meses. "ticket-medio" tem granularidade por
+// cliente (Receita Líquida real por cliente, e o budget de receita definido por cliente na aba Margem
+// Bruta) — é o que permite filtrar a meta por responsável (ex.: só os clientes do Henrique).
 const META_GRANULAR_CLIENTE_SLUGS = [
   'upsell-score','contas-finalizadas','penetracao-regras','efetividade-regras',
   'cobertura-dados','entregas-prazo','csat-tech','csat-atendimento','csat-produto',
-  'dias-ticket-aberto','nps','subfaturamento','contas-automatico','sla-primeira-resposta',
+  'dias-ticket-aberto','nps','subfaturamento','contas-automatico','sla-primeira-resposta','ticket-medio',
 ];
 
 // Realizado de um indicador, para um cliente e mês específicos. Retorna null se não aplicável.
@@ -4650,6 +4687,12 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN)
     const subset = merged.filter(x => x.cliente === clienteNome && x.tempoPrimeiraResposta !== null && mesAnoAbertura(x.abertoEm, mesN));
     return subset.length ? avgOf(subset.map(x => x.tempoPrimeiraResposta)) : null;
   }
+  if(slug === 'ticket-medio'){
+    const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
+    const monthData = pnlYear[mesN];
+    const v = monthData && monthData.receitaPorCliente ? monthData.receitaPorCliente[clienteNome] : undefined;
+    return (v === undefined || v === null) ? null : Number(v);
+  }
   return null;
 }
 
@@ -4674,6 +4717,11 @@ function getMetaBudgetPorClienteMes(slug, data, clienteId, clienteNome, mesN){
     const v = (yearData[clienteId]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
   }
+  if(slug === 'ticket-medio'){
+    const yearData = (data.financeiro && data.financeiro.ticketMedioReceitaBudget && data.financeiro.ticketMedioReceitaBudget[CURRENT_YEAR]) || {};
+    const v = (yearData[clienteNome]||{})[mesN];
+    return (v === undefined || v === null || v === '') ? null : Number(v);
+  }
   return null;
 }
 
@@ -4686,7 +4734,7 @@ function GoalClienteMesTable({goal, data, clienteNomesFilter}){
 
   const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(goal.slug);
   const flatBudgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(goal.slug, data, clienteNomesFilter) : (goal.budgets[CURRENT_YEAR] || {});
-  const budgetIsPerCliente = ['contas-finalizadas','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico'].includes(goal.slug);
+  const budgetIsPerCliente = ['contas-finalizadas','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'].includes(goal.slug);
 
   return (
     <div style={{marginTop:14}}>
@@ -4783,7 +4831,11 @@ function GoalModal({initial, pessoas, onSave, onClose}){
       {budgetIsExterno ? (
         <div className="field">
           <label>Budget mensal · {CURRENT_YEAR}</label>
-          <div className="hint">Essa meta tem o budget definido diretamente na tela do indicador, dentro de Acompanhamento de Metas — não é mais editado por aqui.</div>
+          <div className="hint">
+            {initial && initial.slug === 'ticket-medio'
+              ? 'Essa meta tem o budget definido por cliente na aba Margem Bruta (dentro de Acompanhamento de Metas) — não é mais editado por aqui.'
+              : 'Essa meta tem o budget definido diretamente na tela do indicador, dentro de Acompanhamento de Metas — não é mais editado por aqui.'}
+          </div>
         </div>
       ) : (
         <div className="field">
@@ -4948,7 +5000,6 @@ function GoalFullCard({goal, pessoas, data, clienteNomesFilter, onEdit, onDelete
   const pessoaById = Object.fromEntries(pessoas.map(p=>[p.id,p]));
   const isExterno = goal.slug && META_BUDGET_EXTERNO_SLUGS.includes(goal.slug);
   const year = isExterno ? getMetaBudgetOverrideByMonth(goal.slug, data, clienteNomesFilter) : (goal.budgets[CURRENT_YEAR] || {});
-  const total = Object.values(year).reduce((a,b) => a + (Number(b)||0), 0);
   const assoc = (goal.pessoaIds||[]).map(id => pessoaById[id]).filter(Boolean);
   const realizedByMonth = goal.slug ? getMetaRealizadoByMonth(goal.slug, data, clienteNomesFilter) : null;
 
@@ -4979,7 +5030,6 @@ function GoalFullCard({goal, pessoas, data, clienteNomesFilter, onEdit, onDelete
             {goal.fonte ? (isUrlLike(goal.fonte) ? <a href={goal.fonte} target="_blank" rel="noopener noreferrer">{goal.fonte}</a> : goal.fonte) : '—'}
           </span></div>
           <div className="kv-row"><span className="kv-label">Unidade de medida</span><span className="kv-value">{goal.unidadeMedida}</span></div>
-          <div className="kv-row"><span className="kv-label">Budget anual {CURRENT_YEAR}</span><span className="kv-value">{fmtNumber(total)}</span></div>
           <div className="kv-row"><span className="kv-label">Pessoas responsáveis</span>
             <span className="kv-value">
               {assoc.length === 0 ? '—' : (
@@ -5297,6 +5347,7 @@ function TrackingIndexPage(){
 }
 
 function MargemBrutaPage({financeiro, financeiroSync, actions}){
+  const ticketMedioBudgetYear = (financeiro && financeiro.ticketMedioReceitaBudget && financeiro.ticketMedioReceitaBudget[CURRENT_YEAR]) || {};
   const pnlYear = (financeiro && financeiro.pnl && financeiro.pnl[CURRENT_YEAR]) || {};
   const filledMonths = MONTHS.filter(m => pnlYear[m.n]);
 
@@ -5495,6 +5546,61 @@ function MargemBrutaPage({financeiro, financeiroSync, actions}){
                       {formatted === null ? '—' : formatted}
                     </td>
                   );
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card" style={{marginTop:16}}>
+        <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+          <div>
+            <div className="section-block-title">Budget de Receita por Cliente · {CURRENT_YEAR}</div>
+            <div className="section-block-desc">
+              Preenchimento manual por cliente e mês. Usado para calcular o budget da meta "Ticket Médio" em Gestão de
+              Metas — a meta vira a média desse budget entre os clientes considerados, o que permite filtrar por
+              responsável (ex.: só os clientes de uma pessoa) e ver o Ticket Médio real e budget calculados só com os
+              clientes dela.
+            </div>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="upsell-tbl">
+            <thead>
+              <tr>
+                <th></th>
+                {MONTHS.map(m => <th key={m.n}>{m.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {clientNames.map(cliente => (
+                <tr key={cliente}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{cliente}</td>
+                  {MONTHS.map(m => {
+                    const raw = (ticketMedioBudgetYear[cliente]||{})[m.n];
+                    return (
+                      <td key={m.n}>
+                        <input
+                          type="number"
+                          className="upsell-input"
+                          defaultValue={isEmptyVal(raw) ? '' : raw}
+                          key={m.n + '-' + (raw ?? '')}
+                          placeholder="—"
+                          step="1"
+                          onBlur={e => actions.setTicketMedioReceitaBudget(m.n, cliente, e.target.value === '' ? null : e.target.value)}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr className="upsell-pillar-row">
+                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                {MONTHS.map(m => {
+                  const vals = clientNames.map(c => (ticketMedioBudgetYear[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+                  const avg = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0) / vals.length) : null;
+                  return <td key={m.n} className="upsell-pillar-score">{avg === null ? '—' : fmtCurrency(avg)}</td>;
                 })}
               </tr>
             </tbody>
@@ -7730,13 +7836,20 @@ function ConcluidoEmCell({row, actions}){
     setEditing(true);
   };
   const commit = () => {
-    actions.updateDemandaCustom(row.numero, {concluidoEmManual: draft});
+    const patch = {concluidoEmManual: draft};
+    // Salvar vazio limpa TUDO que for manual para este ticket — inclusive o campo antigo (c.concluidoEm,
+    // de antes de existir a sincronização com o Movidesk), que senão continuaria "grudado" mostrando o
+    // valor antigo mesmo depois do campo novo ser esvaziado.
+    if(!draft) patch.concluidoEm = '';
+    actions.updateDemandaCustom(row.numero, patch);
     setEditing(false);
   };
   const cancel = () => setEditing(false);
   const revert = (e) => {
     e.stopPropagation();
-    actions.updateDemandaCustom(row.numero, {concluidoEmManual: ''});
+    // Limpa tanto o campo novo (concluidoEmManual) quanto o antigo (concluidoEm, usado antes de existir
+    // a sincronização com o Movidesk) — sem isso, um valor manual antigo "reaparecia" depois de reverter.
+    actions.updateDemandaCustom(row.numero, {concluidoEmManual: '', concluidoEm: ''});
   };
 
   if(editing){
@@ -8151,6 +8264,21 @@ function App(){
       yearData[clienteNome] = clienteData;
       subfaturamentoBudget[CURRENT_YEAR] = yearData;
       financeiro.subfaturamentoBudget = subfaturamentoBudget;
+      return {...d, financeiro};
+    }, null),
+
+    // Budget de receita por cliente e mês (usado para calcular a meta de Ticket Médio filtrada por
+    // responsável/cliente em Gestão de Metas) — mesmo modelo de dados de Contas Finalizadas/Subfaturamento.
+    setTicketMedioReceitaBudget: (mesN, clienteNome, value) => mutate(d => {
+      const financeiro = {...d.financeiro};
+      const ticketMedioReceitaBudget = {...(financeiro.ticketMedioReceitaBudget||{})};
+      const yearData = {...(ticketMedioReceitaBudget[CURRENT_YEAR]||{})};
+      const clienteData = {...(yearData[clienteNome]||{})};
+      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+      else { clienteData[mesN] = value; }
+      yearData[clienteNome] = clienteData;
+      ticketMedioReceitaBudget[CURRENT_YEAR] = yearData;
+      financeiro.ticketMedioReceitaBudget = ticketMedioReceitaBudget;
       return {...d, financeiro};
     }, null),
     setContasAutomaticoRealizado: (mesN, clienteNome, value) => mutate(d => {
