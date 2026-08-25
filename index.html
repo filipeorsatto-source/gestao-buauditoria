@@ -846,7 +846,13 @@ function transformMovideskRows(rows){
   // ainda em exportações antigas.
   const headerRow = rows[0] || [];
   const resolvidoEmCol = headerRow.findIndex(h => normalizeHeaderName(h) === 'resolvido em');
-  const tempo1aRespostaCol = headerRow.findIndex(h => normalizeHeaderName(h) === 'tempo 1 resposta');
+  // Casamento por tokens (não por igualdade exata) para tolerar variações reais de nomenclatura no
+  // export do Movidesk — ex.: cabeçalho real confirmado "1° Resposta (Horas Corridas)" é bem diferente
+  // do texto originalmente assumido "Tempo 1º Resposta", mas ambos contêm os tokens "1" e "resposta".
+  const tempo1aRespostaCol = headerRow.findIndex(h => {
+    const tokens = normalizeHeaderName(h).split(' ').filter(Boolean);
+    return tokens.includes('resposta') && tokens.includes('1');
+  });
 
   for(let i = 1; i < rows.length; i++){
     const row = rows[i];
