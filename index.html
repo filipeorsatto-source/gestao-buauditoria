@@ -2401,13 +2401,20 @@ function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, ano, mesN){
   // Considera apenas tickets abertos dentro do próprio ano `ano` — tickets abertos em anos anteriores
   // não entram nessa média (a partir do pedido do usuário de restringir a métrica aos tickets de 2026).
   if(abertoDate.getFullYear() !== ano) return null;
+  // Nunca projeta para o futuro: um mês que ainda nem começou não entra na média, e o mês em curso usa
+  // "hoje" como corte em vez do fim do mês (que ainda não aconteceu) — a partir do pedido do usuário de
+  // não deixar o cálculo "prever" quantos dias um ticket ainda em aberto teria no fim de um mês futuro.
+  const hoje = new Date();
+  const inicioDoMes = new Date(ano, mesN - 1, 1);
+  if(inicioDoMes > hoje) return null;
   const fimDoMes = endOfMonth(ano, mesN);
-  if(abertoDate > fimDoMes) return null;
+  const corteEfetivo = fimDoMes > hoje ? hoje : fimDoMes;
+  if(abertoDate > corteEfetivo) return null;
   if(concluidoEmIso){
     const concluidoDate = new Date(concluidoEmIso.includes('T') ? concluidoEmIso : concluidoEmIso + 'T00:00:00');
-    if(!isNaN(concluidoDate.getTime()) && concluidoDate <= fimDoMes) return null;
+    if(!isNaN(concluidoDate.getTime()) && concluidoDate <= corteEfetivo) return null;
   }
-  return daysBetween(abertoEmIso, fimDoMes);
+  return daysBetween(abertoEmIso, corteEfetivo);
 }
 
 // Formata um valor em minutos como "Xh Ymin" (ou só "Ymin" quando < 1h) — usado para exibir o Tempo
