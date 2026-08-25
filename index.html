@@ -1086,6 +1086,7 @@ const REALIZADO_SHEET_TAB = {
   'contas-automatico': 'Contas Automáticas',
   'penetracao-regras': 'Penetração Regras',
   'efetividade-regras': 'Efetividade Regras',
+  'subfaturamento': 'Subfaturamento',
 };
 
 // Nomes canônicos de cliente usados no restante do painel — usado para casar com o nome como aparece
@@ -2602,7 +2603,7 @@ const INDICADORES = [
   {slug:'upsell-score', titulo:'Relacionamento', area:'Deployment', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
   {slug:'contas-finalizadas', titulo:'Contas Finalizadas', area:'Deployment', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
   {slug:'subfaturamento', titulo:'Subfaturamento', area:'Auditoria', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
-  {slug:'contas-automatico', titulo:'% Contas Automático', area:'Auditoria', descricao:'Percentual de contas do cliente finalizadas automaticamente, sem intervenção manual.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
+  {slug:'contas-automatico', titulo:'% Contas Automático', area:'Auditoria', descricao:'Número de contas do cliente finalizadas automaticamente, sem intervenção manual.', unidade:'Absoluto', fonte:'Sincronizado da aba "Contas Automáticas" da planilha Gestão Metas.'},
   {slug:'nps', titulo:'NPS', area:'Geral', descricao:'Satisfação do cliente medida através de pesquisa bimestral.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/18JDaC4rIPpCGS2_3qgXLV0gwXjJNMaL0'},
   {slug:'penetracao-regras', titulo:'Penetração Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'http://central-regras.riviobizdev.com/'},
   {slug:'efetividade-regras', titulo:'Efetividade Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
@@ -5835,7 +5836,9 @@ function ContasFinalizadasPage({financeiro, actions, sync}){
 // modelo visual de ContasFinalizadasPage — usada por Subfaturamento (Realizado manual) e % Contas
 // Automático (Realizado sincronizado da planilha — passe `sync`/`onSync`/`descRealizado` nesse caso;
 // o Budget continua sempre manual, para as duas).
-function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget, sync, onSync, descRealizado}){
+function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget, sync, onSync, descRealizado, unidade}){
+  const un = unidade || '%';
+  const fmtVal = v => fmtChartValue(v, un);
   const data = (financeiro && financeiro[dataKey] && financeiro[dataKey][CURRENT_YEAR]) || {};
   const budgetData = (financeiro && financeiro[budgetKey] && financeiro[budgetKey][CURRENT_YEAR]) || {};
   const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
@@ -5857,7 +5860,7 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
           {lastMonth && <div className="kpi-hero-period">Último mês · {lastMonth.label}/{CURRENT_YEAR}</div>}
           <div className="kpi-hero-label">{titulo}</div>
           {lastTotal !== null ? (
-            <div className="kpi-hero-value positive">{fmtPercent(lastTotal)}</div>
+            <div className="kpi-hero-value positive">{fmtVal(lastTotal)}</div>
           ) : (
             <div className="kpi-hero-value" style={{fontSize:22, color:'#9BA0B8'}}>Sem dados preenchidos</div>
           )}
@@ -5891,7 +5894,7 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
                     if(realizadoReadOnly){
                       return (
                         <td key={m.n} className={isEmptyVal(raw) ? 'empty-val' : ''} style={{textAlign:'center'}}>
-                          {isEmptyVal(raw) ? '—' : fmtPercent(Number(raw))}
+                          {isEmptyVal(raw) ? '—' : fmtVal(Number(raw))}
                         </td>
                       );
                     }
@@ -5915,7 +5918,7 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
                 <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
                 {MONTHS.map(m => {
                   const t = colAvg(data, m);
-                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtPercent(t)}</td>;
+                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtVal(t)}</td>;
                 })}
               </tr>
             </tbody>
@@ -5964,7 +5967,7 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
                 <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
                 {MONTHS.map(m => {
                   const t = colAvg(budgetData, m);
-                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtPercent(t)}</td>;
+                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtVal(t)}</td>;
                 })}
               </tr>
             </tbody>
@@ -5975,9 +5978,16 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
   );
 }
 
-function SubfaturamentoPage({financeiro, actions}){
+function SubfaturamentoPage({financeiro, actions, sync}){
+  const handleSync = async () => {
+    const token = await getGoogleDriveAccessToken();
+    const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['subfaturamento']);
+    const porCliente = parseClienteMesSheet(values);
+    actions.importSubfaturamentoRealizado(porCliente);
+  };
   return <PercentClientGoalPage titulo="Subfaturamento" financeiro={financeiro} dataKey="subfaturamento" budgetKey="subfaturamentoBudget"
-    setRealizado={actions.setSubfaturamentoRealizado} setBudget={actions.setSubfaturamentoBudget}/>;
+    setRealizado={actions.setSubfaturamentoRealizado} setBudget={actions.setSubfaturamentoBudget}
+    sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Subfaturamento" da planilha Gestão Metas.'/>;
 }
 
 function ContasAutomaticoPage({financeiro, actions, sync}){
@@ -5989,7 +5999,8 @@ function ContasAutomaticoPage({financeiro, actions, sync}){
   };
   return <PercentClientGoalPage titulo="% Contas Automático" financeiro={financeiro} dataKey="contasAutomatico" budgetKey="contasAutomaticoBudget"
     setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}
-    sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Contas Automáticas" da planilha Gestão Metas.'/>;
+    sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Contas Automáticas" da planilha Gestão Metas — valores absolutos (quantidade de contas), não percentual.'
+    unidade="Absoluto"/>;
 }
 
 function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKey, budgetSetActionName, titulo, formulaHint, sync, onSync, descRealizado}){
@@ -6854,7 +6865,7 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
     return <ContasFinalizadasPage financeiro={financeiro} actions={actions} sync={data.contasFinalizadasSync}/>;
   }
   if(slug === 'subfaturamento'){
-    return <SubfaturamentoPage financeiro={financeiro} actions={actions}/>;
+    return <SubfaturamentoPage financeiro={financeiro} actions={actions} sync={data.subfaturamentoSync}/>;
   }
   if(slug === 'contas-automatico'){
     return <ContasAutomaticoPage financeiro={financeiro} actions={actions} sync={data.contasAutomaticoSync}/>;
@@ -8111,6 +8122,23 @@ function App(){
         },
       };
     }, `Base de Contas Finalizadas atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
+
+    // Realizado sincronizado da aba "Subfaturamento" da planilha Gestão Metas (por cliente, nome como chave).
+    importSubfaturamentoRealizado: (porCliente) => mutate(d => {
+      const financeiro = {...(d.financeiro||{})};
+      const subfaturamento = {...(financeiro.subfaturamento||{})};
+      subfaturamento[CURRENT_YEAR] = porCliente;
+      financeiro.subfaturamento = subfaturamento;
+      return {
+        ...d,
+        financeiro,
+        subfaturamentoSync: {
+          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+          at: new Date().toISOString(),
+          count: Object.keys(porCliente).length,
+        },
+      };
+    }, `Base de Subfaturamento atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
 
     // Realizado sincronizado da aba "Contas Automáticas" da planilha Gestão Metas (por cliente, nome como chave).
     importContasAutomaticoRealizado: (porCliente) => mutate(d => {
