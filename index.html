@@ -4378,10 +4378,16 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
     const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo']
       .filter(c => !clienteNomesFilter || clienteNomesFilter.has(c));
     const yearData = (data.financeiro && data.financeiro[dataKey] && data.financeiro[dataKey][CURRENT_YEAR]) || {};
+    // % Contas Automático agora guarda valores absolutos (quantidade de contas) — o totalizador deve
+    // ser a SOMA entre clientes, não a média. Subfaturamento continua sendo percentual, então mantém a
+    // média entre clientes.
+    const isSoma = slug === 'contas-automatico';
     const out = {};
     MONTHS.forEach(m => {
       const vals = clientNames.map(c => (yearData[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
-      out[m.n] = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+      if(!vals.length){ out[m.n] = null; return; }
+      const soma = vals.reduce((a,b)=>a+b,0);
+      out[m.n] = isSoma ? soma : soma / vals.length;
     });
     return out;
   }
@@ -4522,10 +4528,15 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
     const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo']
       .filter(c => !clienteNomesFilter || clienteNomesFilter.has(c));
     const yearData = (data.financeiro && data.financeiro[budgetKey] && data.financeiro[budgetKey][CURRENT_YEAR]) || {};
+    // Mesma lógica do Realizado acima: Budget de % Contas Automático também soma entre clientes (é uma
+    // meta de quantidade absoluta), Budget de Subfaturamento continua sendo a média (percentual).
+    const isSoma = slug === 'contas-automatico';
     const out = {};
     MONTHS.forEach(m => {
       const vals = clientNames.map(c => (yearData[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
-      out[m.n] = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+      if(!vals.length){ out[m.n] = null; return; }
+      const soma = vals.reduce((a,b)=>a+b,0);
+      out[m.n] = isSoma ? soma : soma / vals.length;
     });
     return out;
   }
@@ -5836,17 +5847,23 @@ function ContasFinalizadasPage({financeiro, actions, sync}){
 // modelo visual de ContasFinalizadasPage — usada por Subfaturamento (Realizado manual) e % Contas
 // Automático (Realizado sincronizado da planilha — passe `sync`/`onSync`/`descRealizado` nesse caso;
 // o Budget continua sempre manual, para as duas).
-function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget, sync, onSync, descRealizado, unidade}){
+function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget, sync, onSync, descRealizado, unidade, totalMode}){
   const un = unidade || '%';
   const fmtVal = v => fmtChartValue(v, un);
   const data = (financeiro && financeiro[dataKey] && financeiro[dataKey][CURRENT_YEAR]) || {};
   const budgetData = (financeiro && financeiro[budgetKey] && financeiro[budgetKey][CURRENT_YEAR]) || {};
   const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
   const realizadoReadOnly = !!onSync;
+  // Totalizador entre clientes: "média" (padrão, ex.: Subfaturamento, um percentual) ou "soma" (ex.: %
+  // Contas Automático, que agora guarda valores absolutos — faz mais sentido somar do que tirar a média).
+  const isSoma = totalMode === 'soma';
+  const totalLabel = isSoma ? 'Total' : 'Média';
 
   const colAvg = (source, m) => {
     const vals = clientNames.map(c => (source[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
-    return vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+    if(!vals.length) return null;
+    const soma = vals.reduce((a,b)=>a+b,0);
+    return isSoma ? soma : soma / vals.length;
   };
 
   const filledMonths = MONTHS.filter(m => colAvg(data, m) !== null);
@@ -5864,7 +5881,7 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
           ) : (
             <div className="kpi-hero-value" style={{fontSize:22, color:'#9BA0B8'}}>Sem dados preenchidos</div>
           )}
-          <div className="kpi-hero-formula">Média entre clientes, no mês</div>
+          <div className="kpi-hero-formula">{isSoma ? 'Soma entre clientes, no mês' : 'Média entre clientes, no mês'}</div>
         </div>
       </div>
 
@@ -5915,7 +5932,7 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
                 </tr>
               ))}
               <tr className="upsell-pillar-row">
-                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                <td style={{textAlign:'left', paddingLeft:12}}>{totalLabel}</td>
                 {MONTHS.map(m => {
                   const t = colAvg(data, m);
                   return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtVal(t)}</td>;
@@ -5964,7 +5981,7 @@ function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setReali
                 </tr>
               ))}
               <tr className="upsell-pillar-row">
-                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                <td style={{textAlign:'left', paddingLeft:12}}>{totalLabel}</td>
                 {MONTHS.map(m => {
                   const t = colAvg(budgetData, m);
                   return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtVal(t)}</td>;
@@ -6000,7 +6017,7 @@ function ContasAutomaticoPage({financeiro, actions, sync}){
   return <PercentClientGoalPage titulo="% Contas Automático" financeiro={financeiro} dataKey="contasAutomatico" budgetKey="contasAutomaticoBudget"
     setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}
     sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Contas Automáticas" da planilha Gestão Metas — valores absolutos (quantidade de contas), não percentual.'
-    unidade="Absoluto"/>;
+    unidade="Absoluto" totalMode="soma"/>;
 }
 
 function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKey, budgetSetActionName, titulo, formulaHint, sync, onSync, descRealizado}){
@@ -6724,12 +6741,19 @@ function DiasTicketAbertoPage({data}){
   const lastMonth = filledMonths.length ? filledMonths[filledMonths.length - 1] : null;
   const overallAvg = lastMonth ? mesAvg[lastMonth.n] : null;
 
+  // Só mostra na quebra por pessoa quem está cadastrado na aba Organograma — evita nomes soltos vindos
+  // do Movidesk (ex-funcionário, typo, contato de cliente) que não correspondem a ninguém do time.
+  // Comparação insensível a acento/caixa/espaços, e por conteúdo (ex.: "Amélio" cadastrado casa com
+  // "Amélio Junior" vindo do Movidesk), via normalizeClientName.
   const personRows = useMemo(() => {
-    const names = Array.from(new Set(merged.map(m => m.responsavel).filter(Boolean))).sort();
-    const rows = names.map(n => ({key:n, label:n, match:(m)=>m.responsavel===n}));
-    if(merged.some(m => !m.responsavel)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavel});
-    return rows;
-  }, [merged]);
+    const pessoasNormalizadas = (data.pessoas || []).map(p => normalizeClientName(p.nome)).filter(Boolean);
+    const isFuncionarioCadastrado = (nome) => {
+      const n = normalizeClientName(nome);
+      return pessoasNormalizadas.some(pn => n === pn || n.includes(pn) || pn.includes(n));
+    };
+    const names = Array.from(new Set(merged.map(m => m.responsavel).filter(Boolean).filter(isFuncionarioCadastrado))).sort();
+    return names.map(n => ({key:n, label:n, match:(m)=>m.responsavel===n}));
+  }, [merged, data.pessoas]);
 
   const clienteRows = useMemo(() =>
     DEMANDAS_CLIENTES_ORDEM.filter(c => merged.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c})),
