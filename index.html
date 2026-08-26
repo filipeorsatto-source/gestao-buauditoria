@@ -3334,7 +3334,7 @@ function buildDefaultData(){
     demandasCustom: {},
     demandasManuais: [],
     metas: INDICADORES.map(ind => ({
-      id: uid(),
+      id: 'ind_' + ind.slug,
       slug: ind.slug,
       titulo: ind.metaTitulo || ind.titulo,
       descricao: ind.descricao,
@@ -3495,14 +3495,52 @@ function runMigrations(parsed){
       // migrate: adiciona em "Gestão de Metas" as metas novas que passaram a existir em INDICADORES
       // (ex.: Relacionamento reaproveita o slug 'upsell-score' já existente; Subfaturamento e
       // % Contas Automático são metas novas de Ago/2026) — idempotente, por slug.
+      // O id é determinístico ('ind_' + slug), não uid() aleatório: como essa migração roda em TODO
+      // onSnapshot (não só uma vez), se dois eventos de snapshot chegassem em sequência rápida antes do
+      // primeiro persistPatch confirmar no servidor, um id aleatório geraria uma SEGUNDA meta duplicada
+      // com id diferente a cada corrida — e um "Editar" aberto na primeira renderização ficaria com um
+      // id que não existe mais em d.metas por baixo dos panos, fazendo o editGoal virar no-op silencioso
+      // (o toast "Meta atualizada" dispara, mas nada muda no card). Com id determinístico, mesmo que essa
+      // migração rode mais de uma vez, ela sempre aponta pro mesmo id — sem duplicar.
       if(parsed.metas){
         const slugsExistentes = new Set(parsed.metas.map(m => m.slug).filter(Boolean));
         const faltantes = INDICADORES.filter(ind => !slugsExistentes.has(ind.slug));
         if(faltantes.length){
           parsed.metas = [...parsed.metas, ...faltantes.map(ind => ({
-            id: uid(), slug: ind.slug, titulo: ind.metaTitulo || ind.titulo, descricao: ind.descricao,
+            id: 'ind_' + ind.slug, slug: ind.slug, titulo: ind.metaTitulo || ind.titulo, descricao: ind.descricao,
             fonte: ind.fonte, unidadeMedida: ind.unidade, pessoaIds: [], budgets: {},
           }))];
+          changed = true;
+        }
+      }
+      // migrate: corrige bases que já ficaram com metas DUPLICADAS pro mesmo slug (efeito colateral do
+      // bug acima, antes do id determinístico) — mescla todas as duplicatas de um slug em uma só,
+      // unindo pessoaIds e budgets, e remove as demais. Sem isso, editar a meta duplicada errada continua
+      // parecendo "não salvar" mesmo depois dessa correção.
+      if(parsed.metas){
+        const bySlug = {};
+        let temDuplicata = false;
+        parsed.metas.forEach(m => {
+          if(!m.slug) return;
+          if(bySlug[m.slug]) temDuplicata = true;
+          else bySlug[m.slug] = [];
+          (bySlug[m.slug] = bySlug[m.slug] || []).push(m);
+        });
+        if(temDuplicata){
+          const merged = [];
+          const vistos = new Set();
+          parsed.metas.forEach(m => {
+            if(!m.slug){ merged.push(m); return; }
+            if(vistos.has(m.slug)) return;
+            vistos.add(m.slug);
+            const dups = bySlug[m.slug];
+            if(dups.length === 1){ merged.push(m); return; }
+            const pessoaIds = Array.from(new Set(dups.flatMap(d => d.pessoaIds || [])));
+            const budgetsMerged = Object.assign({}, ...dups.map(d => d.budgets || {}));
+            const preferida = dups.find(d => d.id === ('ind_' + m.slug)) || dups[0];
+            merged.push({...preferida, pessoaIds, budgets: budgetsMerged});
+          });
+          parsed.metas = merged;
           changed = true;
         }
       }
@@ -8816,7 +8854,9 @@ function App(){
 
     // metas
     addGoal: (g) => mutate(d => ({...d, metas:[...d.metas, {id:uid(), ...g}]}), 'Meta adicionada'),
-    editGoal: (id, g) => mutate(d => ({...d, metas: d.metas.map(x => x.id===id ? {...x, ...g} : x)}), 'Meta atualizada'),
+    // Casa por slug quando disponível (mais estável que id — ver comentário na migração de dedupe em
+    // runMigrations), com fallback pra id (metas customizadas, sem slug, só têm id mesmo).
+    editGoal: (id, g) => mutate(d => ({...d, metas: d.metas.map(x => (g.slug && x.slug===g.slug) || x.id===id ? {...x, ...g} : x)}), 'Meta atualizada'),
     deleteGoal: (id) => mutate(d => ({...d, metas: d.metas.filter(x => x.id !== id)}), 'Meta excluída'),
 
     // rotinas
