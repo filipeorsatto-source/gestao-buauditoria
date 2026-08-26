@@ -3566,6 +3566,14 @@ function runMigrations(parsed){
         });
         if(defsChanged) changed = true;
       }
+      // migrate: semeia a lista inicial de funções do produto (Cobertura Produto) na primeira vez que a
+      // base é migrada. Usa um flag dedicado (produtoFuncoesSeeded), não "lista vazia", pra não voltar a
+      // inserir as funções padrão se o usuário apagar alguma delas de propósito depois.
+      if(!parsed.produtoFuncoesSeeded){
+        parsed.produtoFuncoes = [...(parsed.produtoFuncoes||[]), ...PRODUTO_FUNCOES_SEED.map(f => ({id: uid(), ...f}))];
+        parsed.produtoFuncoesSeeded = true;
+        changed = true;
+      }
       return {data: parsed, changed};
 }
 
@@ -6386,12 +6394,136 @@ const PRODUTO_FUNCOES_KPIS = [
   {key:'funcoes', label:'Funções Mapeadas', unidade:'Absoluto'},
 ];
 
-function ProdutoFuncaoModal({onSave, onClose}){
-  const [categoria, setCategoria] = useState('');
-  const [descricao, setDescricao] = useState('');
+// Lista inicial de funções do produto, pré-cadastrada na primeira vez que a base é migrada (ver
+// runMigrations). Depois de semeada uma vez (produtoFuncoesSeeded=true), nunca mais é reaplicada —
+// mesmo que o usuário apague alguma função da lista, ela não volta sozinha.
+const PRODUTO_FUNCOES_SEED = [
+  {categoria:'Básicas / Integração com o ERP', descricao:'Importar conta (conta paciente / conta corrente)'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Importar dados do paciente'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Importar dados do atendimento (atendimento/episódio)'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Importar dados do convênio e plano'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Importar guia / autorização / senha'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Importar itens lançados na conta'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Sincronizar conta (buscar atualizações do Tasy)'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Escrever alterações de volta no Tasy (write-back)'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Bloquear / desbloquear conta para auditoria'},
+  {categoria:'Básicas / Integração com o ERP', descricao:'Identificar setor / estabelecimento / empresa'},
+
+  {categoria:'Prontuário / Dados clínicos', descricao:'Ler campos do prontuário'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar evolução clínica / anamnese'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar prescrição médica'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar prescrição de enfermagem'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar resultados de exames (laboratório / imagem)'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar CID (diagnóstico principal e secundários)'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar procedimentos realizados (cirúrgicos / clínicos)'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar descrição cirúrgica / relatório de cirurgia'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar dados de UTI / classificação de leito'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar sinais vitais / balanço hídrico'},
+  {categoria:'Prontuário / Dados clínicos', descricao:'Consultar folha de gasto / checagem de itens'},
+
+  {categoria:'Itens da conta / Lançamentos', descricao:'Listar itens da conta'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Incluir item na conta'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Excluir item da conta'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Consultar detalhe do item (código, procedimento, material, medicamento)'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Alterar quantidade do item'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Alterar valor unitário do item'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Alterar data / hora do lançamento'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Alterar profissional executante do item'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Alterar setor / conta destino do item'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Reclassificar item (procedimento x material x taxa x diária)'},
+  {categoria:'Itens da conta / Lançamentos', descricao:'Vincular item a guia / autorização'},
+
+  {categoria:'Ajustes de valores e quantidades', descricao:'Ajustar valor do item'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Ajustar quantidade'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Aplicar percentual de desconto'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Aplicar percentual de acréscimo'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Aplicar filme / porte / custo operacional (CH/UCO)'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Recalcular valor do item conforme tabela'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Recalcular total da conta'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Ajustar valor de honorário / porte anestésico'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Aplicar regra de via de acesso (procedimentos na mesma via)'},
+  {categoria:'Ajustes de valores e quantidades', descricao:'Aplicar redução de 50% / 70% (procedimentos múltiplos)'},
+
+  {categoria:'Pacotes', descricao:'Consultar pacote aplicado na conta'},
+  {categoria:'Pacotes', descricao:'Aplicar pacote'},
+  {categoria:'Pacotes', descricao:'Remover pacote'},
+  {categoria:'Pacotes', descricao:'Alterar data inicial do pacote'},
+  {categoria:'Pacotes', descricao:'Alterar data final do pacote'},
+  {categoria:'Pacotes', descricao:'Alterar diárias / quantidade do pacote'},
+  {categoria:'Pacotes', descricao:'Incluir item fora do pacote (exceção)'},
+  {categoria:'Pacotes', descricao:'Excluir item que compõe o pacote'},
+  {categoria:'Pacotes', descricao:'Verificar itens cobertos x não cobertos pelo pacote'},
+  {categoria:'Pacotes', descricao:'Recalcular valor do pacote'},
+
+  {categoria:'Tabelas de preço e regras', descricao:'Consultar tabela de preço do convênio'},
+  {categoria:'Tabelas de preço e regras', descricao:'Trocar tabela de preço do item'},
+  {categoria:'Tabelas de preço e regras', descricao:'Consultar tabela de material / medicamento (Brasíndice / Simpro)'},
+  {categoria:'Tabelas de preço e regras', descricao:'Aplicar índice / fator de correção da tabela'},
+  {categoria:'Tabelas de preço e regras', descricao:'Consultar regra de preço por procedimento'},
+  {categoria:'Tabelas de preço e regras', descricao:'Consultar tabela de porte anestésico'},
+  {categoria:'Tabelas de preço e regras', descricao:'Consultar valor do CH / UCO / filme'},
+  {categoria:'Tabelas de preço e regras', descricao:'Validar código do item na tabela (TUSS / código próprio)'},
+
+  {categoria:'Diárias e taxas', descricao:'Consultar diárias lançadas'},
+  {categoria:'Diárias e taxas', descricao:'Ajustar quantidade de diárias'},
+  {categoria:'Diárias e taxas', descricao:'Reclassificar tipo de diária (apartamento / enfermaria / UTI)'},
+  {categoria:'Diárias e taxas', descricao:'Consultar taxas (sala, gases, equipamentos)'},
+  {categoria:'Diárias e taxas', descricao:'Ajustar taxa de sala / tempo de sala'},
+  {categoria:'Diárias e taxas', descricao:'Aplicar regra de acomodação x tabela'},
+
+  {categoria:'OPME (órteses, próteses e materiais especiais)', descricao:'Listar OPME da conta'},
+  {categoria:'OPME (órteses, próteses e materiais especiais)', descricao:'Consultar autorização de OPME'},
+  {categoria:'OPME (órteses, próteses e materiais especiais)', descricao:'Consultar fornecedor / marca / nota fiscal do OPME'},
+  {categoria:'OPME (órteses, próteses e materiais especiais)', descricao:'Ajustar valor de OPME'},
+  {categoria:'OPME (órteses, próteses e materiais especiais)', descricao:'Validar quantidade x procedimento'},
+
+  {categoria:'Medicamentos e materiais', descricao:'Listar medicamentos / materiais'},
+  {categoria:'Medicamentos e materiais', descricao:'Consultar código Brasíndice / Simpro / TUSS'},
+  {categoria:'Medicamentos e materiais', descricao:'Ajustar valor de medicamento / material'},
+  {categoria:'Medicamentos e materiais', descricao:'Ajustar quantidade dispensada x prescrita'},
+  {categoria:'Medicamentos e materiais', descricao:'Validar via de administração / apresentação'},
+
+  {categoria:'Honorários e profissionais', descricao:'Consultar honorários médicos'},
+  {categoria:'Honorários e profissionais', descricao:'Ajustar valor de honorário'},
+  {categoria:'Honorários e profissionais', descricao:'Alterar profissional / equipe (cirurgião, auxiliar, anestesista)'},
+  {categoria:'Honorários e profissionais', descricao:'Aplicar percentual da equipe (auxiliares)'},
+  {categoria:'Honorários e profissionais', descricao:'Consultar CBO / especialidade'},
+
+  {categoria:'Convênio, autorização e guias', descricao:'Consultar dados do convênio / plano / contrato'},
+  {categoria:'Convênio, autorização e guias', descricao:'Consultar guia (SP/SADT, internação, honorário)'},
+  {categoria:'Convênio, autorização e guias', descricao:'Consultar senha / autorização'},
+  {categoria:'Convênio, autorização e guias', descricao:'Validar item x procedimento autorizado'},
+  {categoria:'Convênio, autorização e guias', descricao:'Consultar validade da autorização'},
+  {categoria:'Convênio, autorização e guias', descricao:'Consultar carência / cobertura contratual'},
+  {categoria:'Convênio, autorização e guias', descricao:'Vincular / desvincular guia da conta'},
+
+  {categoria:'Fluxo de auditoria', descricao:'Abrir conta para auditoria'},
+  {categoria:'Fluxo de auditoria', descricao:'Distribuir conta ao auditor (fila de trabalho)'},
+  {categoria:'Fluxo de auditoria', descricao:'Registrar parecer / observação do auditor'},
+  {categoria:'Fluxo de auditoria', descricao:'Finalizar / concluir auditoria'},
+  {categoria:'Fluxo de auditoria', descricao:'Reabrir auditoria'},
+  {categoria:'Fluxo de auditoria', descricao:'Enviar para auditoria médica / técnica'},
+  {categoria:'Fluxo de auditoria', descricao:'Registrar histórico / log de alterações da auditoria'},
+  {categoria:'Fluxo de auditoria', descricao:'Comparar valor original x valor auditado'},
+
+  {categoria:'Relatórios e indicadores (da auditoria)', descricao:'Relatório de itens ajustados por auditor / convênio'},
+  {categoria:'Relatórios e indicadores (da auditoria)', descricao:'Indicador de valor original x valor auditado'},
+  {categoria:'Relatórios e indicadores (da auditoria)', descricao:'Relatório de produtividade do auditor'},
+  {categoria:'Relatórios e indicadores (da auditoria)', descricao:'Comparativo conta antes x depois da auditoria'},
+
+  {categoria:'Segurança e integração (transversais)', descricao:'Autenticar usuário (integração com login do Tasy)'},
+  {categoria:'Segurança e integração (transversais)', descricao:'Controlar permissões por perfil de auditor'},
+  {categoria:'Segurança e integração (transversais)', descricao:'Registrar trilha de auditoria (log de quem alterou o quê)'},
+  {categoria:'Segurança e integração (transversais)', descricao:'Tratar conflito de edição (conta alterada no Tasy durante a auditoria)'},
+  {categoria:'Segurança e integração (transversais)', descricao:'Validar consistência antes do write-back'},
+];
+
+function ProdutoFuncaoModal({initial, categoriasExistentes, onSave, onClose}){
+  const [categoria, setCategoria] = useState(initial ? initial.categoria : '');
+  const [descricao, setDescricao] = useState(initial ? initial.descricao : '');
   const canSave = categoria.trim() && descricao.trim();
   return (
-    <Modal title="Adicionar função" onClose={onClose} footer={
+    <Modal title={initial ? 'Editar função' : 'Adicionar função'} onClose={onClose} footer={
       <>
         <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
         <button className="btn btn-primary" disabled={!canSave} style={!canSave ? {opacity:0.5}: undefined}
@@ -6403,6 +6535,7 @@ function ProdutoFuncaoModal({onSave, onClose}){
       <div className="field">
         <label>Categoria<span className="required-mark">*</span></label>
         <input className="input" value={categoria} onChange={e=>setCategoria(e.target.value)} placeholder="Ex.: Alertas" list="produto-funcao-categorias" autoFocus/>
+        <datalist id="produto-funcao-categorias">{(categoriasExistentes||[]).map(c => <option value={c} key={c}/>)}</datalist>
       </div>
       <div className="field">
         <label>Descrição<span className="required-mark">*</span></label>
@@ -6467,7 +6600,7 @@ function ProdutoFuncoesPage({data, actions}){
   const clientesCols = useMemo(() => data.clientes.filter(c => c.nome.toLowerCase() !== 'interno'), [data.clientes]);
   const funcoes = data.produtoFuncoes || [];
   const checks = data.produtoFuncoesChecks || {};
-  const [modalOpen, setModalOpen] = useState(false);
+  const [modal, setModal] = useState(null); // null | 'new' | funcao (edição)
   const [confirmDel, setConfirmDel] = useState(null);
 
   const categorias = useMemo(() => {
@@ -6528,13 +6661,13 @@ function ProdutoFuncoesPage({data, actions}){
           <div className="section-block-title">Funções do produto x clientes</div>
           <div className="section-block-desc">Cadastre as funções do produto e marque, por cliente, se a função está presente. Agrupado por categoria.</div>
         </div>
-        <button className="btn btn-primary btn-sm" onClick={()=>setModalOpen(true)}><IconPlus width="14" height="14"/>Nova função</button>
+        <button className="btn btn-primary btn-sm" onClick={()=>setModal('new')}><IconPlus width="14" height="14"/>Nova função</button>
       </div>
 
       {funcoes.length === 0 ? (
         <EmptyState icon={IconLayers} title="Nenhuma função cadastrada"
           sub="Cadastre as funções do produto para começar a acompanhar a cobertura por cliente."
-          action={<button className="btn btn-primary btn-sm" onClick={()=>setModalOpen(true)}><IconPlus width="14" height="14"/>Nova função</button>}
+          action={<button className="btn btn-primary btn-sm" onClick={()=>setModal('new')}><IconPlus width="14" height="14"/>Nova função</button>}
         />
       ) : (
         <div className="card">
@@ -6568,7 +6701,10 @@ function ProdutoFuncoesPage({data, actions}){
                           </td>
                         ))}
                         <td>
-                          <button className="btn-icon danger" onClick={()=>setConfirmDel(f)}><IconTrash width="13" height="13"/></button>
+                          <div className="row-actions">
+                            <button className="btn-icon" onClick={()=>setModal(f)}><IconEdit width="13" height="13"/></button>
+                            <button className="btn-icon danger" onClick={()=>setConfirmDel(f)}><IconTrash width="13" height="13"/></button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -6580,9 +6716,9 @@ function ProdutoFuncoesPage({data, actions}){
         </div>
       )}
 
-      {modalOpen && (
-        <ProdutoFuncaoModal onClose={()=>setModalOpen(false)}
-          onSave={(f)=>{ actions.addProdutoFuncao(f); setModalOpen(false); }} />
+      {modal && (
+        <ProdutoFuncaoModal initial={modal==='new' ? null : modal} categoriasExistentes={categorias} onClose={()=>setModal(null)}
+          onSave={(f)=>{ modal==='new' ? actions.addProdutoFuncao(f) : actions.editProdutoFuncao(modal.id, f); setModal(null); }} />
       )}
       <ConfirmDialog open={!!confirmDel} title="Excluir função"
         text={confirmDel ? 'Tem certeza que deseja excluir "' + confirmDel.descricao + '"? Os checks marcados para essa função também serão removidos.' : ''}
@@ -9151,6 +9287,10 @@ function App(){
       ...d,
       produtoFuncoes: [...(d.produtoFuncoes||[]), {id: uid(), categoria, descricao}],
     }), 'Função de produto adicionada'),
+    editProdutoFuncao: (id, {categoria, descricao}) => mutate(d => ({
+      ...d,
+      produtoFuncoes: (d.produtoFuncoes||[]).map(f => f.id===id ? {...f, categoria, descricao} : f),
+    }), 'Função de produto atualizada'),
     deleteProdutoFuncao: (id) => mutate(d => {
       const produtoFuncoesChecks = {...(d.produtoFuncoesChecks||{})};
       delete produtoFuncoesChecks[id];
