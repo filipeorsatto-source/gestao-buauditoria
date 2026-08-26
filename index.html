@@ -2397,6 +2397,24 @@ const DEMANDA_TIPO_OPTIONS = ['Planning','Nova Demanda','Rotina'];
 
 const DEMANDA_PRIORIDADE_OPTIONS = ['Despriorizado','P0','P1','P2'];
 
+// Opções de Status e Urgência oferecidas ao criar/editar um ticket manual (fora do Movidesk) — um
+// subconjunto curado dos valores reais que aparecem na base sincronizada (DEMANDA_STATUS_COLORS tem
+// mais variações específicas do Movidesk que não fazem sentido escolher manualmente aqui).
+const DEMANDA_STATUS_MANUAL_OPTIONS = ['Em aberto', 'Em execução', 'Aguardando retorno do cliente', 'Em Análise Técnica', 'Resolvido', 'Cancelado', 'Fechado'];
+const DEMANDA_URGENCIA_OPTIONS = ['Baixa', 'Média', 'Alta', 'Urgente'];
+
+// Próximo número sequencial para um ticket manual novo — prefixo "M" para nunca colidir com um número
+// de ticket real do Movidesk (que são só dígitos). Calculado a partir do maior número manual já
+// existente, então continua incrementando mesmo se algum ticket manual antigo for excluído no meio.
+function nextManualDemandaNumero(demandasManuais){
+  const nums = (demandasManuais || [])
+    .map(o => o.n)
+    .filter(n => /^M\d+$/.test(n))
+    .map(n => Number(n.slice(1)));
+  const next = (nums.length ? Math.max(...nums) : 0) + 1;
+  return 'M' + String(next).padStart(4, '0');
+}
+
 const MESES_PLANNING = [
   {n:1, nome:'Janeiro'}, {n:2, nome:'Fevereiro'}, {n:3, nome:'Março'}, {n:4, nome:'Abril'},
   {n:5, nome:'Maio'}, {n:6, nome:'Junho'}, {n:7, nome:'Julho'}, {n:8, nome:'Agosto'},
@@ -2537,10 +2555,19 @@ function avgCsat(list){
   return nums.reduce((a,b)=>a+b,0) / nums.length;
 }
 
-function buildDemandasMerged(customMap, baseRows){
+// manualRows (opcional): tickets criados diretamente no painel (fora do Movidesk), via o botão "+ Nova
+// Demanda Manual" na aba Demandas — ver DEMANDA_STATUS_MANUAL_OPTIONS/actions.addDemandaManual. Cada
+// item tem o mesmo formato "o" de uma linha vinda do Movidesk (n/a/s/u/c/r/d/re/tr/csat), então passa
+// pelo mesmo `.map` abaixo e ganha as mesmas colunas editáveis (classificação, tipo, prazo, etc.) via
+// customMap — só marcado com isManual:true para a UI saber quando liberar edição dos campos "base"
+// (assunto, status, urgência, cliente, responsável, data de abertura, CSAT, tempo 1ª resposta) e o
+// botão de excluir, que só fazem sentido para um ticket que não vem de uma sincronização externa.
+function buildDemandasMerged(customMap, baseRows, manualRows){
   const custom = customMap || {};
   const now = new Date();
-  const base = (baseRows && baseRows.length) ? baseRows : DEMANDAS_SEED;
+  const synced = (baseRows && baseRows.length) ? baseRows : DEMANDAS_SEED;
+  const manual = (manualRows || []).map(o => ({...o, isManual: true}));
+  const base = synced.concat(manual);
   return base.map(o => {
     const c = custom[o.n] || {};
     const prazo = c.prazo || '';
@@ -2578,6 +2605,7 @@ function buildDemandasMerged(customMap, baseRows){
     }
     return {
       numero: o.n,
+      isManual: !!o.isManual,
       assunto: o.a,
       status: o.s,
       statusEfetivo: statusEfetivo,
@@ -3292,6 +3320,7 @@ function buildDefaultData(){
     nps: buildSeedNPSManual(clientes),
     coberturaDados: {},
     demandasCustom: {},
+    demandasManuais: [],
     metas: INDICADORES.map(ind => ({
       id: uid(),
       slug: ind.slug,
@@ -4544,7 +4573,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   }
 
   if(slug === 'entregas-prazo'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const base = merged.filter(m => m.classificacao && m.classificacao.startsWith('Desenvolvimento') && m.mesPlanning
       && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
@@ -4557,7 +4586,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
 
   if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
     const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const scoped = merged.filter(m => m.classificacao && matchFn(m.classificacao) && m.mesPlanning
       && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
@@ -4569,7 +4598,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   }
 
   if(slug === 'dias-ticket-aberto'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const scoped = merged.filter(m => pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
     const out = {};
     MONTHS.forEach(m => {
@@ -4582,7 +4611,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   }
 
   if(slug === 'sla-primeira-resposta'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const scoped = merged.filter(m => m.tempoPrimeiraResposta !== null
       && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
@@ -4709,20 +4738,20 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     return checked / totalCampos * 100;
   }
   if(slug === 'entregas-prazo'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const subset = merged.filter(x => x.classificacao && x.classificacao.startsWith('Desenvolvimento') && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome
       && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return subset.length ? (subset.filter(x => x.concluidaNoPrazo).length / subset.length * 100) : null;
   }
   if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
     const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const subset = merged.filter(x => x.classificacao && matchFn(x.classificacao) && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome
       && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return avgCsat(subset.map(x => x.csat));
   }
   if(slug === 'dias-ticket-aberto'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
       .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, mesN))
@@ -4735,7 +4764,7 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     return (v === undefined || v === null || v === '') ? null : Number(v);
   }
   if(slug === 'sla-primeira-resposta'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const subset = merged.filter(x => x.cliente === clienteNome && x.tempoPrimeiraResposta !== null && mesAnoAbertura(x.abertoEm, mesN)
       && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return subset.length ? avgOf(subset.map(x => x.tempoPrimeiraResposta)) : null;
@@ -4789,7 +4818,7 @@ function GoalClienteMesTable({goal, data, clienteNomesFilter, pessoaId}){
     // ajudar em tickets de qualquer cliente) — as linhas mostradas são os clientes onde essa pessoa
     // efetivamente tem tickets que se aplicam a essa meta (ver ticketPertenceAPessoa).
     const pessoa = (data.pessoas || []).find(p => p.id === pessoaId);
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const matchFn = DEMANDA_SLUG_MATCH_FN[goal.slug];
     const relevantes = merged.filter(m => (!matchFn || (m.classificacao && matchFn(m.classificacao))) && ticketPertenceAPessoa(m, pessoa));
     const nomesComDados = new Set(relevantes.map(m => m.cliente).filter(Boolean));
@@ -6688,7 +6717,7 @@ function EntregasPrazoClienteTable({cliente, rows, devNameById}){
 }
 
 function EntregasPrazoPage({data}){
-  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
+  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento' || p.area === 'Atendimento'), [data.pessoas]);
   const devNameById = useMemo(() => { const m={}; devTeam.forEach(p=>{ m[p.id]=p.nome; }); return m; }, [devTeam]);
 
@@ -6873,7 +6902,7 @@ function CsatMatrixTable({title, desc, rows, avgFn, emptyText}){
 // desenvolvedor alocado (campo Responsável Desenvolvimento), e o CSAT desses tickets deve poder ser
 // acompanhado por quem os atendeu do lado de desenvolvimento também.
 function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDevTable}){
-  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
+  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento' || p.area === 'Atendimento'), [data.pessoas]);
 
   const scoped = useMemo(() =>
@@ -6954,7 +6983,7 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
    MÉDIA DIAS TICKET EM ABERTO
 --------------------------------------------------------------- */
 function DiasTicketAbertoPage({data}){
-  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
+  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
 
   // Para cada mês civil, a média considera os tickets que — no fim daquele mês — já tinham sido
   // abertos e ainda não tinham sido finalizados (ou nunca chegaram a ser). Isso "congela" o cenário de
@@ -7039,7 +7068,7 @@ function DiasTicketAbertoPage({data}){
    SLA 1ª RESPOSTA
 --------------------------------------------------------------- */
 function SlaPrimeiraRespostaPage({data}){
-  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
+  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
 
   // Agrupado pela Data de Abertura do ticket (mês civil em que ele foi aberto) — diferente de "Média
   // dias ticket em aberto", que agrupa pelo cenário de fim de mês. Aqui cada ticket contribui só para
@@ -7543,13 +7572,178 @@ function DemandasResumoSection({filtered, devTeam}){
   );
 }
 
+// Modal de criação de um ticket 100% manual (fora do Movidesk) — todos os campos ficam abertos aqui,
+// diferente de um ticket sincronizado (onde só as colunas "overlay" via updateDemandaCustom são
+// editáveis). No submit, cria a linha base (assunto/status/urgência/cliente/responsável/data de
+// abertura/CSAT/tempo 1ª resposta) via addDemandaManual, e — se algum dos campos "overlay" tiver sido
+// preenchido aqui também — grava eles de uma vez via updateDemandaCustom, reaproveitando toda a lógica
+// já existente de KPI/edit-meta para essas colunas.
+function NovaDemandaManualModal({data, devTeam, actions, onClose}){
+  const [assunto, setAssunto] = useState('');
+  const [cliente, setCliente] = useState(DEMANDAS_CLIENTES_ORDEM[0]);
+  const [status, setStatus] = useState('Em aberto');
+  const [urgencia, setUrgencia] = useState('');
+  const [responsavel, setResponsavel] = useState('');
+  const [abertoEm, setAbertoEm] = useState(() => new Date().toISOString().split('T')[0]);
+  const [csat, setCsat] = useState('');
+  const [tempoPrimeiraResposta, setTempoPrimeiraResposta] = useState('');
+  const [prazo, setPrazo] = useState('');
+  const [concluidoEm, setConcluidoEm] = useState('');
+  const [classificacao, setClassificacao] = useState('');
+  const [tipo, setTipo] = useState('');
+  const [prioridade, setPrioridade] = useState('');
+  const [esforco, setEsforco] = useState('');
+  const [respDevId, setRespDevId] = useState('');
+
+  const canSave = assunto.trim().length > 0 && !!cliente && !!abertoEm;
+
+  const handleSave = () => {
+    if(!canSave) return;
+    const numero = nextManualDemandaNumero(data.demandasManuais);
+    actions.addDemandaManual({
+      n: numero,
+      a: assunto.trim(),
+      s: status,
+      u: urgencia,
+      c: cliente,
+      r: responsavel.trim(),
+      d: abertoEm + 'T00:00:00',
+      re: '',
+      tr: tempoPrimeiraResposta === '' ? null : Number(tempoPrimeiraResposta),
+      csat: csat === '' ? '' : Number(csat),
+    });
+    const overlayPatch = {};
+    if(prazo) overlayPatch.prazo = prazo;
+    if(concluidoEm) overlayPatch.concluidoEmManual = concluidoEm;
+    if(classificacao) overlayPatch.classificacao = classificacao;
+    if(tipo) overlayPatch.tipo = tipo;
+    if(prioridade) overlayPatch.prioridade = prioridade;
+    if(esforco !== '') overlayPatch.esforco = esforco;
+    if(respDevId) overlayPatch.responsavelDesenvolvimentoId = respDevId;
+    if(Object.keys(overlayPatch).length) actions.updateDemandaCustom(numero, overlayPatch);
+    onClose();
+  };
+
+  return (
+    <Modal title="Nova Demanda Manual" onClose={onClose} width="640px" footer={
+      <>
+        <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+        <button className="btn btn-primary" disabled={!canSave} style={!canSave?{opacity:0.5}:undefined} onClick={handleSave}>
+          Criar ticket
+        </button>
+      </>
+    }>
+      <div className="hint" style={{marginBottom:14}}>
+        Cria um ticket fora do Movidesk, com todos os campos preenchidos aqui — útil para demandas que
+        não passam pelo Movidesk mas precisam entrar nos mesmos KPIs. O número do ticket é gerado
+        automaticamente (prefixo "M"). Todos os campos continuam editáveis depois de criado.
+      </div>
+      <div className="field">
+        <label>Assunto<span className="required-mark">*</span></label>
+        <input className="input" value={assunto} onChange={e=>setAssunto(e.target.value)} autoFocus placeholder="Descrição do ticket"/>
+      </div>
+      <div className="field-row">
+        <div className="field">
+          <label>Cliente<span className="required-mark">*</span></label>
+          <select className="select" value={cliente} onChange={e=>setCliente(e.target.value)}>
+            {DEMANDAS_CLIENTES_ORDEM.map(c => <option value={c} key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Responsável</label>
+          <input className="input" value={responsavel} onChange={e=>setResponsavel(e.target.value)} placeholder="Nome de quem está atendendo"/>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field">
+          <label>Status</label>
+          <select className="select" value={status} onChange={e=>setStatus(e.target.value)}>
+            {DEMANDA_STATUS_MANUAL_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Urgência</label>
+          <select className="select" value={urgencia} onChange={e=>setUrgencia(e.target.value)}>
+            <option value="">—</option>
+            {DEMANDA_URGENCIA_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field">
+          <label>Data de Abertura<span className="required-mark">*</span></label>
+          <input className="input" type="date" value={abertoEm} onChange={e=>setAbertoEm(e.target.value)}/>
+        </div>
+        <div className="field">
+          <label>Prazo</label>
+          <input className="input" type="date" value={prazo} onChange={e=>setPrazo(e.target.value)}/>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field">
+          <label>Concluído em</label>
+          <input className="input" type="date" value={concluidoEm} onChange={e=>setConcluidoEm(e.target.value)}/>
+        </div>
+        <div className="field">
+          <label>CSAT (1 a 5)</label>
+          <input className="input" type="number" min="1" max="5" step="1" value={csat} onChange={e=>setCsat(e.target.value)} placeholder="—"/>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field">
+          <label>Tempo 1ª Resposta (min)</label>
+          <input className="input" type="number" min="0" step="1" value={tempoPrimeiraResposta} onChange={e=>setTempoPrimeiraResposta(e.target.value)} placeholder="—"/>
+        </div>
+        <div className="field">
+          <label>Esforço</label>
+          <input className="input" type="number" min="0" step="0.5" value={esforco} onChange={e=>setEsforco(e.target.value)} placeholder="—"/>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field">
+          <label>Classificação</label>
+          <select className="select" value={classificacao} onChange={e=>setClassificacao(e.target.value)}>
+            <option value="">—</option>
+            {DEMANDA_CLASSIFICACAO_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Tipo</label>
+          <select className="select" value={tipo} onChange={e=>setTipo(e.target.value)}>
+            <option value="">—</option>
+            {DEMANDA_TIPO_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="field-row">
+        <div className="field">
+          <label>Prioridade</label>
+          <select className="select" value={prioridade} onChange={e=>setPrioridade(e.target.value)}>
+            <option value="">—</option>
+            {DEMANDA_PRIORIDADE_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
+        </div>
+        <div className="field">
+          <label>Responsável Desenvolvimento</label>
+          <select className="select" value={respDevId} onChange={e=>setRespDevId(e.target.value)}>
+            <option value="">—</option>
+            {devTeam.map(p => <option value={p.id} key={p.id}>{p.nome}</option>)}
+          </select>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function DemandasPage({data, actions}){
-  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
+  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento' || p.area === 'Atendimento'), [data.pessoas]);
 
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState(null);
   const [syncWarning, setSyncWarning] = useState(null);
+  const [novoManualOpen, setNovoManualOpen] = useState(false);
+  const [confirmDelManual, setConfirmDelManual] = useState(null); // numero do ticket manual a excluir
 
   const handleSyncMovidesk = async () => {
     setSyncing(true);
@@ -7728,7 +7922,7 @@ function DemandasPage({data, actions}){
       <div className="section-block-head">
         <div>
           <div className="section-block-title">Demandas</div>
-          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. "Concluído em" vem direto da coluna "Resolvido Em" do Movidesk — dê duplo clique na célula (ou use o ícone de lápis) para inserir manualmente quando o ticket for mantido em aberto no Movidesk aguardando o cliente; uma vez preenchido manualmente, o ticket passa a contar como concluído nos KPIs e deixa de considerar o dado do Movidesk até ser revertido. CSAT ainda não está disponível na exportação do Movidesk — a coluna fica com placeholder até a base trazer essa informação.</div>
+          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. "Concluído em" vem direto da coluna "Resolvido Em" do Movidesk — dê duplo clique na célula (ou use o ícone de lápis) para inserir manualmente quando o ticket for mantido em aberto no Movidesk aguardando o cliente; uma vez preenchido manualmente, o ticket passa a contar como concluído nos KPIs e deixa de considerar o dado do Movidesk até ser revertido. CSAT ainda não está disponível na exportação do Movidesk — a coluna fica com placeholder até a base trazer essa informação. Tickets criados manualmente (fora do Movidesk) têm todos os campos editáveis, inclusive Assunto, Status, Cliente, Responsável e Data de Abertura, e podem ser excluídos.</div>
           <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>
             {data.demandasBaseSync
               ? `Última atualização: ${data.demandasBaseSync.by} em ${fmtDataAbertura(data.demandasBaseSync.at)} · ${data.demandasBaseSync.count} tickets`
@@ -7736,15 +7930,25 @@ function DemandasPage({data, actions}){
           </div>
         </div>
         <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end', gap:6}}>
-          <button
-            type="button"
-            className="btn btn-primary btn-sm"
-            disabled={syncing}
-            onClick={handleSyncMovidesk}
-            style={{whiteSpace:'nowrap', opacity: syncing ? 0.6 : 1, cursor: syncing ? 'not-allowed' : 'pointer'}}
-          >
-            {syncing ? 'Atualizando…' : 'Atualizar base do Movidesk'}
-          </button>
+          <div style={{display:'flex', gap:8}}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={()=>setNovoManualOpen(true)}
+              style={{whiteSpace:'nowrap'}}
+            >
+              <IconPlus width="13" height="13"/>Nova Demanda Manual
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={syncing}
+              onClick={handleSyncMovidesk}
+              style={{whiteSpace:'nowrap', opacity: syncing ? 0.6 : 1, cursor: syncing ? 'not-allowed' : 'pointer'}}
+            >
+              {syncing ? 'Atualizando…' : 'Atualizar base do Movidesk'}
+            </button>
+          </div>
           {syncError && (
             <div style={{fontSize:12.5, color:'#c0392b', maxWidth:420, textAlign:'right'}}>{syncError}</div>
           )}
@@ -7859,13 +8063,31 @@ function DemandasPage({data, actions}){
           rows={byCliente[cliente]}
           devTeam={devTeam}
           actions={actions}
+          onRequestDeleteManual={setConfirmDelManual}
         />
       ))}
+
+      {novoManualOpen && (
+        <NovaDemandaManualModal
+          data={data}
+          devTeam={devTeam}
+          actions={actions}
+          onClose={()=>setNovoManualOpen(false)}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!confirmDelManual}
+        title="Excluir ticket manual"
+        text={confirmDelManual ? `Tem certeza que deseja excluir o ticket manual "${confirmDelManual}"? Essa ação não pode ser desfeita.` : ''}
+        onCancel={()=>setConfirmDelManual(null)}
+        onConfirm={()=>{ actions.deleteDemandaManual(confirmDelManual); setConfirmDelManual(null); }}
+      />
     </div>
   );
 }
 
-function DemandasClienteTable({cliente, rows, devTeam, actions}){
+function DemandasClienteTable({cliente, rows, devTeam, actions, onRequestDeleteManual}){
   const [expanded, setExpanded] = useState(false);
   const mediaDiasAberto = useMemo(() => avgOf(rows.map(r => r.diasEmAberto)), [rows]);
 
@@ -7909,7 +8131,7 @@ function DemandasClienteTable({cliente, rows, devTeam, actions}){
               </tr>
             </thead>
             <tbody>
-              {rows.map(r => <DemandaRow key={r.numero} row={r} devTeam={devTeam} actions={actions}/>)}
+              {rows.map(r => <DemandaRow key={r.numero} row={r} devTeam={devTeam} actions={actions} onRequestDeleteManual={onRequestDeleteManual}/>)}
             </tbody>
           </table>
         </div>
@@ -7990,15 +8212,67 @@ function ConcluidoEmCell({row, actions}){
   );
 }
 
-function DemandaRow({row, devTeam, actions}){
+function DemandaRow({row, devTeam, actions, onRequestDeleteManual}){
   const statusCol = demandaStatusColor(row.status);
   const urgCol = demandaUrgenciaColor(row.urgencia);
+  const isManual = row.isManual;
   return (
     <tr>
-      <td className="demanda-num">{row.numero}</td>
-      <td className="demanda-assunto" title={row.assunto}>{row.assunto}</td>
-      <td><span className="status-pill" style={{background:statusCol.bg, color:statusCol.fg}}>{row.status}</span></td>
-      <td><span className="status-pill" style={{background:urgCol.bg, color:urgCol.fg}}>{row.urgencia || '—'}</span></td>
+      <td className="demanda-num">
+        {row.numero}
+        {isManual && <span className="manual-tag" title="Ticket criado manualmente, fora do Movidesk">manual</span>}
+        {isManual && (
+          <button
+            type="button"
+            className="btn-icon danger"
+            onClick={() => onRequestDeleteManual && onRequestDeleteManual(row.numero)}
+            title="Excluir ticket manual"
+            aria-label="Excluir ticket manual"
+            style={{marginLeft:4}}
+          >
+            <IconTrash width="11" height="11"/>
+          </button>
+        )}
+      </td>
+      <td className="demanda-assunto" title={row.assunto}>
+        {isManual ? (
+          <input
+            type="text"
+            className="upsell-input"
+            defaultValue={row.assunto}
+            key={row.numero + '-assunto-' + row.assunto}
+            placeholder="Assunto"
+            onBlur={e => actions.updateDemandaManual(row.numero, {a: e.target.value})}
+          />
+        ) : row.assunto}
+      </td>
+      <td>
+        {isManual ? (
+          <select
+            className="demanda-select"
+            value={row.status}
+            onChange={e => actions.updateDemandaManual(row.numero, {s: e.target.value})}
+          >
+            {DEMANDA_STATUS_MANUAL_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
+        ) : (
+          <span className="status-pill" style={{background:statusCol.bg, color:statusCol.fg}}>{row.status}</span>
+        )}
+      </td>
+      <td>
+        {isManual ? (
+          <select
+            className={"demanda-select" + (row.urgencia ? '' : ' empty')}
+            value={row.urgencia}
+            onChange={e => actions.updateDemandaManual(row.numero, {u: e.target.value})}
+          >
+            <option value="">—</option>
+            {DEMANDA_URGENCIA_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
+          </select>
+        ) : (
+          <span className="status-pill" style={{background:urgCol.bg, color:urgCol.fg}}>{row.urgencia || '—'}</span>
+        )}
+      </td>
       <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.prioridade) || undefined}>
         <select
           className={"demanda-select" + (row.prioridade ? '' : ' empty')}
@@ -8031,10 +8305,57 @@ function DemandaRow({row, devTeam, actions}){
         {row.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
       </td>
       <ConcluidoEmCell row={row} actions={actions}/>
-      <td className="demanda-csat">{row.csat || '—'}</td>
-      <td className="demanda-resp">{row.responsavel || '—'}</td>
-      <td className="demanda-dias">{fmtDataAbertura(row.abertoEm)}</td>
-      <td className="demanda-dias">{fmtDuracaoMinutos(row.tempoPrimeiraResposta)}</td>
+      <td className="demanda-csat">
+        {isManual ? (
+          <input
+            type="number"
+            className="upsell-input"
+            defaultValue={row.csat || ''}
+            key={row.numero + '-csat-' + row.csat}
+            placeholder="—"
+            step="1"
+            min="1"
+            max="5"
+            onBlur={e => actions.updateDemandaManual(row.numero, {csat: e.target.value === '' ? '' : Number(e.target.value)})}
+          />
+        ) : (row.csat || '—')}
+      </td>
+      <td className="demanda-resp">
+        {isManual ? (
+          <input
+            type="text"
+            className="upsell-input"
+            defaultValue={row.responsavel}
+            key={row.numero + '-responsavel-' + row.responsavel}
+            placeholder="Responsável"
+            onBlur={e => actions.updateDemandaManual(row.numero, {r: e.target.value})}
+          />
+        ) : (row.responsavel || '—')}
+      </td>
+      <td className="demanda-dias">
+        {isManual ? (
+          <input
+            type="date"
+            className="demanda-date-input"
+            value={row.abertoEm ? row.abertoEm.split('T')[0] : ''}
+            onChange={e => actions.updateDemandaManual(row.numero, {d: e.target.value ? e.target.value + 'T00:00:00' : ''})}
+          />
+        ) : fmtDataAbertura(row.abertoEm)}
+      </td>
+      <td className="demanda-dias">
+        {isManual ? (
+          <input
+            type="number"
+            className="upsell-input"
+            defaultValue={row.tempoPrimeiraResposta === null ? '' : row.tempoPrimeiraResposta}
+            key={row.numero + '-tr-' + row.tempoPrimeiraResposta}
+            placeholder="min"
+            step="1"
+            min="0"
+            onBlur={e => actions.updateDemandaManual(row.numero, {tr: e.target.value === '' ? null : Number(e.target.value)})}
+          />
+        ) : fmtDuracaoMinutos(row.tempoPrimeiraResposta)}
+      </td>
       <td className="demanda-dias">{row.diasEmAberto === null ? '—' : row.diasEmAberto}</td>
       <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.classificacao) || undefined}>
         <select
@@ -8447,6 +8768,33 @@ function App(){
       demandasCustom[numero] = {...prev, ...patch, _editMeta: editMeta};
       return {...d, demandasCustom};
     }, null),
+
+    // Cria um ticket 100% manual (fora do Movidesk) — usado pelo botão "+ Nova Demanda Manual" na aba
+    // Demandas. `fields` é o "o" de um ticket (n/a/s/u/c/r/d/re/tr/csat), já com o número gerado via
+    // nextManualDemandaNumero. Fica em d.demandasManuais, separado da base sincronizada — ver
+    // buildDemandasMerged (que concatena os dois antes de aplicar as colunas editáveis via demandasCustom).
+    addDemandaManual: (fields) => mutate(d => {
+      const demandasManuais = [...(d.demandasManuais||[])];
+      demandasManuais.push(fields);
+      return {...d, demandasManuais};
+    }, `Ticket manual criado (${fields.n})`),
+
+    // Edita os campos "base" (assunto, status, urgência, cliente, responsável, data de abertura, CSAT,
+    // tempo 1ª resposta) de um ticket manual já criado — diferente de updateDemandaCustom, que edita as
+    // colunas "overlay" (classificação, tipo, prazo, etc.) compartilhadas com tickets do Movidesk.
+    updateDemandaManual: (numero, patch) => mutate(d => {
+      const demandasManuais = (d.demandasManuais||[]).map(o => o.n === numero ? {...o, ...patch} : o);
+      return {...d, demandasManuais};
+    }, null),
+
+    // Exclui um ticket manual por completo (base + qualquer dado em demandasCustom) — só faz sentido
+    // para tickets manuais, já que um ticket sincronizado do Movidesk reapareceria na próxima atualização.
+    deleteDemandaManual: (numero) => mutate(d => {
+      const demandasManuais = (d.demandasManuais||[]).filter(o => o.n !== numero);
+      const demandasCustom = {...(d.demandasCustom||{})};
+      delete demandasCustom[numero];
+      return {...d, demandasManuais, demandasCustom};
+    }, `Ticket manual excluído (${numero})`),
 
     // substitui a base de tickets do Movidesk (puxada do Drive) — compartilhada em tempo real
     importDemandasBase: (rows) => mutate(d => ({
