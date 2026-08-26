@@ -8742,6 +8742,13 @@ const SECTION_META = {
 
 const ALLOWED_EMAIL_DOMAIN = '@rivio.com.br';
 
+// Trava GLOBAL (não presa a um único useEffect/inscrição) contra a auto-escrita de correção de
+// migração disparar mais de uma vez na vida desta aba. Ver comentário detalhado onde é usada, dentro
+// de App() — o essencial é: mesmo que o efeito de sincronização com o Firestore seja recriado por
+// qualquer motivo (troca de usuário logado, etc.), essa trava não reseta, então a auto-correção nunca
+// dispara uma segunda vez nesta aba.
+let migratedOnceGlobal = false;
+
 function App(){
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -8794,18 +8801,17 @@ function App(){
     if(!authUser) return;
     let unsub = () => {};
     let cancelled = false;
-    // Só tenta persistir uma correção de migração UMA VEZ por sessão de inscrição (não a cada snapshot).
-    // Antes disso não existia essa trava: se alguma migração (ex.: a que sincroniza título/descrição de
-    // cada meta com a definição atual de INDICADORES) nunca convergisse — por exemplo porque o texto
-    // persistido antigo nunca bate 100% com o texto atual, depois de reescrever a descrição de uma meta
-    // em uma rodada posterior — "changed" ficava true para SEMPRE, disparando persistPatch(migrated) a
-    // CADA snapshot recebido (inclusive o snapshot gerado pelo eco da própria escrita). Isso criava um
-    // loop de escrita automática que corria contra as edições reais do usuário: bastava a escrita da
-    // migração (calculada a partir de um snapshot um instante mais antigo, sem a edição do usuário) ser
-    // ENVIADA depois da escrita da edição do usuário para o servidor aplicar por último e reverter o
-    // responsável recém-associado alguns segundos depois — exatamente o sintoma relatado ("aparece Meta
-    // atualizada, mas o nome some do card ~3s depois"), e só nas metas cujo texto tinha sido reescrito.
-    let migratedOnce = false;
+    // Só tenta persistir uma correção de migração UMA VEZ NESTA ABA (trava global, ver
+    // migratedOnceGlobal acima — não reseta nem se este efeito for recriado). Antes disso não existia
+    // trava nenhuma: se alguma migração (ex.: a que sincroniza título/descrição de cada meta com a
+    // definição atual de INDICADORES) nunca convergisse — por exemplo porque o texto persistido antigo
+    // nunca bate 100% com o texto atual, depois de reescrever a descrição de uma meta em uma rodada
+    // posterior — "changed" ficava true para SEMPRE, disparando persistPatch(migrated) a CADA snapshot
+    // recebido (inclusive o snapshot gerado pelo eco da própria escrita). Isso criava um loop de escrita
+    // automática que corria contra as edições reais do usuário: bastava a escrita da migração (calculada
+    // a partir de um snapshot um instante mais antigo, sem a edição do usuário) ser ENVIADA depois da
+    // escrita da edição do usuário para o servidor aplicar por último e reverter o responsável recém
+    // associado — exatamente o padrão relatado (nome aparece e some, repetidamente).
     (async () => {
       await ensureFirestoreSeeded();
       if(cancelled) return;
@@ -8817,8 +8823,8 @@ function App(){
         const {data: migrated, changed} = runMigrations(raw);
         setData(migrated);
         setLoading(false);
-        if(changed && !migratedOnce){
-          migratedOnce = true;
+        if(changed && !migratedOnceGlobal){
+          migratedOnceGlobal = true;
           // Escreve só as chaves de topo que a migração de fato alterou (mesma lógica de diff do
           // mutate()) — nunca o objeto inteiro — para não arriscar sobrescrever, com dados potencialmente
           // desatualizados, campos que o usuário possa estar editando ao mesmo tempo em outra parte do app.
