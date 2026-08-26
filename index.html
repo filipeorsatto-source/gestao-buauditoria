@@ -2475,6 +2475,15 @@ function mesAnoAbertura(abertoEmIso, mesN){
   return d.getFullYear() === CURRENT_YEAR && (d.getMonth()+1) === mesN;
 }
 
+// Mês (1-12) extraído da coluna "Prazo" (data pura "YYYY-MM-DD") de um ticket — usado no lugar da
+// antiga coluna manual "Mês Planning", removida: como todo ticket já tem um Prazo, o mês de
+// planejamento passa a ser derivado diretamente dele, em vez de exigir preenchimento manual duplicado.
+function mesDoPrazo(prazo){
+  if(!prazo) return '';
+  const mes = Number(String(prazo).split('-')[1]);
+  return mes >= 1 && mes <= 12 ? mes : '';
+}
+
 function fmtDataAbertura(iso){
   if(!iso) return '—';
   const d = new Date(iso);
@@ -2587,7 +2596,11 @@ function buildDemandasMerged(customMap, baseRows){
       concluidoEmManual: concluidoEmManual,
       concluidoManualmente: concluidoManualmente,
       concluidoEmOrigem: concluidoEmOrigem,
-      mesPlanning: c.mesPlanning || '',
+      // Antes era um campo 100% manual (c.mesPlanning); agora é derivado direto da coluna Prazo — a
+      // coluna "Mês Planning" foi removida da tabela de Demandas, mas o campo `mesPlanning` continua
+      // existindo aqui (com o mês do Prazo) para não precisar alterar todo indicador/filtro que já lia
+      // esse campo (% Entregas Prazo, CSAT por mês, filtro "Mês Planning" etc.).
+      mesPlanning: mesDoPrazo(prazo),
       prioridade: c.prioridade || '',
       esforco: (c.esforco === undefined || c.esforco === null || c.esforco === '') ? null : Number(c.esforco),
       atrasado: isDemandaAtrasado(prazo, statusEfetivo, concluidoEm),
@@ -2702,6 +2715,11 @@ function metaArea(goal){
 // e não mais no card/modal de Gestão de Metas. "ticket-medio" é a exceção de local: o budget dela é
 // definido por cliente na aba Margem Bruta (não tem tela própria em Acompanhamento de Metas).
 const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico', 'ticket-medio'];
+
+// Metas em que "quanto menor, melhor" (Realizado abaixo do Budget é bom) — o oposto da maioria das
+// metas, em que Realizado acima do Budget é bom. Usado só para decidir a cor (verde/vermelho) na
+// tabela "Realizado vs. Budget · % por mês" de Gestão de Metas — a fórmula do percentual em si não muda.
+const META_MENOR_MELHOR_SLUGS = ['dias-ticket-aberto', 'sla-primeira-resposta'];
 
 const AREA_PALETTE = ['#2C5AA0','#1F8A70','#B8862B','#8A4FBE','#C4432B','#2B8FA6','#6B5BD6','#A85A9E'];
 function colorForArea(area){
@@ -4367,12 +4385,47 @@ function getPessoaClienteNomes(pessoaId, data){
   return nomes;
 }
 
+// Metas calculadas em cima da aba "Demandas" (tickets do Movidesk) — diferente das demais metas
+// (ex.: Contas Finalizadas), em que cada cliente tem um "dono" fixo no organograma, aqui uma pessoa
+// pode ajudar em tickets de qualquer cliente, mesmo sem estar alocada nele em Papéis e
+// Responsabilidades. Por isso, ao filtrar por pessoa em Gestão de Metas, essas metas usam
+// ticketPertenceAPessoa (quem de fato assumiu o ticket) em vez de getPessoaClienteNomes (organograma).
+const DEMANDA_BASED_SLUGS = ['entregas-prazo', 'csat-tech', 'csat-atendimento', 'csat-produto', 'dias-ticket-aberto', 'sla-primeira-resposta'];
+
+// Filtro de classificação usado por cada meta de Demandas baseada em CSAT/prazo — null = sem restrição
+// de classificação (dias-ticket-aberto e sla-primeira-resposta consideram qualquer ticket).
+const DEMANDA_SLUG_MATCH_FN = {
+  'entregas-prazo': c => c.startsWith('Desenvolvimento'),
+  'csat-tech': c => c.startsWith('Desenvolvimento'),
+  'csat-produto': c => c === 'Desenvolvimento Produto',
+  'csat-atendimento': c => c.startsWith('Atendimento'),
+};
+
+// Um ticket "pertence" a uma pessoa quando ela é a responsável pelo atendimento no Movidesk
+// (row.responsavel, comparado por conteúdo via normalizeClientName — mesma lógica usada em outras
+// quebras por pessoa) OU quando ela foi alocada como Responsável Desenvolvimento naquele ticket
+// (row.responsavelDesenvolvimentoId) — cobre o caso de um ticket de Atendimento que também precisou de
+// um desenvolvedor alocado. Retorna false quando não há pessoa (chamador deve tratar null antes).
+function ticketPertenceAPessoa(row, pessoa){
+  if(!pessoa) return false;
+  if(row.responsavelDesenvolvimentoId && row.responsavelDesenvolvimentoId === pessoa.id) return true;
+  if(row.responsavel){
+    const rn = normalizeClientName(row.responsavel);
+    const pn = normalizeClientName(pessoa.nome);
+    if(rn && pn && (rn === pn || rn.includes(pn) || pn.includes(rn))) return true;
+  }
+  return false;
+}
+
 // Conecta cada meta (pelo slug do indicador) ao "Realizado" já calculado nas telas de
 // Acompanhamento de Metas, mês a mês, para alimentar o gráfico de Budget x Realizado.
 // clienteNomesFilter (opcional): Set de nomes de clientes — quando presente, restringe o cálculo
 // apenas aos clientes daquele conjunto, para as metas cujo número é apurado por cliente.
-function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
+// pessoaId (opcional): id da pessoa filtrada em Gestão de Metas — para as metas de DEMANDA_BASED_SLUGS,
+// tem prioridade sobre clienteNomesFilter (ver DEMANDA_BASED_SLUGS acima).
+function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   const clientesCols = (data.clientes || []).filter(c => c.nome.toLowerCase() !== 'interno' && (!clienteNomesFilter || clienteNomesFilter.has(c.nome)));
+  const pessoaFiltro = (pessoaId && DEMANDA_BASED_SLUGS.includes(slug)) ? (data.pessoas || []).find(p => p.id === pessoaId) : null;
 
   if(slug === 'margem-bruta'){
     const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
@@ -4493,7 +4546,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
   if(slug === 'entregas-prazo'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
     const base = merged.filter(m => m.classificacao && m.classificacao.startsWith('Desenvolvimento') && m.mesPlanning
-      && (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
+      && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
     MONTHS.forEach(m => {
       const subset = base.filter(x => String(x.mesPlanning) === String(m.n));
@@ -4503,12 +4556,10 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
   }
 
   if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
-    const matchFn = slug === 'csat-tech' ? (c => c.startsWith('Desenvolvimento'))
-      : slug === 'csat-produto' ? (c => c === 'Desenvolvimento Produto')
-      : (c => c.startsWith('Atendimento'));
+    const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
     const scoped = merged.filter(m => m.classificacao && matchFn(m.classificacao) && m.mesPlanning
-      && (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
+      && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
     MONTHS.forEach(m => {
       const subset = scoped.filter(x => String(x.mesPlanning) === String(m.n));
@@ -4519,7 +4570,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
 
   if(slug === 'dias-ticket-aberto'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
-    const scoped = merged.filter(m => !clienteNomesFilter || clienteNomesFilter.has(m.cliente));
+    const scoped = merged.filter(m => pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
     const out = {};
     MONTHS.forEach(m => {
       const dias = scoped
@@ -4533,7 +4584,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter){
   if(slug === 'sla-primeira-resposta'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
     const scoped = merged.filter(m => m.tempoPrimeiraResposta !== null
-      && (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
+      && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
     MONTHS.forEach(m => {
       const subset = scoped.filter(x => mesAnoAbertura(x.abertoEm, m.n));
@@ -4622,7 +4673,8 @@ const META_GRANULAR_CLIENTE_SLUGS = [
 ];
 
 // Realizado de um indicador, para um cliente e mês específicos. Retorna null se não aplicável.
-function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN){
+function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN, pessoaId){
+  const pessoaFiltro = (pessoaId && DEMANDA_BASED_SLUGS.includes(slug)) ? (data.pessoas || []).find(p => p.id === pessoaId) : null;
   if(slug === 'upsell-score'){
     const monthData = ((data.upsellScore||{})[CURRENT_YEAR]||{})[mesN] || {};
     return computeUpsellScore(monthData[clienteId]);
@@ -4658,20 +4710,20 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN)
   }
   if(slug === 'entregas-prazo'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
-    const subset = merged.filter(x => x.classificacao && x.classificacao.startsWith('Desenvolvimento') && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome);
+    const subset = merged.filter(x => x.classificacao && x.classificacao.startsWith('Desenvolvimento') && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome
+      && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return subset.length ? (subset.filter(x => x.concluidaNoPrazo).length / subset.length * 100) : null;
   }
   if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
-    const matchFn = slug === 'csat-tech' ? (c => c.startsWith('Desenvolvimento'))
-      : slug === 'csat-produto' ? (c => c === 'Desenvolvimento Produto')
-      : (c => c.startsWith('Atendimento'));
+    const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
-    const subset = merged.filter(x => x.classificacao && matchFn(x.classificacao) && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome);
+    const subset = merged.filter(x => x.classificacao && matchFn(x.classificacao) && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome
+      && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return avgCsat(subset.map(x => x.csat));
   }
   if(slug === 'dias-ticket-aberto'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
-    const subset = merged.filter(x => x.cliente === clienteNome);
+    const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
       .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, mesN))
       .filter(v => v !== null);
@@ -4684,7 +4736,8 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN)
   }
   if(slug === 'sla-primeira-resposta'){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
-    const subset = merged.filter(x => x.cliente === clienteNome && x.tempoPrimeiraResposta !== null && mesAnoAbertura(x.abertoEm, mesN));
+    const subset = merged.filter(x => x.cliente === clienteNome && x.tempoPrimeiraResposta !== null && mesAnoAbertura(x.abertoEm, mesN)
+      && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return subset.length ? avgOf(subset.map(x => x.tempoPrimeiraResposta)) : null;
   }
   if(slug === 'ticket-medio'){
@@ -4727,9 +4780,23 @@ function getMetaBudgetPorClienteMes(slug, data, clienteId, clienteNome, mesN){
 
 // Tabela Clientes (linhas) x Meses (colunas) com Real / Budget em cada célula, exibida embaixo
 // do gráfico de cada meta em Gestão de Metas.
-function GoalClienteMesTable({goal, data, clienteNomesFilter}){
+function GoalClienteMesTable({goal, data, clienteNomesFilter, pessoaId}){
   if(!goal.slug || !META_GRANULAR_CLIENTE_SLUGS.includes(goal.slug)) return null;
-  const clientesCols = (data.clientes || []).filter(c => c.nome.toLowerCase() !== 'interno' && (!clienteNomesFilter || clienteNomesFilter.has(c.nome)));
+  const isDemandaBased = DEMANDA_BASED_SLUGS.includes(goal.slug);
+  let clientesCols;
+  if(isDemandaBased && pessoaId){
+    // Para metas de Demandas, filtrar por pessoa não é "os clientes dela no organograma" (ela pode
+    // ajudar em tickets de qualquer cliente) — as linhas mostradas são os clientes onde essa pessoa
+    // efetivamente tem tickets que se aplicam a essa meta (ver ticketPertenceAPessoa).
+    const pessoa = (data.pessoas || []).find(p => p.id === pessoaId);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase);
+    const matchFn = DEMANDA_SLUG_MATCH_FN[goal.slug];
+    const relevantes = merged.filter(m => (!matchFn || (m.classificacao && matchFn(m.classificacao))) && ticketPertenceAPessoa(m, pessoa));
+    const nomesComDados = new Set(relevantes.map(m => m.cliente).filter(Boolean));
+    clientesCols = (data.clientes || []).filter(c => c.nome.toLowerCase() !== 'interno' && nomesComDados.has(c.nome));
+  } else {
+    clientesCols = (data.clientes || []).filter(c => c.nome.toLowerCase() !== 'interno' && (!clienteNomesFilter || clienteNomesFilter.has(c.nome)));
+  }
   if(!clientesCols.length) return null;
 
   const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(goal.slug);
@@ -4749,7 +4816,7 @@ function GoalClienteMesTable({goal, data, clienteNomesFilter}){
               <tr key={c.id}>
                 <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{c.nome}</td>
                 {MONTHS.map(m => {
-                  const real = getMetaRealizadoPorClienteMes(goal.slug, data, c.id, c.nome, m.n);
+                  const real = getMetaRealizadoPorClienteMes(goal.slug, data, c.id, c.nome, m.n, pessoaId);
                   const budgetPerCliente = getMetaBudgetPorClienteMes(goal.slug, data, c.id, c.nome, m.n);
                   const budgetRaw = budgetPerCliente !== null ? budgetPerCliente : (flatBudgetByMonth ? flatBudgetByMonth[m.n] : undefined);
                   const hasReal = real !== null && real !== undefined;
@@ -4857,7 +4924,7 @@ function GoalModal({initial, pessoas, onSave, onClose}){
 
 // Tabela-resumo no topo de Gestão de Metas: metas nas linhas, meses nas colunas,
 // variação percentual Realizado vs. Budget = (Realizado / Budget - 1) x 100.
-function GoalsSummaryTable({goals, data, clienteNomesFilter}){
+function GoalsSummaryTable({goals, data, clienteNomesFilter, pessoaId}){
   if(!goals.length) return null;
   return (
     <div className="card" style={{marginBottom:20}}>
@@ -4875,8 +4942,9 @@ function GoalsSummaryTable({goals, data, clienteNomesFilter}){
           <tbody>
             {goals.map(g => {
               const isExterno = g.slug && META_BUDGET_EXTERNO_SLUGS.includes(g.slug);
+              const menorMelhor = g.slug && META_MENOR_MELHOR_SLUGS.includes(g.slug);
               const budgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(g.slug, data, clienteNomesFilter) : (g.budgets[CURRENT_YEAR] || {});
-              const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter) : null;
+              const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter, pessoaId) : null;
               return (
                 <tr key={g.id}>
                   <td style={{textAlign:'left', paddingLeft:12, color:'var(--ink-soft)', whiteSpace:'nowrap'}}>{metaArea(g)}</td>
@@ -4890,7 +4958,11 @@ function GoalsSummaryTable({goals, data, clienteNomesFilter}){
                       return <td key={m.n} style={{color:'#B7BACB'}}>—</td>;
                     }
                     const pct = (Number(rawRealizado) / Number(rawBudget) - 1) * 100;
-                    const color = pct >= 0 ? 'var(--positive)' : 'var(--negative)';
+                    // Para metas "quanto menor, melhor" (ex.: dias em aberto, SLA 1ª resposta), realizado
+                    // abaixo do budget (pct negativo) é o resultado bom — por isso a cor é invertida em
+                    // relação às demais metas, onde pct positivo (acima do budget) é que é bom.
+                    const isGood = menorMelhor ? pct <= 0 : pct >= 0;
+                    const color = isGood ? 'var(--positive)' : 'var(--negative)';
                     return (
                       <td key={m.n} style={{fontWeight:600, color, fontFamily:'IBM Plex Mono, monospace'}}>
                         {pct >= 0 ? '+' : ''}{pct.toLocaleString('pt-BR', {maximumFractionDigits:0})}%
@@ -4909,7 +4981,7 @@ function GoalsSummaryTable({goals, data, clienteNomesFilter}){
 
 // Tabela-resumo com o valor Realizado de cada meta, mês a mês (mesmo formato de GoalsSummaryTable,
 // sem o cálculo de variação percentual).
-function GoalsRealizadoTable({goals, data, clienteNomesFilter}){
+function GoalsRealizadoTable({goals, data, clienteNomesFilter, pessoaId}){
   if(!goals.length) return null;
   return (
     <div className="card" style={{marginBottom:20}}>
@@ -4926,7 +4998,7 @@ function GoalsRealizadoTable({goals, data, clienteNomesFilter}){
           </thead>
           <tbody>
             {goals.map(g => {
-              const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter) : null;
+              const realizadoByMonth = g.slug ? getMetaRealizadoByMonth(g.slug, data, clienteNomesFilter, pessoaId) : null;
               return (
                 <tr key={g.id}>
                   <td style={{textAlign:'left', paddingLeft:12, color:'var(--ink-soft)', whiteSpace:'nowrap'}}>{metaArea(g)}</td>
@@ -4996,12 +5068,12 @@ function GoalsBudgetTable({goals, data, clienteNomesFilter}){
 
 // Bloco completo de uma meta (antigo GoalCard + GoalDetail combinados), exibido diretamente
 // na listagem de Gestão de Metas — sem precisar clicar para ver o gráfico e os detalhes.
-function GoalFullCard({goal, pessoas, data, clienteNomesFilter, onEdit, onDelete}){
+function GoalFullCard({goal, pessoas, data, clienteNomesFilter, pessoaId, onEdit, onDelete}){
   const pessoaById = Object.fromEntries(pessoas.map(p=>[p.id,p]));
   const isExterno = goal.slug && META_BUDGET_EXTERNO_SLUGS.includes(goal.slug);
   const year = isExterno ? getMetaBudgetOverrideByMonth(goal.slug, data, clienteNomesFilter) : (goal.budgets[CURRENT_YEAR] || {});
   const assoc = (goal.pessoaIds||[]).map(id => pessoaById[id]).filter(Boolean);
-  const realizedByMonth = goal.slug ? getMetaRealizadoByMonth(goal.slug, data, clienteNomesFilter) : null;
+  const realizedByMonth = goal.slug ? getMetaRealizadoByMonth(goal.slug, data, clienteNomesFilter, pessoaId) : null;
 
   return (
     <div style={{borderBottom:'1px solid var(--line)', paddingBottom:24, marginBottom:24}}>
@@ -5020,7 +5092,7 @@ function GoalFullCard({goal, pessoas, data, clienteNomesFilter, onEdit, onDelete
         <div className="card card-pad">
           <BudgetChart budgetsByMonth={year} realizedByMonth={realizedByMonth} unidade={goal.unidadeMedida}/>
           {isExterno && <div className="budget-note">Budget definido na tela do indicador, dentro de Acompanhamento de Metas.</div>}
-          <GoalClienteMesTable goal={goal} data={data} clienteNomesFilter={clienteNomesFilter}/>
+          <GoalClienteMesTable goal={goal} data={data} clienteNomesFilter={clienteNomesFilter} pessoaId={pessoaId}/>
         </div>
 
         <div className="card card-pad">
@@ -5076,6 +5148,8 @@ function GoalsPage({data, actions}){
         {fPessoa && (
           <div className="hint" style={{margin:0}}>
             Metas com número por cliente consideram apenas os clientes atendidos por essa pessoa em Papéis e Responsabilidades.
+            Já as metas calculadas via Demandas (% Entregas Prazo, CSAT, Média dias ticket em aberto, SLA 1ª Resposta) consideram
+            todos os tickets que essa pessoa assumiu, mesmo em clientes fora do organograma dela.
           </div>
         )}
       </div>
@@ -5091,12 +5165,12 @@ function GoalsPage({data, actions}){
         </div>
       ) : (
         <>
-          <GoalsSummaryTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter}/>
-          <GoalsRealizadoTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter}/>
+          <GoalsSummaryTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter} pessoaId={fPessoa}/>
+          <GoalsRealizadoTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter} pessoaId={fPessoa}/>
           <GoalsBudgetTable goals={visibleGoals} data={data} clienteNomesFilter={clienteNomesFilter}/>
           <div>
             {visibleGoals.map(g => (
-              <GoalFullCard key={g.id} goal={g} pessoas={data.pessoas} data={data} clienteNomesFilter={clienteNomesFilter}
+              <GoalFullCard key={g.id} goal={g} pessoas={data.pessoas} data={data} clienteNomesFilter={clienteNomesFilter} pessoaId={fPessoa}
                 onEdit={()=>setModal(g)} onDelete={()=>setConfirmDel(g)}/>
             ))}
           </div>
@@ -6681,7 +6755,7 @@ function EntregasPrazoPage({data}){
         ) : (
           <div className="kpi-hero-value" style={{fontSize:20, color:'#9BA0B8'}}>Sem demandas na planning</div>
         )}
-        <div className="kpi-hero-formula">Demandas concluídas no prazo / Demandas total — considerando apenas tickets de Desenvolvimento com Mês Planning definido ({concluidasNoPrazo} de {totalPlanning})</div>
+        <div className="kpi-hero-formula">Demandas concluídas no prazo / Demandas total — considerando apenas tickets de Desenvolvimento com Prazo definido ({concluidasNoPrazo} de {totalPlanning})</div>
       </div>
 
       <div className="card demandas-filters-card">
@@ -6713,13 +6787,13 @@ function EntregasPrazoPage({data}){
         <div className="section-block-head" style={{padding:'18px 22px 0'}}>
           <div>
             <div className="section-block-title">% de entrega no prazo por responsável e mês</div>
-            <div className="section-block-desc">Baseado no Mês Planning de cada ticket de Desenvolvimento. Respeita os filtros de responsável, classificação e tipo (o filtro de mês não se aplica à matriz, para mostrar a evolução completa do ano).</div>
+            <div className="section-block-desc">Baseado no mês do Prazo de cada ticket de Desenvolvimento. Respeita os filtros de responsável, classificação e tipo (o filtro de mês não se aplica à matriz, para mostrar a evolução completa do ano).</div>
           </div>
         </div>
         {respRows.length === 0 ? (
           <div style={{padding:'0 22px 20px'}}>
             <EmptyState icon={IconTrend} title="Sem demandas na planning"
-              sub="Preencha o Mês Planning nos tickets de Desenvolvimento na aba Demandas para ver a evolução aqui."/>
+              sub="Preencha o Prazo nos tickets de Desenvolvimento na aba Demandas para ver a evolução aqui."/>
           </div>
         ) : (
           <div className="table-wrap">
@@ -6768,7 +6842,7 @@ function CsatMatrixTable({title, desc, rows, avgFn, emptyText}){
       {rows.length === 0 ? (
         <div style={{padding:'0 22px 20px'}}>
           <EmptyState icon={IconTrend} title="Sem dados ainda"
-            sub={emptyText || "Nenhum ticket com Mês Planning definido para esse recorte, ou a coluna CSAT ainda não foi preenchida na base do Movidesk."}/>
+            sub={emptyText || "Nenhum ticket com Prazo definido para esse recorte, ou a coluna CSAT ainda não foi preenchida na base do Movidesk."}/>
         </div>
       ) : (
         <div className="table-wrap">
@@ -6794,7 +6868,11 @@ function CsatMatrixTable({title, desc, rows, avgFn, emptyText}){
   );
 }
 
-function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint}){
+// extraDevTable: quando true (só CSAT Atendimento), mostra uma segunda tabela "por desenvolvedor" além
+// da tabela "por pessoa" (Responsável do Movidesk) — alguns tickets de Atendimento também requerem um
+// desenvolvedor alocado (campo Responsável Desenvolvimento), e o CSAT desses tickets deve poder ser
+// acompanhado por quem os atendeu do lado de desenvolvimento também.
+function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDevTable}){
   const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase), [data.demandasCustom, data.demandasBase]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento' || p.area === 'Atendimento'), [data.pessoas]);
 
@@ -6804,10 +6882,15 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint}){
 
   const overallAvg = useMemo(() => avgCsat(scoped.map(m => m.csat)), [scoped]);
 
+  const devRowsFromScoped = (scopedList) => {
+    const idsComDados = new Set(scopedList.map(m => m.responsavelDesenvolvimentoId).filter(Boolean));
+    const rows = devTeam.filter(p => idsComDados.has(p.id)).map(p => ({key:p.id, label:p.nome, match:(m)=>m.responsavelDesenvolvimentoId===p.id}));
+    return rows;
+  };
+
   const personRows = useMemo(() => {
     if(personMode === 'dev'){
-      const idsComDados = new Set(scoped.map(m => m.responsavelDesenvolvimentoId).filter(Boolean));
-      const rows = devTeam.filter(p => idsComDados.has(p.id)).map(p => ({key:p.id, label:p.nome, match:(m)=>m.responsavelDesenvolvimentoId===p.id}));
+      const rows = devRowsFromScoped(scoped);
       if(scoped.some(m => !m.responsavelDesenvolvimentoId)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavelDesenvolvimentoId});
       return rows;
     }
@@ -6816,6 +6899,10 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint}){
     if(scoped.some(m => !m.responsavel)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavel});
     return rows;
   }, [scoped, devTeam, personMode]);
+
+  // Só relevante quando extraDevTable (CSAT Atendimento): tickets de Atendimento que também tiveram um
+  // desenvolvedor alocado, agrupados por esse desenvolvedor — igual à lógica "por pessoa" de CSAT Tech.
+  const devRows = useMemo(() => extraDevTable ? devRowsFromScoped(scoped) : [], [scoped, devTeam, extraDevTable]);
 
   const clienteRows = useMemo(() =>
     DEMANDAS_CLIENTES_ORDEM.filter(c => scoped.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c})),
@@ -6840,13 +6927,22 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint}){
 
       <CsatMatrixTable
         title="CSAT médio por pessoa e mês"
-        desc="Colunas = Mês Planning do ticket. Linhas = Responsável Desenvolvimento (Tech/Produto) ou Responsável do Movidesk (Atendimento)."
+        desc="Colunas = mês do Prazo do ticket. Linhas = Responsável Desenvolvimento (Tech/Produto) ou Responsável do Movidesk (Atendimento)."
         rows={personRows}
         avgFn={avgForRowMes}
       />
+      {extraDevTable && (
+        <CsatMatrixTable
+          title="CSAT médio por desenvolvedor e mês"
+          desc="Tickets de Atendimento que também tiveram um desenvolvedor alocado (Responsável Desenvolvimento). Colunas = mês do Prazo do ticket."
+          rows={devRows}
+          avgFn={avgForRowMes}
+          emptyText="Nenhum ticket de Atendimento com Responsável Desenvolvimento alocado ainda."
+        />
+      )}
       <CsatMatrixTable
         title="CSAT médio por cliente e mês"
-        desc="Colunas = Mês Planning do ticket. Linhas = clientes."
+        desc="Colunas = mês do Prazo do ticket. Linhas = clientes."
         rows={clienteRows}
         avgFn={avgForRowMes}
       />
@@ -7079,17 +7175,17 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   if(slug === 'csat-tech'){
     return <CsatMatrixPage data={data} personMode="dev" titulo="CSAT Tech"
       matchFn={c => c.startsWith('Desenvolvimento')}
-      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento (Bug, Personalização ou Produto), agrupados pelo Mês Planning."/>;
+      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento (Bug, Personalização ou Produto), agrupados pelo mês do Prazo."/>;
   }
   if(slug === 'csat-atendimento'){
-    return <CsatMatrixPage data={data} personMode="responsavel" titulo="CSAT Atendimento"
+    return <CsatMatrixPage data={data} personMode="responsavel" titulo="CSAT Atendimento" extraDevTable
       matchFn={c => c.startsWith('Atendimento')}
-      formulaHint="Média do CSAT de tickets classificados como Atendimento (Bug, Dúvida, Personalização ou Regra), agrupados pelo Mês Planning."/>;
+      formulaHint="Média do CSAT de tickets classificados como Atendimento (Bug, Dúvida, Personalização ou Regra), agrupados pelo mês do Prazo."/>;
   }
   if(slug === 'csat-produto'){
     return <CsatMatrixPage data={data} personMode="dev" titulo="CSAT Produto"
       matchFn={c => c === 'Desenvolvimento Produto'}
-      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento Produto, agrupados pelo Mês Planning."/>;
+      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento Produto, agrupados pelo mês do Prazo."/>;
   }
   if(slug === 'dias-ticket-aberto'){
     return <DiasTicketAbertoPage data={data}/>;
@@ -7632,7 +7728,7 @@ function DemandasPage({data, actions}){
       <div className="section-block-head">
         <div>
           <div className="section-block-title">Demandas</div>
-          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo, Mês Planning e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. "Concluído em" vem direto da coluna "Resolvido Em" do Movidesk — dê duplo clique na célula (ou use o ícone de lápis) para inserir manualmente quando o ticket for mantido em aberto no Movidesk aguardando o cliente; uma vez preenchido manualmente, o ticket passa a contar como concluído nos KPIs e deixa de considerar o dado do Movidesk até ser revertido. CSAT ainda não está disponível na exportação do Movidesk — a coluna fica com placeholder até a base trazer essa informação.</div>
+          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. "Concluído em" vem direto da coluna "Resolvido Em" do Movidesk — dê duplo clique na célula (ou use o ícone de lápis) para inserir manualmente quando o ticket for mantido em aberto no Movidesk aguardando o cliente; uma vez preenchido manualmente, o ticket passa a contar como concluído nos KPIs e deixa de considerar o dado do Movidesk até ser revertido. CSAT ainda não está disponível na exportação do Movidesk — a coluna fica com placeholder até a base trazer essa informação.</div>
           <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>
             {data.demandasBaseSync
               ? `Última atualização: ${data.demandasBaseSync.by} em ${fmtDataAbertura(data.demandasBaseSync.at)} · ${data.demandasBaseSync.count} tickets`
@@ -7697,7 +7793,7 @@ function DemandasPage({data, actions}){
           {respFilter.length > 0 && <button className="btn btn-ghost btn-sm" onClick={()=>setRespFilter([])}>Limpar</button>}
         </div>
 
-        <div className="demandas-filter-label">Mês Finalização, Mês Planning, Tipo, Classificação, Prioridade e Responsável Desenvolvimento</div>
+        <div className="demandas-filter-label">Mês Finalização, Mês do Prazo, Tipo, Classificação, Prioridade e Responsável Desenvolvimento</div>
         <div className="filters-bar" style={{margin:0}}>
           <div className="filters-bar-ms">
             <MultiSelect
@@ -7712,7 +7808,7 @@ function DemandasPage({data, actions}){
               options={MESES_PLANNING.map(m => ({id:String(m.n), label:m.nome}))}
               value={mesPlanningFilter}
               onChange={setMesPlanningFilter}
-              placeholder="Mês Planning"
+              placeholder="Mês do Prazo"
             />
           </div>
           <div className="filters-bar-ms">
@@ -7809,7 +7905,6 @@ function DemandasClienteTable({cliente, rows, devTeam, actions}){
                 <th>Dias em Aberto</th>
                 <th>Classificação</th>
                 <th>Tipo</th>
-                <th>Mês Planning</th>
                 <th>Responsável Desenvolvimento</th>
               </tr>
             </thead>
@@ -7959,16 +8054,6 @@ function DemandaRow({row, devTeam, actions}){
         >
           <option value="">—</option>
           {DEMANDA_TIPO_OPTIONS.map(o => <option value={o} key={o}>{o}</option>)}
-        </select>
-      </td>
-      <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.mesPlanning) || undefined}>
-        <select
-          className={"demanda-select" + (row.mesPlanning ? '' : ' empty')}
-          value={row.mesPlanning}
-          onChange={e => actions.updateDemandaCustom(row.numero, {mesPlanning: e.target.value})}
-        >
-          <option value="">—</option>
-          {MESES_PLANNING.map(m => <option value={m.n} key={m.n}>{m.nome}</option>)}
         </select>
       </td>
       <td title={fmtEditMetaTooltip(row.editMeta && row.editMeta.responsavelDesenvolvimentoId) || undefined}>
