@@ -1097,14 +1097,20 @@ const MONTH_ABBR_TO_N = {
   'Jul':7, 'Ago':8, 'Set':9, 'Out':10, 'Nov':11, 'Dez':12,
 };
 
-// Nome da aba, na planilha "Gestão Metas", de onde vem o Realizado de cada uma dessas 4 metas.
+// Nome da aba, na planilha "Gestão Metas", de onde vem o Realizado de cada uma dessas metas.
 const REALIZADO_SHEET_TAB = {
   'contas-finalizadas': 'Contas Finalizadas',
   'contas-automatico': 'Contas Automáticas',
   'penetracao-regras': 'Penetração Regras',
   'efetividade-regras': 'Efetividade Regras',
   'subfaturamento': 'Subfaturamento',
+  'tempo-processamento': 'Tempo Processamento',
 };
+
+// Categorias fixas da meta Tempo Processamento — linhas da tabela de Realizado/Budget, sincronizadas
+// da aba "Tempo Processamento" da planilha Gestão Metas (mesmo formato "label nas linhas, Jan..Dez nas
+// colunas" das outras abas, só que aqui o label é a categoria em vez do nome do cliente).
+const TEMPO_PROCESSAMENTO_CATEGORIAS = ['Importação', 'Recálculo', 'LLM'];
 
 // Nomes canônicos de cliente usados no restante do painel — usado para casar com o nome como aparece
 // nas abas de sincronização, de forma insensível a acento/maiúsculas (ex.: evita divergências sutis
@@ -2690,11 +2696,13 @@ const INDICADORES = [
   {slug:'efetividade-regras', titulo:'Efetividade Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
   {slug:'entregas-prazo', titulo:'% Entregas Prazo', area:'Desenvolvimento', descricao:'Escopos Cobertos / Escopos Essenciais', unidade:'%', fonte:'Movidesk + Planning'},
   {slug:'csat-tech', titulo:'CSAT Tech', area:'Desenvolvimento', descricao:'Avaliação dos tickets de tecnologia provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
+  {slug:'tempo-processamento', titulo:'Tempo Processamento', area:'Desenvolvimento', descricao:'Tempo de processamento por categoria (Importação, Recálculo, LLM) — a meta é a média consolidada entre as 3 categorias.', unidade:'Absoluto', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?gid=808343304#gid=808343304'},
   {slug:'dias-ticket-aberto', titulo:'Média dias ticket em aberto', area:'Atendimento', descricao:'Média de dias em aberto dos tickets provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'csat-atendimento', titulo:'CSAT Atendimento', area:'Atendimento', descricao:'Avaliação dos tickets de atendimento provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'sla-primeira-resposta', titulo:'SLA 1ª Resposta', area:'Atendimento', descricao:'Tempo médio (em minutos) até a primeira resposta do ticket, agrupado pela Data de Abertura.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'cobertura-dados', titulo:'Cobertura de Dados', area:'Produto', descricao:'Visuais Criados / Visuais Totais', unidade:'%', fonte:'Metabase'},
   {slug:'csat-produto', titulo:'CSAT Produto', area:'Produto', descricao:'Avaliação dos tickets relacionados a produto provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
+  {slug:'cobertura-produto', titulo:'Cobertura Produto', area:'Produto', descricao:'Checks / (Funções Cadastradas × Clientes) na grade de funções do produto — o valor de fechamento de cada mês é registrado manualmente.', unidade:'%', fonte:'Preenchimento manual — grade de funções x clientes dentro da aba.'},
 ];
 
 // Indicadores com item próprio na barra lateral de "Acompanhamento de Metas" — exclui os marcados
@@ -2715,8 +2723,8 @@ const GESTAO_METAS_ORDEM = [
   'upsell-score', 'contas-finalizadas', 'ticket-medio',
   'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico',
   'dias-ticket-aberto', 'csat-atendimento', 'sla-primeira-resposta',
-  'entregas-prazo', 'csat-tech',
-  'csat-produto', 'cobertura-dados',
+  'entregas-prazo', 'csat-tech', 'tempo-processamento',
+  'csat-produto', 'cobertura-dados', 'cobertura-produto',
 ];
 const GESTAO_METAS_ORDEM_INDEX = Object.fromEntries(GESTAO_METAS_ORDEM.map((slug, i) => [slug, i]));
 
@@ -2742,12 +2750,12 @@ function metaArea(goal){
 // Metas cujo Budget mensal é definido direto na tela do próprio indicador (Acompanhamento de Metas),
 // e não mais no card/modal de Gestão de Metas. "ticket-medio" é a exceção de local: o budget dela é
 // definido por cliente na aba Margem Bruta (não tem tela própria em Acompanhamento de Metas).
-const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico', 'ticket-medio'];
+const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico', 'ticket-medio', 'tempo-processamento', 'cobertura-produto'];
 
 // Metas em que "quanto menor, melhor" (Realizado abaixo do Budget é bom) — o oposto da maioria das
 // metas, em que Realizado acima do Budget é bom. Usado só para decidir a cor (verde/vermelho) na
 // tabela "Realizado vs. Budget · % por mês" de Gestão de Metas — a fórmula do percentual em si não muda.
-const META_MENOR_MELHOR_SLUGS = ['dias-ticket-aberto', 'sla-primeira-resposta'];
+const META_MENOR_MELHOR_SLUGS = ['dias-ticket-aberto', 'sla-primeira-resposta', 'tempo-processamento'];
 
 const AREA_PALETTE = ['#2C5AA0','#1F8A70','#B8862B','#8A4FBE','#C4432B','#2B8FA6','#6B5BD6','#A85A9E'];
 function colorForArea(area){
@@ -3319,6 +3327,10 @@ function buildDefaultData(){
     penetracaoRegrasBudget: {},
     nps: buildSeedNPSManual(clientes),
     coberturaDados: {},
+    produtoFuncoes: [],
+    produtoFuncoesChecks: {},
+    produtoFuncoesRealizado: {},
+    produtoFuncoesBudget: {},
     demandasCustom: {},
     demandasManuais: [],
     metas: INDICADORES.map(ind => ({
@@ -4622,6 +4634,32 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
     return out;
   }
 
+  if(slug === 'tempo-processamento'){
+    // Média entre as 3 categorias (Importação, Recálculo, LLM), mês a mês — "quanto menor, melhor" (ver
+    // META_MENOR_MELHOR_SLUGS). Comparar Real vs Budget usa essa média já consolidada de cada lado, não
+    // a média das razões individuais por categoria.
+    const yearData = (data.financeiro && data.financeiro.tempoProcessamento && data.financeiro.tempoProcessamento[CURRENT_YEAR]) || {};
+    const out = {};
+    MONTHS.forEach(m => {
+      const vals = TEMPO_PROCESSAMENTO_CATEGORIAS.map(cat => (yearData[cat]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      out[m.n] = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+    });
+    return out;
+  }
+
+  if(slug === 'cobertura-produto'){
+    // Valor de fechamento do mês, registrado manualmente na tabela "Fechamento mensal · Real" da aba
+    // Cobertura Produto — diferente do valor calculado ao vivo (checks / (funções × clientes)) mostrado
+    // no topo daquela tabela, que reflete o estado ATUAL da grade, não o snapshot de um mês fechado.
+    const yearData = (data.produtoFuncoesRealizado && data.produtoFuncoesRealizado[CURRENT_YEAR] && data.produtoFuncoesRealizado[CURRENT_YEAR].cobertura) || {};
+    const out = {};
+    MONTHS.forEach(m => {
+      const v = yearData[m.n];
+      out[m.n] = (v === undefined || v === null || v === '') ? null : Number(v);
+    });
+    return out;
+  }
+
   return null;
 }
 
@@ -4683,6 +4721,26 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
     MONTHS.forEach(m => {
       const vals = clientesCols.map(c => (yearData[c.nome]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
       out[m.n] = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0) / vals.length) : null;
+    });
+    return out;
+  }
+
+  if(slug === 'tempo-processamento'){
+    const yearData = (data.financeiro && data.financeiro.tempoProcessamentoBudget && data.financeiro.tempoProcessamentoBudget[CURRENT_YEAR]) || {};
+    const out = {};
+    MONTHS.forEach(m => {
+      const vals = TEMPO_PROCESSAMENTO_CATEGORIAS.map(cat => (yearData[cat]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      out[m.n] = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+    });
+    return out;
+  }
+
+  if(slug === 'cobertura-produto'){
+    const yearData = (data.produtoFuncoesBudget && data.produtoFuncoesBudget[CURRENT_YEAR] && data.produtoFuncoesBudget[CURRENT_YEAR].cobertura) || {};
+    const out = {};
+    MONTHS.forEach(m => {
+      const v = yearData[m.n];
+      out[m.n] = (v === undefined || v === null || v === '') ? null : Number(v);
     });
     return out;
   }
@@ -6087,12 +6145,15 @@ function ContasFinalizadasPage({financeiro, actions, sync}){
 // modelo visual de ContasFinalizadasPage — usada por Subfaturamento (Realizado manual) e % Contas
 // Automático (Realizado sincronizado da planilha — passe `sync`/`onSync`/`descRealizado` nesse caso;
 // o Budget continua sempre manual, para as duas).
-function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget, sync, onSync, descRealizado, unidade, totalMode}){
+// rowLabels (opcional): rótulos das linhas da tabela — por padrão os 7 clientes faturáveis, mas
+// também usado com categorias fixas (ex.: Tempo Processamento: Importação/Recálculo/LLM), já que o
+// formato "label nas linhas, Jan..Dez nas colunas" é o mesmo independente do que o label representa.
+function PercentClientGoalPage({titulo, financeiro, dataKey, budgetKey, setRealizado, setBudget, sync, onSync, descRealizado, unidade, totalMode, rowLabels}){
   const un = unidade || '%';
   const fmtVal = v => fmtChartValue(v, un);
   const data = (financeiro && financeiro[dataKey] && financeiro[dataKey][CURRENT_YEAR]) || {};
   const budgetData = (financeiro && financeiro[budgetKey] && financeiro[budgetKey][CURRENT_YEAR]) || {};
-  const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
+  const clientNames = rowLabels || ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo'];
   const realizadoReadOnly = !!onSync;
   // Totalizador entre clientes: "média" (padrão, ex.: Subfaturamento, um percentual) ou "soma" (ex.: %
   // Contas Automático, que agora guarda valores absolutos — faz mais sentido somar do que tirar a média).
@@ -6258,6 +6319,238 @@ function ContasAutomaticoPage({financeiro, actions, sync}){
     setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}
     sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Contas Automáticas" da planilha Gestão Metas — valores absolutos (quantidade de contas), não percentual.'
     unidade="Absoluto" totalMode="soma"/>;
+}
+
+// Linhas fixas (Importação, Recálculo, LLM) em vez de clientes — reaproveita PercentClientGoalPage via
+// rowLabels, já que o formato "label nas linhas, Jan..Dez nas colunas" é idêntico. O Total exibido é a
+// MÉDIA entre as 3 categorias (não soma — tempo de processamento é uma medida de duração, não algo que
+// faça sentido somar entre categorias), igual ao que getMetaRealizadoByMonth('tempo-processamento', ...)
+// usa para a meta em Gestão de Metas.
+function TempoProcessamentoPage({financeiro, actions, sync}){
+  const handleSync = async () => {
+    const token = await getGoogleDriveAccessToken();
+    const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['tempo-processamento']);
+    const porCategoria = parseClienteMesSheet(values);
+    actions.importTempoProcessamentoRealizado(porCategoria);
+  };
+  return <PercentClientGoalPage titulo="Tempo Processamento" financeiro={financeiro} dataKey="tempoProcessamento" budgetKey="tempoProcessamentoBudget"
+    rowLabels={TEMPO_PROCESSAMENTO_CATEGORIAS}
+    setRealizado={actions.setTempoProcessamentoRealizado} setBudget={actions.setTempoProcessamentoBudget}
+    sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Tempo Processamento" da planilha Gestão Metas — uma linha por categoria (Importação, Recálculo, LLM).'
+    unidade="Absoluto"/>;
+}
+
+/* ---------------------------------------------------------------
+   COBERTURA PRODUTO — grade de funções do produto x clientes
+--------------------------------------------------------------- */
+const PRODUTO_FUNCOES_KPIS = [
+  {key:'cobertura', label:'Cobertura Produto', unidade:'%'},
+  {key:'funcoes', label:'Funções Mapeadas', unidade:'Absoluto'},
+];
+
+function ProdutoFuncaoModal({onSave, onClose}){
+  const [categoria, setCategoria] = useState('');
+  const [descricao, setDescricao] = useState('');
+  const canSave = categoria.trim() && descricao.trim();
+  return (
+    <Modal title="Adicionar função" onClose={onClose} footer={
+      <>
+        <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+        <button className="btn btn-primary" disabled={!canSave} style={!canSave ? {opacity:0.5}: undefined}
+          onClick={()=> canSave && onSave({categoria: categoria.trim(), descricao: descricao.trim()})}>
+          Salvar
+        </button>
+      </>
+    }>
+      <div className="field">
+        <label>Categoria<span className="required-mark">*</span></label>
+        <input className="input" value={categoria} onChange={e=>setCategoria(e.target.value)} placeholder="Ex.: Alertas" list="produto-funcao-categorias" autoFocus/>
+      </div>
+      <div className="field">
+        <label>Descrição<span className="required-mark">*</span></label>
+        <textarea className="input" value={descricao} onChange={e=>setDescricao(e.target.value)} placeholder="Descreva a função do produto"/>
+      </div>
+    </Modal>
+  );
+}
+
+// Duas linhas de input manual (mês a mês): "Cobertura Produto" (%) e "Funções Mapeadas" (#). Usada tanto
+// para a tabela de Realizado (fechamento do mês) quanto, espelhada, para a de Budget.
+function ProdutoFuncoesKpiTable({titulo, desc, yearData, setValue}){
+  return (
+    <div className="card" style={{marginBottom:16}}>
+      <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+        <div>
+          <div className="section-block-title">{titulo}</div>
+          <div className="section-block-desc">{desc}</div>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="upsell-tbl">
+          <thead>
+            <tr>
+              <th></th>
+              {MONTHS.map(m => <th key={m.n}>{m.label}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {PRODUTO_FUNCOES_KPIS.map(kpi => {
+              const kpiData = yearData[kpi.key] || {};
+              return (
+                <tr key={kpi.key}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{kpi.label}</td>
+                  {MONTHS.map(m => {
+                    const raw = kpiData[m.n];
+                    return (
+                      <td key={m.n}>
+                        <input
+                          type="number"
+                          className="upsell-input"
+                          defaultValue={isEmptyVal(raw) ? '' : raw}
+                          key={kpi.key + '-' + m.n + '-' + (raw ?? '')}
+                          placeholder="—"
+                          step="0.1"
+                          onBlur={e => setValue(kpi.key, m.n, e.target.value === '' ? null : e.target.value)}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ProdutoFuncoesPage({data, actions}){
+  const clientesCols = useMemo(() => data.clientes.filter(c => c.nome.toLowerCase() !== 'interno'), [data.clientes]);
+  const funcoes = data.produtoFuncoes || [];
+  const checks = data.produtoFuncoesChecks || {};
+  const [modalOpen, setModalOpen] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const categorias = useMemo(() => {
+    const ordered = [];
+    funcoes.forEach(f => { if(!ordered.includes(f.categoria)) ordered.push(f.categoria); });
+    return ordered;
+  }, [funcoes]);
+
+  const isChecked = (funcaoId, clienteId) => !!(checks[funcaoId] && checks[funcaoId][clienteId]);
+
+  // KPIs "atuais" — calculados ao vivo a partir da grade de checks, refletem o estado presente (não um
+  // fechamento de mês, que fica nas tabelas manuais de Realizado/Budget abaixo).
+  const totalFields = funcoes.length * clientesCols.length;
+  let totalChecks = 0;
+  funcoes.forEach(f => clientesCols.forEach(c => { if(isChecked(f.id, c.id)) totalChecks++; }));
+  const coberturaAtual = totalFields ? (totalChecks / totalFields * 100) : null;
+  const funcoesMapeadasAtual = funcoes.length;
+
+  const realizadoYearData = (data.produtoFuncoesRealizado && data.produtoFuncoesRealizado[CURRENT_YEAR]) || {};
+  const budgetYearData = (data.produtoFuncoesBudget && data.produtoFuncoesBudget[CURRENT_YEAR]) || {};
+
+  return (
+    <div>
+      <div style={{display:'flex', gap:16, marginBottom:16, flexWrap:'wrap'}}>
+        <div className="kpi-hero" style={{flex:'1 1 260px', margin:0}}>
+          <div className="kpi-hero-label">Cobertura Produto (atual)</div>
+          {coberturaAtual !== null ? (
+            <div className={"kpi-hero-value" + (coberturaAtual >= 70 ? ' positive' : (coberturaAtual < 40 ? ' negative' : ''))} style={coberturaAtual>=40 && coberturaAtual<70 ? {color:'#F2CB8A'} : undefined}>
+              {fmtNumber(coberturaAtual.toFixed(1))}%
+            </div>
+          ) : (
+            <div className="kpi-hero-value" style={{fontSize:20, color:'#9BA0B8'}}>Sem funções cadastradas</div>
+          )}
+          <div className="kpi-hero-formula">Checks / (Funções cadastradas × Clientes) — {totalChecks} de {totalFields}</div>
+        </div>
+        <div className="kpi-hero" style={{flex:'1 1 260px', margin:0}}>
+          <div className="kpi-hero-label">Funções Mapeadas (atual)</div>
+          <div className="kpi-hero-value">{funcoesMapeadasAtual}</div>
+          <div className="kpi-hero-formula">Total de funções de produto cadastradas na grade abaixo</div>
+        </div>
+      </div>
+
+      <ProdutoFuncoesKpiTable
+        titulo={"Fechamento mensal · Real · " + CURRENT_YEAR}
+        desc='Ao fechar o mês, registre aqui o valor de cada KPI (Cobertura Produto % e Funções Mapeadas) referente àquele fechamento — preenchimento manual, mês a mês.'
+        yearData={realizadoYearData}
+        setValue={actions.setProdutoFuncoesRealizado}
+      />
+      <ProdutoFuncoesKpiTable
+        titulo={"Budget · " + CURRENT_YEAR}
+        desc="Preenchimento manual por mês. Esse é o valor usado como Budget da meta Cobertura Produto em Gestão de Metas."
+        yearData={budgetYearData}
+        setValue={actions.setProdutoFuncoesBudget}
+      />
+
+      <div className="section-block-head">
+        <div>
+          <div className="section-block-title">Funções do produto x clientes</div>
+          <div className="section-block-desc">Cadastre as funções do produto e marque, por cliente, se a função está presente. Agrupado por categoria.</div>
+        </div>
+        <button className="btn btn-primary btn-sm" onClick={()=>setModalOpen(true)}><IconPlus width="14" height="14"/>Nova função</button>
+      </div>
+
+      {funcoes.length === 0 ? (
+        <EmptyState icon={IconLayers} title="Nenhuma função cadastrada"
+          sub="Cadastre as funções do produto para começar a acompanhar a cobertura por cliente."
+          action={<button className="btn btn-primary btn-sm" onClick={()=>setModalOpen(true)}><IconPlus width="14" height="14"/>Nova função</button>}
+        />
+      ) : (
+        <div className="card">
+          <div className="table-wrap">
+            <table className="cobertura-tbl">
+              <thead>
+                <tr>
+                  <th>Categoria / Função</th>
+                  {clientesCols.map(c => <th key={c.id}>{c.nome}</th>)}
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {categorias.map(categoria => (
+                  <React.Fragment key={categoria}>
+                    <tr className="cobertura-base-row">
+                      <td colSpan={clientesCols.length + 2}>{categoria}</td>
+                    </tr>
+                    {funcoes.filter(f => f.categoria === categoria).map(f => (
+                      <tr className="cobertura-item-row" key={f.id}>
+                        <td>{f.descricao}</td>
+                        {clientesCols.map(c => (
+                          <td key={c.id}>
+                            <span
+                              className={"cobertura-check" + (isChecked(f.id, c.id) ? ' checked' : '')}
+                              onClick={() => actions.toggleProdutoFuncaoCheck(f.id, c.id)}
+                              title={isChecked(f.id, c.id) ? 'Check' : 'Não Check'}
+                            >
+                              <IconCheck width="14" height="14"/>
+                            </span>
+                          </td>
+                        ))}
+                        <td>
+                          <button className="btn-icon danger" onClick={()=>setConfirmDel(f)}><IconTrash width="13" height="13"/></button>
+                        </td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {modalOpen && (
+        <ProdutoFuncaoModal onClose={()=>setModalOpen(false)}
+          onSave={(f)=>{ actions.addProdutoFuncao(f); setModalOpen(false); }} />
+      )}
+      <ConfirmDialog open={!!confirmDel} title="Excluir função"
+        text={confirmDel ? 'Tem certeza que deseja excluir "' + confirmDel.descricao + '"? Os checks marcados para essa função também serão removidos.' : ''}
+        onCancel={()=>setConfirmDel(null)} onConfirm={()=>{ actions.deleteProdutoFuncao(confirmDel.id); setConfirmDel(null); }} />
+    </div>
+  );
 }
 
 function ManualPercentTablePage({data, actions, dataKey, setActionName, budgetKey, budgetSetActionName, titulo, formulaHint, sync, onSync, descRealizado}){
@@ -7161,6 +7454,12 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   }
   if(slug === 'contas-automatico'){
     return <ContasAutomaticoPage financeiro={financeiro} actions={actions} sync={data.contasAutomaticoSync}/>;
+  }
+  if(slug === 'tempo-processamento'){
+    return <TempoProcessamentoPage financeiro={financeiro} actions={actions} sync={data.tempoProcessamentoSync}/>;
+  }
+  if(slug === 'cobertura-produto'){
+    return <ProdutoFuncoesPage data={data} actions={actions}/>;
   }
   if(slug === 'efetividade-regras'){
     const handleSyncEfetividade = async () => {
@@ -8711,6 +9010,30 @@ function App(){
       financeiro.contasAutomaticoBudget = contasAutomaticoBudget;
       return {...d, financeiro};
     }, null),
+    setTempoProcessamentoRealizado: (mesN, categoria, value) => mutate(d => {
+      const financeiro = {...d.financeiro};
+      const tempoProcessamento = {...(financeiro.tempoProcessamento||{})};
+      const yearData = {...(tempoProcessamento[CURRENT_YEAR]||{})};
+      const catData = {...(yearData[categoria]||{})};
+      if(value === null || value === undefined || value === ''){ delete catData[mesN]; }
+      else { catData[mesN] = value; }
+      yearData[categoria] = catData;
+      tempoProcessamento[CURRENT_YEAR] = yearData;
+      financeiro.tempoProcessamento = tempoProcessamento;
+      return {...d, financeiro};
+    }, null),
+    setTempoProcessamentoBudget: (mesN, categoria, value) => mutate(d => {
+      const financeiro = {...d.financeiro};
+      const tempoProcessamentoBudget = {...(financeiro.tempoProcessamentoBudget||{})};
+      const yearData = {...(tempoProcessamentoBudget[CURRENT_YEAR]||{})};
+      const catData = {...(yearData[categoria]||{})};
+      if(value === null || value === undefined || value === ''){ delete catData[mesN]; }
+      else { catData[mesN] = value; }
+      yearData[categoria] = catData;
+      tempoProcessamentoBudget[CURRENT_YEAR] = yearData;
+      financeiro.tempoProcessamentoBudget = tempoProcessamentoBudget;
+      return {...d, financeiro};
+    }, null),
 
     // NPS (manual, por cliente/mês, com total também editável)
     setNPS: (mesN, clienteId, value) => mutate(d => {
@@ -8755,6 +9078,48 @@ function App(){
       yearData[mesN] = monthData;
       coberturaDados[CURRENT_YEAR] = yearData;
       return {...d, coberturaDados};
+    }, null),
+
+    // Cobertura Produto: cadastro de funções do produto (grade funções x clientes) + KPIs derivados.
+    addProdutoFuncao: ({categoria, descricao}) => mutate(d => ({
+      ...d,
+      produtoFuncoes: [...(d.produtoFuncoes||[]), {id: uid(), categoria, descricao}],
+    }), 'Função de produto adicionada'),
+    deleteProdutoFuncao: (id) => mutate(d => {
+      const produtoFuncoesChecks = {...(d.produtoFuncoesChecks||{})};
+      delete produtoFuncoesChecks[id];
+      return {
+        ...d,
+        produtoFuncoes: (d.produtoFuncoes||[]).filter(f => f.id !== id),
+        produtoFuncoesChecks,
+      };
+    }, 'Função de produto excluída'),
+    toggleProdutoFuncaoCheck: (funcaoId, clienteId) => mutate(d => {
+      const produtoFuncoesChecks = {...(d.produtoFuncoesChecks||{})};
+      const rowData = {...(produtoFuncoesChecks[funcaoId]||{})};
+      if(rowData[clienteId]){ delete rowData[clienteId]; } else { rowData[clienteId] = true; }
+      produtoFuncoesChecks[funcaoId] = rowData;
+      return {...d, produtoFuncoesChecks};
+    }, null),
+    setProdutoFuncoesRealizado: (kpi, mesN, value) => mutate(d => {
+      const produtoFuncoesRealizado = {...(d.produtoFuncoesRealizado||{})};
+      const yearData = {...(produtoFuncoesRealizado[CURRENT_YEAR]||{})};
+      const kpiData = {...(yearData[kpi]||{})};
+      if(value === null || value === undefined || value === ''){ delete kpiData[mesN]; }
+      else { kpiData[mesN] = value; }
+      yearData[kpi] = kpiData;
+      produtoFuncoesRealizado[CURRENT_YEAR] = yearData;
+      return {...d, produtoFuncoesRealizado};
+    }, null),
+    setProdutoFuncoesBudget: (kpi, mesN, value) => mutate(d => {
+      const produtoFuncoesBudget = {...(d.produtoFuncoesBudget||{})};
+      const yearData = {...(produtoFuncoesBudget[CURRENT_YEAR]||{})};
+      const kpiData = {...(yearData[kpi]||{})};
+      if(value === null || value === undefined || value === ''){ delete kpiData[mesN]; }
+      else { kpiData[mesN] = value; }
+      yearData[kpi] = kpiData;
+      produtoFuncoesBudget[CURRENT_YEAR] = yearData;
+      return {...d, produtoFuncoesBudget};
     }, null),
 
     // demandas (campos personalizados por nº de ticket, preservados ao atualizar a base)
@@ -8874,6 +9239,23 @@ function App(){
         },
       };
     }, `Base de % Contas Automático atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
+
+    // Realizado sincronizado da aba "Tempo Processamento" da planilha Gestão Metas (por categoria, nome como chave).
+    importTempoProcessamentoRealizado: (porCategoria) => mutate(d => {
+      const financeiro = {...(d.financeiro||{})};
+      const tempoProcessamento = {...(financeiro.tempoProcessamento||{})};
+      tempoProcessamento[CURRENT_YEAR] = porCategoria;
+      financeiro.tempoProcessamento = tempoProcessamento;
+      return {
+        ...d,
+        financeiro,
+        tempoProcessamentoSync: {
+          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+          at: new Date().toISOString(),
+          count: Object.keys(porCategoria).length,
+        },
+      };
+    }, `Base de Tempo Processamento atualizada (${Object.keys(porCategoria).length} categoria${Object.keys(porCategoria).length===1?'':'s'})`),
 
     // Realizado sincronizado da aba "Penetração Regras" (por cliente, já convertido para clienteId
     // antes de chegar aqui — ver mapClienteNomeParaId).
