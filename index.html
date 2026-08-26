@@ -8794,6 +8794,18 @@ function App(){
     if(!authUser) return;
     let unsub = () => {};
     let cancelled = false;
+    // Só tenta persistir uma correção de migração UMA VEZ por sessão de inscrição (não a cada snapshot).
+    // Antes disso não existia essa trava: se alguma migração (ex.: a que sincroniza título/descrição de
+    // cada meta com a definição atual de INDICADORES) nunca convergisse — por exemplo porque o texto
+    // persistido antigo nunca bate 100% com o texto atual, depois de reescrever a descrição de uma meta
+    // em uma rodada posterior — "changed" ficava true para SEMPRE, disparando persistPatch(migrated) a
+    // CADA snapshot recebido (inclusive o snapshot gerado pelo eco da própria escrita). Isso criava um
+    // loop de escrita automática que corria contra as edições reais do usuário: bastava a escrita da
+    // migração (calculada a partir de um snapshot um instante mais antigo, sem a edição do usuário) ser
+    // ENVIADA depois da escrita da edição do usuário para o servidor aplicar por último e reverter o
+    // responsável recém-associado alguns segundos depois — exatamente o sintoma relatado ("aparece Meta
+    // atualizada, mas o nome some do card ~3s depois"), e só nas metas cujo texto tinha sido reescrito.
+    let migratedOnce = false;
     (async () => {
       await ensureFirestoreSeeded();
       if(cancelled) return;
@@ -8805,7 +8817,15 @@ function App(){
         const {data: migrated, changed} = runMigrations(raw);
         setData(migrated);
         setLoading(false);
-        if(changed) persistPatch(migrated);
+        if(changed && !migratedOnce){
+          migratedOnce = true;
+          // Escreve só as chaves de topo que a migração de fato alterou (mesma lógica de diff do
+          // mutate()) — nunca o objeto inteiro — para não arriscar sobrescrever, com dados potencialmente
+          // desatualizados, campos que o usuário possa estar editando ao mesmo tempo em outra parte do app.
+          const patch = {};
+          Object.keys(migrated).forEach(k => { if(migrated[k] !== raw[k]) patch[k] = migrated[k]; });
+          if(Object.keys(patch).length) persistPatch(patch);
+        }
       }, err => {
         console.error('Firestore sync error', err);
         push('Erro de sincronização com a base compartilhada.', 'error');
