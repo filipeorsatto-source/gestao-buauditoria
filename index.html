@@ -952,6 +952,30 @@ function findMovideskSheetRows(wb){
 // os dados de P&L do ano vigente na base compartilhada do Firestore.
 const MARGEM_BRUTA_SHEET_ID = '1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU';
 
+// Planilha separada (não é uma aba dentro de "Gestão Metas") com uma linha por avaliação de ticket,
+// colunas "Ticket" (número que linka com a base do Movidesk) e "Avaliação" (texto livre, ex.:
+// "Ótimo"). Usada pra alimentar o campo CSAT da tabela de Demandas.
+const CSAT_AVALIACAO_SHEET_ID = '1TpINpL8Kttd61YCYzwpAxO-4-hFKzyqs';
+
+// Converte o texto de avaliação da planilha de CSAT numa nota de 1 a 5. Insensível a maiúsculas e
+// acentos, pra tolerar pequenas variações de digitação ("Otimo" vs "Ótimo").
+function normalizarTextoAvaliacao(str){
+  return String(str || '')
+    .normalize('NFD').replace(DIACRITICS_RE, '') // remove acentos
+    .trim().toLowerCase();
+}
+const CSAT_AVALIACAO_PARA_NOTA = {
+  'pessimo': 1,
+  'ruim': 2,
+  'neutro': 3,
+  'bom': 4,
+  'otimo': 5,
+};
+function avaliacaoTextoParaNota(str){
+  const nota = CSAT_AVALIACAO_PARA_NOTA[normalizarTextoAvaliacao(str)];
+  return nota || null;
+}
+
 const MONTH_NAME_TO_N = {
   'Janeiro':1, 'Fevereiro':2, 'Março':3, 'Abril':4, 'Maio':5, 'Junho':6,
   'Julho':7, 'Agosto':8, 'Setembro':9, 'Outubro':10, 'Novembro':11, 'Dezembro':12,
@@ -1136,9 +1160,14 @@ async function getGoogleDriveAccessToken(){
 // Lê uma aba específica (por nome) da planilha "Gestão Metas" via API do Google Sheets — diferente do
 // export de CSV do Drive (usado pela Margem Bruta), que só consegue exportar a primeira aba do
 // arquivo. O escopo de leitura do Drive (acima) já é suficiente para essa chamada.
-async function fetchSheetTabValues(accessToken, sheetName){
-  const range = encodeURIComponent(`'${sheetName}'!A1:Z300`);
-  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${MARGEM_BRUTA_SHEET_ID}/values/${range}`, {
+// `spreadsheetId` é opcional (default = planilha "Gestão Metas") pra permitir ler outras planilhas
+// (ex.: a planilha separada de CSAT) sem duplicar essa função.
+async function fetchSheetTabValues(accessToken, sheetName, spreadsheetId){
+  const sheetId = spreadsheetId || MARGEM_BRUTA_SHEET_ID;
+  // Sem nome de aba definido, usa um range sem prefixo de aba — a API do Sheets interpreta isso como
+  // a primeira aba da planilha. Usado pela planilha de CSAT, cujo nome de aba não foi informado.
+  const range = encodeURIComponent(sheetName ? `'${sheetName}'!A1:Z300` : 'A1:Z5000');
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${range}`, {
     headers: { Authorization: 'Bearer ' + accessToken },
   });
   if(!res.ok){
@@ -1154,7 +1183,7 @@ async function fetchSheetTabValues(accessToken, sheetName){
     const dica = res.status === 403
       ? ' Se a mensagem acima mencionar a API estar desabilitada, é preciso habilitar a "Google Sheets API" no Google Cloud Console (APIs e Serviços → Biblioteca) do projeto vinculado a este app — a API do Drive, usada pela Margem Bruta, é habilitada separadamente e não cobre isso.'
       : ' Confirme se o nome da aba continua o mesmo.';
-    throw new Error(`Não foi possível ler a aba "${sheetName}" da planilha (HTTP ${res.status})${detail}.${dica}`);
+    throw new Error(`Não foi possível ler a aba "${sheetName || '(primeira aba)'}" da planilha (HTTP ${res.status})${detail}.${dica}`);
   }
   const json = await res.json();
   return json.values || [];
@@ -1205,6 +1234,37 @@ function parseClienteMesSheet(values){
   }
   if(!Object.keys(porCliente).length) throw new Error('Nenhum dado de cliente encontrado na aba (confirme se há uma linha por cliente, com Jan..Dez nas colunas).');
   return porCliente;
+}
+
+// Formato diferente do "cliente x mês" acima: uma linha por avaliação de ticket, com colunas
+// "Ticket" (número, linka com a base do Movidesk) e "Avaliação" (texto livre convertido pra nota de
+// 1 a 5 via avaliacaoTextoParaNota). Localiza as colunas pelo nome do cabeçalho (não por posição
+// fixa), pra tolerar colunas extras/reordenadas na planilha do usuário.
+function parseCsatAvaliacaoSheet(values){
+  let headerRowIdx = -1, colTicket = -1, colAvaliacao = -1;
+  for(let i = 0; i < values.length && headerRowIdx === -1; i++){
+    const row = values[i] || [];
+    for(let j = 0; j < row.length; j++){
+      const label = normalizarTextoAvaliacao(row[j]);
+      if(label === 'ticket') colTicket = j;
+      if(label === 'avaliacao' || label === 'avaliação') colAvaliacao = j;
+    }
+    if(colTicket !== -1 && colAvaliacao !== -1) headerRowIdx = i;
+    else { colTicket = -1; colAvaliacao = -1; }
+  }
+  if(headerRowIdx === -1) throw new Error('Não foi possível localizar as colunas "Ticket" e "Avaliação" na planilha.');
+
+  const porTicket = {};
+  let ignoradas = 0;
+  for(let i = headerRowIdx + 1; i < values.length; i++){
+    const row = values[i] || [];
+    const numero = String(row[colTicket] || '').trim();
+    if(!numero) continue;
+    const nota = avaliacaoTextoParaNota(row[colAvaliacao]);
+    if(nota === null){ ignoradas++; continue; }
+    porTicket[numero] = nota;
+  }
+  return { porTicket, total: Object.keys(porTicket).length, ignoradas };
 }
 
 const DEMANDAS_SEED = [
@@ -2621,7 +2681,7 @@ function buildDemandasMerged(customMap, baseRows, manualRows){
       abertoEm: o.d,
       diasEmAberto: dias,
       tempoPrimeiraResposta: (o.tr === undefined || o.tr === null) ? null : o.tr, // minutos, vem direto do Movidesk
-      csat: o.csat || '', // ainda não disponível na base do Movidesk; placeholder até a coluna existir na exportação
+      csat: c.csatSheet || o.csat || '', // csatSheet vem da sincronização da planilha de CSAT (ver importCsatAvaliacao); o.csat é placeholder — ainda não disponível na base do Movidesk
       classificacao: c.classificacao || '',
       tipo: c.tipo || '',
       responsavelDesenvolvimentoId: c.responsavelDesenvolvimentoId || '',
@@ -4656,7 +4716,11 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   }
 
   if(slug === 'dias-ticket-aberto'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+    // Tickets com Prioridade "Despriorizado" ficam de fora dessa meta — normalmente estão em aberto há
+    // muito tempo de propósito (fila de baixa prioridade), o que distorceria a média pra cima sem
+    // refletir um problema real de atendimento.
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
+      .filter(m => m.prioridade !== 'Despriorizado');
     const scoped = merged.filter(m => pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
     const out = {};
     MONTHS.forEach(m => {
@@ -4855,7 +4919,8 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     return avgCsat(subset.map(x => x.csat));
   }
   if(slug === 'dias-ticket-aberto'){
-    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+    const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
+      .filter(m => m.prioridade !== 'Despriorizado');
     const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
       .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, mesN))
@@ -7450,7 +7515,11 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
    MÉDIA DIAS TICKET EM ABERTO
 --------------------------------------------------------------- */
 function DiasTicketAbertoPage({data}){
-  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
+  // Exclui tickets com Prioridade "Despriorizado" (mesma regra usada no cálculo da meta em Gestão de
+  // Metas — ver getMetaRealizadoByMonth/getMetaRealizadoPorClienteMes), pra essa tela bater com o
+  // número mostrado lá.
+  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
+    .filter(m => m.prioridade !== 'Despriorizado'), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
 
   // Para cada mês civil, a média considera os tickets que — no fim daquele mês — já tinham sido
   // abertos e ainda não tinham sido finalizados (ou nunca chegaram a ser). Isso "congela" o cenário de
@@ -8208,6 +8277,80 @@ function NovaDemandaManualModal({data, devTeam, actions, onClose}){
   );
 }
 
+// Visão de "Entregas por Data": tickets com Prazo definido, agrupados por mês e depois por dia exato —
+// facilita enxergar rapidamente quais entregas estão próximas. Só entram tickets AINDA NÃO concluídos
+// (um ticket já entregue não é mais uma "entrega próxima") e com Prazo preenchido, e respeita os
+// filtros já aplicados na página (recebe `filtered`, não `merged`).
+function EntregasPorDataSection({filtered}){
+  const porMes = useMemo(() => {
+    const comPrazo = filtered.filter(m => m.prazo && !m.concluidoEm);
+    const meses = {};
+    comPrazo.forEach(m => {
+      const mesKey = m.prazo.slice(0, 7); // "YYYY-MM"
+      const diaKey = m.prazo; // "YYYY-MM-DD"
+      meses[mesKey] = meses[mesKey] || {};
+      meses[mesKey][diaKey] = meses[mesKey][diaKey] || [];
+      meses[mesKey][diaKey].push(m);
+    });
+    return meses;
+  }, [filtered]);
+
+  const mesKeys = useMemo(() => Object.keys(porMes).sort(), [porMes]);
+
+  const fmtMesAno = (mesKey) => {
+    const [ano, mes] = mesKey.split('-').map(Number);
+    return mesPlanningNome(mes) + '/' + ano;
+  };
+
+  return (
+    <div style={{marginTop:28}}>
+      <div className="section-block-head">
+        <div>
+          <div className="section-block-title">Entregas por Data</div>
+          <div className="section-block-desc">Tickets ainda não concluídos com Prazo definido, agrupados por mês e data — facilita enxergar o que está próximo de vencer. Respeita os filtros acima.</div>
+        </div>
+      </div>
+      {mesKeys.length === 0 ? (
+        <div className="card"><EmptyState icon={IconClock} title="Nenhuma entrega com prazo pendente"
+          sub="Tickets ainda não concluídos com o campo Prazo preenchido aparecem aqui, organizados por data."/></div>
+      ) : mesKeys.map(mesKey => {
+        const dias = Object.keys(porMes[mesKey]).sort();
+        return (
+          <div className="card" key={mesKey} style={{marginBottom:16}}>
+            <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+              <div className="section-block-title" style={{fontSize:15}}>{fmtMesAno(mesKey)}</div>
+            </div>
+            <div className="table-wrap">
+              <table className="tbl">
+                <thead><tr><th style={{width:110}}>Data</th><th>Entregas</th></tr></thead>
+                <tbody>
+                  {dias.map(diaKey => (
+                    <tr key={diaKey}>
+                      <td style={{whiteSpace:'nowrap', fontWeight:600, verticalAlign:'top'}}>{fmtDataAbertura(diaKey)}</td>
+                      <td>
+                        <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                          {porMes[mesKey][diaKey].map(m => (
+                            <div key={m.numero} style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
+                              <span className="tag tag-client">{m.cliente}</span>
+                              <span>{m.assunto || '(sem assunto)'}</span>
+                              <span style={{color:'var(--ink-soft)', fontSize:12}}>#{m.numero}</span>
+                              {m.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DemandasPage({data, actions}){
   const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento' || p.area === 'Atendimento'), [data.pessoas]);
@@ -8217,6 +8360,18 @@ function DemandasPage({data, actions}){
   const [syncWarning, setSyncWarning] = useState(null);
   const [novoManualOpen, setNovoManualOpen] = useState(false);
   const [confirmDelManual, setConfirmDelManual] = useState(null); // numero do ticket manual a excluir
+
+  // Sincroniza o CSAT a partir da planilha separada de Avaliação (colunas "Ticket" e "Avaliação",
+  // convertidas numa nota de 1 a 5). O nome da aba não foi informado, então lê a primeira aba da
+  // planilha (ver fetchSheetTabValues, sheetName omitido).
+  const handleSyncCsat = async () => {
+    const token = await getGoogleDriveAccessToken();
+    const values = await fetchSheetTabValues(token, null, CSAT_AVALIACAO_SHEET_ID);
+    const { porTicket, total, ignoradas } = parseCsatAvaliacaoSheet(values);
+    if(!total) throw new Error('Nenhuma avaliação reconhecida na planilha — confirme se as colunas "Ticket" e "Avaliação" estão preenchidas.');
+    actions.importCsatAvaliacao(porTicket);
+    return ignoradas ? `${ignoradas} linha${ignoradas===1?'':'s'} ignorada${ignoradas===1?'':'s'} por ter uma Avaliação não reconhecida (esperado: Péssimo, Ruim, Neutro, Bom ou Ótimo).` : null;
+  };
 
   const handleSyncMovidesk = async () => {
     setSyncing(true);
@@ -8395,11 +8550,14 @@ function DemandasPage({data, actions}){
       <div className="section-block-head">
         <div>
           <div className="section-block-title">Demandas</div>
-          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. "Concluído em" vem direto da coluna "Resolvido Em" do Movidesk — dê duplo clique na célula (ou use o ícone de lápis) para inserir manualmente quando o ticket for mantido em aberto no Movidesk aguardando o cliente; uma vez preenchido manualmente, o ticket passa a contar como concluído nos KPIs e deixa de considerar o dado do Movidesk até ser revertido. CSAT ainda não está disponível na exportação do Movidesk — a coluna fica com placeholder até a base trazer essa informação. Tickets criados manualmente (fora do Movidesk) têm todos os campos editáveis, inclusive Assunto, Status, Cliente, Responsável e Data de Abertura, e podem ser excluídos.</div>
+          <div className="section-block-desc">Tickets do Movidesk organizados por cliente. Classificação, Tipo, Prazo e Responsável Desenvolvimento são editáveis aqui e ficam preservados (por nº de ticket) quando a base for atualizada. "Concluído em" vem direto da coluna "Resolvido Em" do Movidesk — dê duplo clique na célula (ou use o ícone de lápis) para inserir manualmente quando o ticket for mantido em aberto no Movidesk aguardando o cliente; uma vez preenchido manualmente, o ticket passa a contar como concluído nos KPIs e deixa de considerar o dado do Movidesk até ser revertido. CSAT vem da planilha de Avaliação (coluna "Avaliação" convertida numa nota de 1 a 5), linkado pelo número do ticket — use "Atualizar CSAT" para sincronizar. Tickets criados manualmente (fora do Movidesk) têm todos os campos editáveis, inclusive Assunto, Status, Cliente, Responsável e Data de Abertura, e podem ser excluídos.</div>
           <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>
             {data.demandasBaseSync
               ? `Última atualização: ${data.demandasBaseSync.by} em ${fmtDataAbertura(data.demandasBaseSync.at)} · ${data.demandasBaseSync.count} tickets`
               : 'Base ainda não atualizada a partir do Drive — exibindo dados estáticos.'}
+            {data.csatAvaliacaoSync && (
+              <> · CSAT: {data.csatAvaliacaoSync.by} em {fmtDataAbertura(data.csatAvaliacaoSync.at)} ({data.csatAvaliacaoSync.count} ticket{data.csatAvaliacaoSync.count===1?'':'s'})</>
+            )}
           </div>
         </div>
         <div style={{display:'flex', flexDirection:'column', alignItems:'flex-end', gap:6}}>
@@ -8412,6 +8570,7 @@ function DemandasPage({data, actions}){
             >
               <IconPlus width="13" height="13"/>Nova Demanda Manual
             </button>
+            <SyncRealizadoButton label="Atualizar CSAT" onSync={handleSyncCsat}/>
             <button
               type="button"
               className="btn btn-primary btn-sm"
@@ -8539,6 +8698,8 @@ function DemandasPage({data, actions}){
           onRequestDeleteManual={setConfirmDelManual}
         />
       ))}
+
+      <EntregasPorDataSection filtered={filtered}/>
 
       {novoManualOpen && (
         <NovaDemandaManualModal
@@ -9366,6 +9527,30 @@ function App(){
       delete demandasCustom[numero];
       return {...d, demandasManuais, demandasCustom};
     }, `Ticket manual excluído (${numero})`),
+
+    // Sincroniza as notas de CSAT (1-5) da planilha separada de Avaliação, indexadas por número de
+    // ticket. Grava em demandasCustom[numero].csatSheet — buildDemandasMerged prioriza esse valor sobre
+    // o.csat (placeholder do Movidesk). Tickets sem avaliação na planilha simplesmente não são tocados
+    // (mantém o valor anterior, se houver).
+    importCsatAvaliacao: (porTicket) => mutate(d => {
+      const demandasCustom = {...(d.demandasCustom||{})};
+      const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
+      const nowIso = new Date().toISOString();
+      Object.keys(porTicket).forEach(numero => {
+        const prev = demandasCustom[numero] || {};
+        const editMeta = {...(prev._editMeta||{}), csatSheet: {by: who, at: nowIso}};
+        demandasCustom[numero] = {...prev, csatSheet: porTicket[numero], _editMeta: editMeta};
+      });
+      return {
+        ...d,
+        demandasCustom,
+        csatAvaliacaoSync: {
+          by: who,
+          at: nowIso,
+          count: Object.keys(porTicket).length,
+        },
+      };
+    }, `CSAT atualizado (${Object.keys(porTicket).length} ticket${Object.keys(porTicket).length===1?'':'s'})`),
 
     // substitui a base de tickets do Movidesk (puxada do Drive) — compartilhada em tempo real
     importDemandasBase: (rows) => mutate(d => ({
