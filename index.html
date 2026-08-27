@@ -11,8 +11,12 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Geração do Report em PPTX (aba "Acompanhamento de Metas", ver gerarReportPptx) — inteiramente no
-     navegador, sem servidor: lê os dados já carregados do Firestore e monta o arquivo .pptx localmente. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundle.js"></script>
+     navegador, sem servidor: lê os dados já carregados do Firestore e monta o arquivo .pptx localmente.
+     IMPORTANTE: pptxgenjs NÃO está hospedado no cdnjs.cloudflare.com (confirmado ao vivo em produção em
+     27/08/2026 — a URL de cdnjs devolvia 404/503) apesar de todas as outras libs do app estarem lá; por
+     isso este script (só este) vem do jsdelivr, que serve o pacote do npm diretamente e foi confirmado
+     funcionando ao vivo. Não "corrigir" isso de volta para cdnjs sem antes testar a URL de verdade.  -->
+<script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
   import {
@@ -790,7 +794,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-27.10';
+const APP_BUILD_ID = '2026-08-27.11';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
