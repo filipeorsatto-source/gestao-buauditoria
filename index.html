@@ -16,7 +16,7 @@
     getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut
   } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js';
   import {
-    initializeFirestore, persistentLocalCache, doc, getDoc, setDoc, updateDoc, onSnapshot
+    initializeFirestore, persistentLocalCache, doc, getDoc, setDoc, updateDoc, onSnapshot, runTransaction
   } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 
   const firebaseConfig = {
@@ -41,7 +41,7 @@
   }
 
   window.__firebase = {
-    auth, db, doc, getDoc, setDoc, updateDoc, onSnapshot, signOut,
+    auth, db, doc, getDoc, setDoc, updateDoc, onSnapshot, signOut, runTransaction,
     GoogleAuthProvider, signInWithPopup, onAuthStateChanged,
     credentialFromResult: GoogleAuthProvider.credentialFromResult,
   };
@@ -3768,6 +3768,40 @@ async function persistPatch(patch){
     return true;
   }catch(e){
     console.error('Firestore write error', e);
+    return false;
+  }
+}
+
+// Escrita segura para ações em LOTE que tocam muitos tickets de demandasCustom de uma vez (ex.:
+// sincronização de CSAT). Diferente de persistPatch (que grava um objeto local, possivelmente
+// desatualizado, já calculado no cliente), esta função usa uma TRANSAÇÃO do Firestore: lê o documento
+// mais recente do SERVIDOR no exato momento da escrita, aplica `mergeFn` sobre o demandasCustom recém-lido
+// (não sobre o estado local do React, que pode estar minutos desatualizado se a aba ficou aberta), e
+// grava o resultado — tudo atomicamente. Isso evita a "perda de atualização" que uma substituição direta
+// do campo demandasCustom inteiro (baseada em estado local antigo) causaria se outro usuário/aba tivesse
+// editado um ticket diferente entre o carregamento da página e o clique em "Atualizar CSAT".
+async function persistDemandasCustomMerge(mergeFn, extraTopLevelPatch){
+  try{
+    const fb = await waitForFirebase();
+    const ref = await getAppDataDocRef();
+    if(fb.runTransaction){
+      await fb.runTransaction(fb.db, async (tx) => {
+        const snap = await tx.get(ref);
+        const current = snap.exists() ? snap.data() : {};
+        const mergedDemandasCustom = mergeFn(current.demandasCustom || {});
+        tx.update(ref, { demandasCustom: mergedDemandasCustom, ...(extraTopLevelPatch || {}) });
+      });
+    } else {
+      // Fallback (não deveria ocorrer em produção, mas evita quebrar se o SDK carregado não expuser
+      // runTransaction por algum motivo): lê e grava em duas chamadas separadas, sem a garantia atômica.
+      const snap = await fb.getDoc(ref);
+      const current = snap.exists() ? snap.data() : {};
+      const mergedDemandasCustom = mergeFn(current.demandasCustom || {});
+      await fb.updateDoc(ref, { demandasCustom: mergedDemandasCustom, ...(extraTopLevelPatch || {}) });
+    }
+    return true;
+  }catch(e){
+    console.error('Firestore transaction write error', e);
     return false;
   }
 }
@@ -9360,27 +9394,20 @@ function App(){
   // editar um ticket diferente (ex.: mudar a Prioridade do ticket X) entre o momento em que esta aba leu
   // o estado local e o momento em que grava, essa escrita em lote sobrescreveria demandasCustom inteiro
   // com a versão local (mais antiga) e o outro usuário perderia a edição — mesmo sem nenhum conflito real
-  // no MESMO ticket. Aqui, em vez disso, cada ticket afetado é gravado com um campo em notação de ponto
-  // ("demandasCustom.<numero>.<campo>"), que o Firestore trata como atualização pontual dentro do mapa,
-  // sem tocar nos demais tickets — elimina esse risco de "perda de atualização" em lote.
-  const mutateDemandasCustomGranular = useCallback((numeros, updater, extraTopLevelKeys, successMsg) => {
+  // no MESMO ticket. Aqui a atualização local do React continua otimista e imediata (via `updater`, igual
+  // a `mutate`), mas a gravação no Firestore é feita por `persistDemandasCustomMerge`, que roda dentro de
+  // uma transação: lê o demandasCustom mais recente do SERVIDOR no momento da escrita (não o estado local
+  // desta aba, que pode estar desatualizado) e aplica `mergeFn` em cima dele — elimina o risco de "perda
+  // de atualização" em lote.
+  const mutateDemandasCustomGranular = useCallback((updater, mergeFn, extraTopLevelKeys, successMsg) => {
     setData(prev => {
       const next = updater(prev);
-      const patch = {};
-      numeros.forEach(numero => {
-        const val = (next.demandasCustom || {})[numero];
-        if(val === undefined) return;
-        Object.keys(val).forEach(campo => {
-          patch[`demandasCustom.${numero}.${campo}`] = val[campo];
-        });
+      const extraTopLevelPatch = {};
+      (extraTopLevelKeys || []).forEach(k => { extraTopLevelPatch[k] = next[k]; });
+      persistDemandasCustomMerge(mergeFn, extraTopLevelPatch).then(ok => {
+        if(!ok) push('Não foi possível salvar. Tente novamente.', 'error');
+        else if(successMsg) push(successMsg);
       });
-      (extraTopLevelKeys || []).forEach(k => { patch[k] = next[k]; });
-      if(Object.keys(patch).length){
-        persistPatch(patch).then(ok => {
-          if(!ok) push('Não foi possível salvar. Tente novamente.', 'error');
-          else if(successMsg) push(successMsg);
-        });
-      }
       return next;
     });
   }, [push]);
@@ -9768,30 +9795,32 @@ function App(){
     // ticket. Grava em demandasCustom[numero].csatSheet — buildDemandasMerged prioriza esse valor sobre
     // o.csat (placeholder do Movidesk). Tickets sem avaliação na planilha simplesmente não são tocados
     // (mantém o valor anterior, se houver).
-    importCsatAvaliacao: (porTicket) => mutateDemandasCustomGranular(
-      Object.keys(porTicket),
-      d => {
-        const demandasCustom = {...(d.demandasCustom||{})};
-        const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
-        const nowIso = new Date().toISOString();
+    importCsatAvaliacao: (porTicket) => {
+      const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
+      const nowIso = new Date().toISOString();
+      // Função pura, aplicada tanto ao estado LOCAL (atualização otimista imediata na tela) quanto ao
+      // demandasCustom mais recente do SERVIDOR (dentro da transação de gravação) — garante que os dois
+      // caminhos calculem exatamente o mesmo resultado por ticket, só a partir de bases diferentes.
+      const aplicarCsat = (demandasCustomBase) => {
+        const demandasCustom = {...(demandasCustomBase || {})};
         Object.keys(porTicket).forEach(numero => {
           const prev = demandasCustom[numero] || {};
           const editMeta = {...(prev._editMeta||{}), csatSheet: {by: who, at: nowIso}};
           demandasCustom[numero] = {...prev, csatSheet: porTicket[numero], _editMeta: editMeta};
         });
-        return {
+        return demandasCustom;
+      };
+      return mutateDemandasCustomGranular(
+        d => ({
           ...d,
-          demandasCustom,
-          csatAvaliacaoSync: {
-            by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
-            at: new Date().toISOString(),
-            count: Object.keys(porTicket).length,
-          },
-        };
-      },
-      ['csatAvaliacaoSync'],
-      `CSAT atualizado (${Object.keys(porTicket).length} ticket${Object.keys(porTicket).length===1?'':'s'})`
-    ),
+          demandasCustom: aplicarCsat(d.demandasCustom),
+          csatAvaliacaoSync: { by: who, at: nowIso, count: Object.keys(porTicket).length },
+        }),
+        aplicarCsat,
+        ['csatAvaliacaoSync'],
+        `CSAT atualizado (${Object.keys(porTicket).length} ticket${Object.keys(porTicket).length===1?'':'s'})`
+      );
+    },
 
     // substitui a base de tickets do Movidesk (puxada do Drive) — compartilhada em tempo real
     importDemandasBase: (rows) => mutate(d => ({
