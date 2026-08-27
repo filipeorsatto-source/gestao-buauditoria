@@ -10,6 +10,9 @@
 <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- Geração do Report em PPTX (aba "Acompanhamento de Metas", ver gerarReportPptx) — inteiramente no
+     navegador, sem servidor: lê os dados já carregados do Firestore e monta o arquivo .pptx localmente. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pptxgenjs/3.12.0/pptxgen.bundle.js"></script>
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
   import {
@@ -746,12 +749,21 @@
     display:inline-block;margin-left:6px;background:var(--negative-soft);color:var(--negative);
     font-weight:700;
   }
-  .demanda-concluido-cell{display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;}
-  .demanda-concluido-cell .btn-icon{opacity:0;transition:opacity .15s;width:20px;height:20px;padding:0;}
+  /* IMPORTANTE: display:flex fica no innerelemento (.demanda-concluido-cell-inner /
+     .demanda-concluido-edit-inner), NUNCA diretamente no <td> — um <td> com display:flex deixa de se
+     comportar como uma célula de tabela normal (display:table-cell), o que fazia a altura da linha e a
+     posição da borda inferior ficarem ligeiramente diferentes das outras células a partir da coluna
+     "Concluído em" (a primeira depois de "Prazo"), causando o desalinhamento reportado em 27/08/2026.
+     O <td> em si (.demanda-concluido-cell / .demanda-concluido-edit) só cuida de cursor/whitespace; quem
+     recebe display:flex é a div interna. */
+  .demanda-concluido-cell{cursor:pointer;}
+  .demanda-concluido-cell-inner{display:flex;align-items:center;justify-content:center;gap:4px;}
+  .demanda-concluido-cell-inner .btn-icon{opacity:0;transition:opacity .15s;width:20px;height:20px;padding:0;}
   .demanda-concluido-cell:hover .btn-icon{opacity:0.75;}
   .demanda-concluido-cell .btn-icon:hover{opacity:1;}
-  .demanda-concluido-edit{display:flex;align-items:center;justify-content:center;gap:3px;white-space:nowrap;}
-  .demanda-concluido-edit .btn-icon{width:20px;height:20px;padding:0;}
+  .demanda-concluido-edit{white-space:nowrap;}
+  .demanda-concluido-edit-inner{display:flex;align-items:center;justify-content:center;gap:3px;}
+  .demanda-concluido-edit-inner .btn-icon{width:20px;height:20px;padding:0;}
   .manual-tag{
     font-size:9.3px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:var(--accent-ink);
     background:var(--accent-soft);padding:1px 6px;border-radius:8px;white-space:nowrap;
@@ -778,7 +790,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-27.9';
+const APP_BUILD_ID = '2026-08-27.10';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -5845,11 +5857,404 @@ function RotinasPage({data, actions}){
 }
 
 
-function TrackingIndexPage(){
+// ---------------------------------------------------------------
+// REPORT MENSAL EM PPTX (gerado a partir de "Acompanhamento de Metas" quando nenhum indicador está
+// selecionado) — pedido em 27/08/2026: usar essa tela, hoje vazia, como geradora de um report mensal
+// consolidado em .pptx, no padrão visual das apresentações Rivio (ver skill "rivio-apresentacoes"),
+// montado 100% no navegador (sem servidor) via PptxGenJS, a partir dos mesmos dados/funções já usados
+// nas telas de Gestão de Metas e Acompanhamento de Metas — não duplica cálculo de indicador nenhum.
+// ---------------------------------------------------------------
+
+// Logo Rivio (versão preta, para fundo claro) embutido como base64 — mesmo arquivo oficial usado nos
+// templates de apresentação da Rivio (assets/rivio-preto.png) — para não depender de um asset externo
+// dentro de um app estático de página única.
+const RIVIO_LOGO_PRETO_B64 = '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';
+
+// Paleta e tipografia do padrão visual Rivio (ver skill rivio-apresentacoes / template-guide.md) —
+// reaproveitada aqui pra o Report em PPTX ficar consistente com o restante do material da empresa.
+const RIVIO_PPTX = {
+  fontFace: 'Funnel Display',
+  azul: '0575E6',
+  tinta: '151515',
+  tintaSoft: '757575',
+  grafiteEscuro: '0B0D11',
+  grafiteClaro: '16181D',
+  cardEscuro: '141414',
+  lilas: 'B08CF0',
+  laranja: 'E08A2E',
+  verde: '1F8A5B',
+  linhaClara: 'E3E3E6',
+  branco: 'FFFFFF',
+};
+
+// As 15 metas cobertas pelo report, agrupadas nas 5 áreas — mesma ordem/agrupamento pedido em
+// 27/08/2026 (Slide 1 e Ranking Individual). Propositalmente NÃO inclui as metas de área "Geral" (NPS,
+// Margem Bruta/Ticket Médio), que ficaram fora do pedido original.
+const REPORT_AREAS = [
+  {nome:'Deployment', kpis:['contas-finalizadas','upsell-score']},
+  {nome:'Auditoria', kpis:['penetracao-regras','efetividade-regras','subfaturamento','contas-automatico']},
+  {nome:'Desenvolvimento', kpis:['entregas-prazo','csat-tech','tempo-processamento']},
+  {nome:'Atendimento', kpis:['dias-ticket-aberto','sla-primeira-resposta','csat-atendimento']},
+  {nome:'Produto', kpis:['cobertura-produto','csat-produto','cobertura-dados']},
+];
+
+function getMetaBySlug(data, slug){
+  return (data.metas || []).find(m => m.slug === slug) || null;
+}
+
+// Formata um valor de KPI de acordo com a unidade de medida da meta (mesmo padrão usado no resto do
+// app — ver fmtPercent/fmtCurrency/fmtNumber) — usado só na montagem do Report (texto dentro do pptx).
+function fmtMetaValorReport(v, unidade){
+  if(v === null || v === undefined || v === '') return '—';
+  if(unidade === '%') return fmtPercent(v, 1);
+  if(unidade === 'R$') return fmtCurrency(v) || '—';
+  return v.toLocaleString('pt-BR', {maximumFractionDigits: 1});
+}
+
+// Real + Budget de uma meta num mês específico, com filtro opcional por cliente/pessoa — encapsula a
+// escolha entre getMetaBudgetOverrideByMonth (metas com budget nativo por cliente/tela própria) e
+// goal.budgets (as demais), do mesmo jeito que GoalDetailPage/GoalClienteMesTable já fazem.
+function getKpiRealBudgetNoMes(data, slug, mesN, clienteNomesFilter, pessoaId){
+  const goal = getMetaBySlug(data, slug);
+  if(!goal) return {real: null, budget: null, unidade: 'Absoluto', titulo: slug};
+  const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(slug);
+  const realByMonth = getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId);
+  const budgetByMonth = isExterno
+    ? getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter)
+    : (goal.budgets[CURRENT_YEAR] || {});
+  return {
+    real: realByMonth ? realByMonth[mesN] : null,
+    budget: budgetByMonth ? budgetByMonth[mesN] : null,
+    unidade: goal.unidadeMedida,
+    titulo: goal.titulo,
+  };
+}
+
+// Monta o resumo do Slide 1: para cada área, o Real/Budget de cada KPI no mês escolhido (visão da
+// empresa inteira, sem filtro de cliente/pessoa).
+function buildReportAreaSummary(data, mesN){
+  return REPORT_AREAS.map(area => ({
+    nome: area.nome,
+    kpis: area.kpis.map(slug => ({slug, ...getKpiRealBudgetNoMes(data, slug, mesN, null, null)})),
+  }));
+}
+
+// Monta a abertura por cliente (Slides 2 a 6): para os KPIs de uma área que têm granularidade por
+// cliente (META_GRANULAR_CLIENTE_SLUGS), Real/Budget de cada cliente naquele mês. KPIs sem granularidade
+// por cliente (ex.: Tempo Processamento) ficam de fora da tabela por cliente, mas continuam no Slide 1.
+function buildReportClienteBreakdown(data, mesN, areaKpiSlugs){
+  const granularSlugs = areaKpiSlugs.filter(s => META_GRANULAR_CLIENTE_SLUGS.includes(s));
+  const clientesTodos = (data.clientes || []).filter(c => c.nome.toLowerCase() !== 'interno');
+  const nomesComDados = new Set();
+  granularSlugs.forEach(slug => {
+    clientesTodos.forEach(c => {
+      MONTHS.filter(m => m.n === mesN).forEach(() => {
+        const v = getMetaRealizadoPorClienteMes(slug, data, c.id, c.nome, mesN, null);
+        if(v !== null) nomesComDados.add(c.nome);
+      });
+    });
+  });
+  const clientesCols = clientesTodos.filter(c => nomesComDados.has(c.nome));
+  const budgetIsPerClienteSlugs = ['contas-finalizadas','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'];
+  const rows = clientesCols.map(c => {
+    const valores = {};
+    granularSlugs.forEach(slug => {
+      const goal = getMetaBySlug(data, slug);
+      const real = getMetaRealizadoPorClienteMes(slug, data, c.id, c.nome, mesN, null);
+      let budget = budgetIsPerClienteSlugs.includes(slug) ? getMetaBudgetPorClienteMes(slug, data, c.id, c.nome, mesN) : null;
+      if(budget === null && goal){
+        const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(slug);
+        const flatBudgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(slug, data, null) : (goal.budgets[CURRENT_YEAR] || {});
+        budget = flatBudgetByMonth ? flatBudgetByMonth[mesN] : null;
+      }
+      valores[slug] = {real, budget, unidade: goal ? goal.unidadeMedida : 'Absoluto'};
+    });
+    return {cliente: c.nome, valores};
+  });
+  return {granularSlugs, rows};
+}
+
+// Monta o Slide 7 (Ranking Individual): para cada pessoa, para cada uma das 15 metas do report em que
+// ela está associada (meta.pessoaIds), o Real/Budget "mais específico possível" — por cliente quando o
+// KPI tem granularidade por cliente e a pessoa tem clientes associados (via tarefas — mesmo critério já
+// usado no filtro por pessoa de Gestão de Metas, ver getPessoaClienteNomes), e o valor GLOBAL da empresa
+// quando o KPI é um número único (NPS/Tempo Processamento/Cobertura Produto não entram aqui, mas o
+// mesmo princípio vale caso algum KPI de área não tenha corte por cliente). Critério confirmado com o
+// usuário em 27/08/2026.
+function buildReportPessoaRanking(data, mesN){
+  const allKpiSlugs = REPORT_AREAS.flatMap(a => a.kpis.map(slug => ({slug, area: a.nome})));
+  const pessoas = (data.pessoas || []).slice().sort((a,b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  const rows = pessoas.map(p => {
+    const clienteNomesFilter = getPessoaClienteNomes(p.id, data);
+    const valores = {};
+    allKpiSlugs.forEach(({slug}) => {
+      const goal = getMetaBySlug(data, slug);
+      if(!goal || !(goal.pessoaIds||[]).includes(p.id)){ valores[slug] = null; return; }
+      valores[slug] = getKpiRealBudgetNoMes(data, slug, mesN, clienteNomesFilter, p.id);
+    });
+    return {pessoa: p.nome, valores};
+  }).filter(r => allKpiSlugs.some(({slug}) => r.valores[slug]));
+  return {allKpiSlugs, rows};
+}
+
+// Cor de status (verde = dentro/acima da meta, laranja = fora) de um KPI, considerando que alguns são
+// "quanto menor, melhor" (ver META_MENOR_MELHOR_SLUGS) — cinza quando não há budget definido pra comparar.
+function kpiStatusColorReport(real, budget, slug){
+  if(real === null || real === undefined || budget === null || budget === undefined || budget === '') return RIVIO_PPTX.tintaSoft;
+  const menorMelhor = META_MENOR_MELHOR_SLUGS.includes(slug);
+  const atingiu = menorMelhor ? Number(real) <= Number(budget) : Number(real) >= Number(budget);
+  return atingiu ? RIVIO_PPTX.verde : RIVIO_PPTX.laranja;
+}
+
+// Cabeçalho padrão "onde estamos" (ver skill rivio-apresentacoes) + logo Rivio no rodapé direito, em
+// todo slide de conteúdo do Report.
+function addReportHeader(pptx, slide, mesLabel, titulo){
+  slide.addShape(pptx.ShapeType.ellipse, {x:0.5, y:0.4, w:0.4, h:0.4, fill:{color:RIVIO_PPTX.branco}, line:{color:'9AA0AE', width:1.25}});
+  slide.addShape(pptx.ShapeType.ellipse, {x:0.5+0.4/2-0.035, y:0.4+0.4/2-0.035, w:0.07, h:0.07, fill:{color:RIVIO_PPTX.azul}, line:{type:'none'}});
+  slide.addShape(pptx.ShapeType.line, {x:1.05, y:0.6, w:1.35, h:0, line:{color:'CCCCCC', width:1}});
+  slide.addText('Report Mensal · ' + mesLabel, {x:2.5, y:0.38, w:5.5, h:0.42, fontFace:RIVIO_PPTX.fontFace, fontSize:13, color:RIVIO_PPTX.tinta, valign:'middle'});
+  slide.addText(titulo, {x:0.5, y:0.82, w:11.6, h:0.62, fontFace:RIVIO_PPTX.fontFace, fontSize:26, color:RIVIO_PPTX.tinta, bold:false, valign:'middle'});
+  slide.addImage({data:'image/png;base64,' + RIVIO_LOGO_PRETO_B64, x:11.93, y:6.98, w:1.0, h:0.382});
+}
+
+// Slide 1: 5 colunas (uma por área), cada uma com um card branco por KPI mostrando Real x Budget do mês.
+function addReportSlide1(pptx, areaSummary, mesLabel){
+  const slide = pptx.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+  addReportHeader(pptx, slide, mesLabel, 'Resultados do mês · visão geral por área');
+
+  const startX = 0.4, startY = 1.7, totalW = 12.53, gap = 0.18;
+  const colW = (totalW - gap * (areaSummary.length - 1)) / areaSummary.length;
+
+  areaSummary.forEach((area, i) => {
+    const x = startX + i * (colW + gap);
+    slide.addText(area.nome.toUpperCase(), {
+      x, y: startY, w: colW, h: 0.34, fontFace: RIVIO_PPTX.fontFace, fontSize: 12.5,
+      color: RIVIO_PPTX.azul, bold: true, charSpacing: 0.5,
+    });
+    let y = startY + 0.46;
+    const cardH = (7.5 - 0.62 - y) / area.kpis.length - 0.1;
+    area.kpis.forEach(kpi => {
+      slide.addShape(pptx.ShapeType.roundRect, {
+        x, y, w: colW, h: cardH, rectRadius: 0.08,
+        fill: {color: RIVIO_PPTX.branco}, line: {color: RIVIO_PPTX.linhaClara, width: 1},
+        shadow: {type: 'outer', color: '0A0A0A', opacity: 0.16, blur: 6, offset: 2, angle: 90},
+      });
+      const cor = kpiStatusColorReport(kpi.real, kpi.budget, kpi.slug);
+      slide.addText(kpi.titulo, {
+        x: x + 0.12, y: y + 0.08, w: colW - 0.24, h: 0.28,
+        fontFace: RIVIO_PPTX.fontFace, fontSize: 9.5, color: RIVIO_PPTX.tintaSoft, valign: 'top',
+      });
+      slide.addText(fmtMetaValorReport(kpi.real, kpi.unidade), {
+        x: x + 0.12, y: y + 0.34, w: colW - 0.24, h: 0.42,
+        fontFace: RIVIO_PPTX.fontFace, fontSize: 21, color: cor, bold: true, valign: 'top',
+      });
+      slide.addText('Budget: ' + fmtMetaValorReport(kpi.budget, kpi.unidade), {
+        x: x + 0.12, y: y + cardH - 0.28, w: colW - 0.24, h: 0.24,
+        fontFace: RIVIO_PPTX.fontFace, fontSize: 9, color: RIVIO_PPTX.tintaSoft, valign: 'bottom',
+      });
+      y += cardH + 0.1;
+    });
+  });
+}
+
+// Slides 2 a 6: uma área por slide, com uma tabela Cliente x KPI (Real/Budget) para os KPIs que têm
+// abertura por cliente, e uma nota abaixo para os que não têm (mostrando o valor global do mês).
+function addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel){
+  const slide = pptx.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+  addReportHeader(pptx, slide, mesLabel, 'Resultados ' + area.nome + ' · abertura por cliente');
+
+  const {granularSlugs, rows} = buildReportClienteBreakdown(data, mesN, area.kpis);
+  const naoGranulares = area.kpis.filter(s => !granularSlugs.includes(s));
+
+  let tableBottomY = 1.7;
+  if(granularSlugs.length && rows.length){
+    const headerRow1 = [{text: 'Cliente', options: {bold: true, fill: {color: 'F4F4F5'}, valign: 'middle'}}];
+    const headerRow2 = [{text: '', options: {fill: {color: 'F4F4F5'}}}];
+    granularSlugs.forEach(slug => {
+      const goal = getMetaBySlug(data, slug);
+      headerRow1.push({
+        text: goal ? goal.titulo : slug,
+        options: {colspan: 2, align: 'center', bold: true, fill: {color: 'F4F4F5'}, fontSize: 10},
+      });
+      headerRow2.push({text: 'Real', options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
+      headerRow2.push({text: 'Budget', options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
+    });
+    const bodyRows = rows.map(r => {
+      const cells = [{text: r.cliente, options: {bold: true, fontSize: 10}}];
+      granularSlugs.forEach(slug => {
+        const v = r.valores[slug] || {real: null, budget: null, unidade: 'Absoluto'};
+        const cor = kpiStatusColorReport(v.real, v.budget, slug);
+        cells.push({text: fmtMetaValorReport(v.real, v.unidade), options: {align: 'center', fontSize: 10, color: cor}});
+        cells.push({text: fmtMetaValorReport(v.budget, v.unidade), options: {align: 'center', fontSize: 10, color: RIVIO_PPTX.tintaSoft}});
+      });
+      return cells;
+    });
+    const nCols = 1 + granularSlugs.length * 2;
+    const colW0 = 2.0;
+    const otherColW = (12.53 - colW0) / (granularSlugs.length * 2);
+    const colWs = [colW0, ...Array(granularSlugs.length * 2).fill(otherColW)];
+    slide.addTable([headerRow1, headerRow2, ...bodyRows], {
+      x: 0.4, y: 1.7, w: 12.53, colW: colWs,
+      fontFace: RIVIO_PPTX.fontFace, border: {type: 'solid', color: 'E3E3E6', pt: 0.5},
+      autoPage: false, rowH: 0.32,
+    });
+    tableBottomY = 1.7 + 0.32 * (2 + bodyRows.length) + 0.25;
+  } else {
+    slide.addText('Nenhum cliente com dado disponível para os KPIs desta área neste mês.', {
+      x: 0.4, y: 1.7, w: 12.53, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 12, color: RIVIO_PPTX.tintaSoft,
+    });
+    tableBottomY = 1.7 + 0.55;
+  }
+
+  if(naoGranulares.length){
+    const areaKpiInfo = areaSummary.find(a => a.nome === area.nome);
+    const notas = naoGranulares.map(slug => {
+      const info = (areaKpiInfo && areaKpiInfo.kpis.find(k => k.slug === slug)) || {};
+      return info.titulo + ' (sem abertura por cliente) — Real: ' + fmtMetaValorReport(info.real, info.unidade) + '  ·  Budget: ' + fmtMetaValorReport(info.budget, info.unidade);
+    }).join('     |     ');
+    slide.addText(notas, {
+      x: 0.4, y: Math.min(tableBottomY, 6.9), w: 12.53, h: 0.5,
+      fontFace: RIVIO_PPTX.fontFace, fontSize: 10.5, italic: true, color: RIVIO_PPTX.tintaSoft,
+    });
+  }
+}
+
+// Slide 7: Ranking Individual — pessoas nas linhas, as 15 metas (agrupadas por área) nas colunas.
+function addReportRankingSlide(pptx, data, mesN, mesLabel){
+  const slide = pptx.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+  addReportHeader(pptx, slide, mesLabel, 'Ranking Individual · Real x Budget por pessoa');
+
+  const {allKpiSlugs, rows} = buildReportPessoaRanking(data, mesN);
+  if(!rows.length){
+    slide.addText('Nenhuma pessoa está associada a metas do report ainda (ver pessoaIds em Gestão de Metas).', {
+      x: 0.4, y: 1.7, w: 12.53, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 12, color: RIVIO_PPTX.tintaSoft,
+    });
+    return;
+  }
+
+  // Cabeçalho de duas linhas: área (colspan pelos kpis daquela área) + abreviação de cada meta (o nome
+  // completo de cada uma fica numa legenda abaixo da tabela, já que a coluna é estreita demais pro texto).
+  const headerRow1 = [{text: '', options: {fill: {color: 'F4F4F5'}}}];
+  const headerRow2 = [{text: 'Pessoa', options: {bold: true, fill: {color: 'F4F4F5'}, fontSize: 9, valign: 'middle'}}];
+  REPORT_AREAS.forEach(area => {
+    headerRow1.push({
+      text: area.nome, options: {colspan: area.kpis.length, align: 'center', bold: true, fill: {color: 'F4F4F5'}, fontSize: 9, color: RIVIO_PPTX.azul},
+    });
+    area.kpis.forEach((slug, idx) => {
+      const goal = getMetaBySlug(data, slug);
+      const abrev = 'K' + (headerRow2.length);
+      headerRow2.push({text: abrev, options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 8, bold: true}});
+    });
+  });
+
+  const bodyRows = rows.map(r => {
+    const cells = [{text: r.pessoa, options: {bold: true, fontSize: 8.5}}];
+    allKpiSlugs.forEach(({slug}) => {
+      const v = r.valores[slug];
+      if(!v){ cells.push({text: '—', options: {align: 'center', fontSize: 8, color: 'C7C9D1'}}); return; }
+      const cor = kpiStatusColorReport(v.real, v.budget, slug);
+      cells.push({
+        text: fmtMetaValorReport(v.real, v.unidade) + ' / ' + fmtMetaValorReport(v.budget, v.unidade),
+        options: {align: 'center', fontSize: 7.5, color: cor},
+      });
+    });
+    return cells;
+  });
+
+  const colW0 = 1.7;
+  const otherColW = (12.53 - colW0) / allKpiSlugs.length;
+  const colWs = [colW0, ...Array(allKpiSlugs.length).fill(otherColW)];
+  slide.addTable([headerRow1, headerRow2, ...bodyRows], {
+    x: 0.4, y: 1.65, w: 12.53, colW: colWs,
+    fontFace: RIVIO_PPTX.fontFace, border: {type: 'solid', color: 'E3E3E6', pt: 0.5},
+    autoPage: false, rowH: 0.26,
+  });
+
+  // Legenda: K1, K2, ... -> nome completo da meta, na ordem das colunas (agrupada por área no texto).
+  const legendaTexto = REPORT_AREAS.map(area =>
+    area.nome + ': ' + area.kpis.map((slug, idx) => {
+      const goal = getMetaBySlug(data, slug);
+      const globalIdx = allKpiSlugs.findIndex(k => k.slug === slug);
+      return 'K' + (globalIdx + 1) + '=' + (goal ? goal.titulo : slug);
+    }).join(', ')
+  ).join('   ·   ');
+  const legendaY = 1.65 + 0.26 * (2 + bodyRows.length) + 0.15;
+  slide.addText(legendaTexto, {
+    x: 0.4, y: Math.min(legendaY, 7.0), w: 12.53, h: 0.55,
+    fontFace: RIVIO_PPTX.fontFace, fontSize: 7.5, color: RIVIO_PPTX.tintaSoft, italic: true,
+  });
+}
+
+// Ponto de entrada: monta o .pptx inteiro (7 slides) e dispara o download no navegador do usuário.
+async function gerarReportPptx(data, mesN){
+  const PptxCtor = window.PptxGenJS;
+  if(!PptxCtor) throw new Error('A biblioteca de geração de PPTX não carregou — verifique sua conexão com a internet e tente novamente (ou dê um Ctrl+Shift+R e tente de novo).');
+  const pptx = new PptxCtor();
+  pptx.defineLayout({name: 'RIVIO_16X9', width: 13.333, height: 7.5});
+  pptx.layout = 'RIVIO_16X9';
+  pptx.author = 'Painel Auditoria — Rivio';
+  pptx.company = 'Rivio';
+  pptx.title = 'Report Mensal — Auditoria';
+
+  const mesNome = mesPlanningNome(mesN);
+  const mesLabel = mesNome + '/' + CURRENT_YEAR;
+
+  const areaSummary = buildReportAreaSummary(data, mesN);
+
+  addReportSlide1(pptx, areaSummary, mesLabel);
+  REPORT_AREAS.forEach(area => addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel));
+  addReportRankingSlide(pptx, data, mesN, mesLabel);
+
+  const fileName = 'Report Auditoria - ' + mesNome + ' ' + CURRENT_YEAR + '.pptx';
+  await pptx.writeFile({fileName});
+}
+
+// Tela exibida em "Acompanhamento de Metas" quando nenhum indicador está selecionado no menu lateral —
+// antes era só uma mensagem vazia; agora funciona como geradora do Report Mensal em PPTX (pedido em
+// 27/08/2026), reaproveitando os mesmos dados/cálculos já usados no resto do app.
+function TrackingIndexPage({data}){
+  const [mesRelatorio, setMesRelatorio] = useState(() => {
+    const hoje = new Date();
+    return hoje.getFullYear() === CURRENT_YEAR ? (hoje.getMonth() + 1) : 12;
+  });
+  const [gerando, setGerando] = useState(false);
+  const [erro, setErro] = useState('');
+
+  const handleGerar = async () => {
+    setGerando(true);
+    setErro('');
+    try{
+      await gerarReportPptx(data, mesRelatorio);
+    }catch(e){
+      console.error('Erro ao gerar Report PPTX', e);
+      setErro((e && e.message) || 'Não foi possível gerar o report. Tente novamente.');
+    }finally{
+      setGerando(false);
+    }
+  };
+
   return (
-    <div className="card">
-      <EmptyState icon={IconTrend} title="Selecione um indicador"
-        sub="Escolha um indicador no menu lateral para ver a página de acompanhamento correspondente."/>
+    <div className="card" style={{maxWidth:560}}>
+      <EmptyState icon={IconTrend} title="Report Mensal"
+        sub="Escolha um indicador no menu lateral para ver a página de acompanhamento correspondente, ou gere abaixo o Report Mensal consolidado (.pptx) com os principais KPIs de todas as áreas."/>
+      <div style={{marginTop:18, paddingTop:18, borderTop:'1px solid var(--line-soft)'}}>
+        <div className="field">
+          <label>Mês da análise</label>
+          <select className="select" value={mesRelatorio} onChange={e => setMesRelatorio(Number(e.target.value))}>
+            {MESES_PLANNING.map(m => <option value={m.n} key={m.n}>{m.nome} · {CURRENT_YEAR}</option>)}
+          </select>
+        </div>
+        <button type="button" className="btn btn-primary" style={{marginTop:12}} disabled={gerando} onClick={handleGerar}>
+          {gerando ? 'Gerando report…' : 'Gerar Report'}
+        </button>
+        {erro && <div style={{marginTop:10, color:'var(--negative)', fontSize:12.5}}>{erro}</div>}
+        <div className="hint" style={{marginTop:10}}>
+          Gera um .pptx com 7 slides: visão geral por área, abertura por cliente de cada área, e ranking individual — com os dados do mês selecionado.
+        </div>
+      </div>
     </div>
   );
 }
@@ -7921,7 +8326,7 @@ function SlaPrimeiraRespostaPage({data}){
 
 function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   const ind = INDICADORES.find(i => i.slug === slug);
-  if(!ind) return <TrackingIndexPage/>;
+  if(!ind) return <TrackingIndexPage data={data}/>;
   if(slug === 'margem-bruta'){
     return <MargemBrutaPage financeiro={financeiro} financeiroSync={data.financeiroSync} actions={actions}/>;
   }
@@ -9165,20 +9570,22 @@ function ConcluidoEmCell({row, actions}){
   if(editing){
     return (
       <td className="demanda-dias demanda-concluido-edit">
-        <input
-          type="date"
-          className="demanda-date-input"
-          value={draft}
-          autoFocus
-          onChange={e => setDraft(e.target.value)}
-          onKeyDown={e => { if(e.key === 'Enter') commit(); if(e.key === 'Escape') cancel(); }}
-        />
-        <button type="button" className="btn-icon" onClick={commit} title="Salvar" aria-label="Salvar">
-          <IconCheck width="11" height="11"/>
-        </button>
-        <button type="button" className="btn-icon" onClick={cancel} title="Cancelar" aria-label="Cancelar">
-          <IconX width="11" height="11"/>
-        </button>
+        <div className="demanda-concluido-edit-inner">
+          <input
+            type="date"
+            className="demanda-date-input"
+            value={draft}
+            autoFocus
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => { if(e.key === 'Enter') commit(); if(e.key === 'Escape') cancel(); }}
+          />
+          <button type="button" className="btn-icon" onClick={commit} title="Salvar" aria-label="Salvar">
+            <IconCheck width="11" height="11"/>
+          </button>
+          <button type="button" className="btn-icon" onClick={cancel} title="Cancelar" aria-label="Cancelar">
+            <IconX width="11" height="11"/>
+          </button>
+        </div>
       </td>
     );
   }
@@ -9191,16 +9598,18 @@ function ConcluidoEmCell({row, actions}){
 
   return (
     <td className="demanda-dias demanda-concluido-cell" onDoubleClick={startEdit} title={tooltip}>
-      <span>{row.concluidoEm ? fmtDataAbertura(row.concluidoEm) : '—'}</span>
-      {row.concluidoManualmente && <span className="manual-tag">manual</span>}
-      <button type="button" className="btn-icon" onClick={startEdit} title="Editar manualmente" aria-label="Editar manualmente">
-        <IconEdit width="11" height="11"/>
-      </button>
-      {row.concluidoManualmente && (
-        <button type="button" className="btn-icon" onClick={revert} title="Reverter para o valor do Movidesk" aria-label="Reverter para o valor do Movidesk">
-          <IconX width="11" height="11"/>
+      <div className="demanda-concluido-cell-inner">
+        <span>{row.concluidoEm ? fmtDataAbertura(row.concluidoEm) : '—'}</span>
+        {row.concluidoManualmente && <span className="manual-tag">manual</span>}
+        <button type="button" className="btn-icon" onClick={startEdit} title="Editar manualmente" aria-label="Editar manualmente">
+          <IconEdit width="11" height="11"/>
         </button>
-      )}
+        {row.concluidoManualmente && (
+          <button type="button" className="btn-icon" onClick={revert} title="Reverter para o valor do Movidesk" aria-label="Reverter para o valor do Movidesk">
+            <IconX width="11" height="11"/>
+          </button>
+        )}
+      </div>
     </td>
   );
 }
@@ -10368,7 +10777,7 @@ function App(){
           {route.section === 'overview' && <OverviewPage data={data} actions={actions}/>}
           {route.section === 'roles' && <RolesPage data={data} actions={actions}/>}
           {route.section === 'goals' && <GoalsPage data={data} actions={actions}/>}
-          {route.section === 'tracking' && (route.indicator ? <TrackingPage slug={route.indicator} financeiro={data.financeiro} upsellScore={data.upsellScore} clientes={data.clientes} actions={actions} data={data}/> : <TrackingIndexPage/>)}
+          {route.section === 'tracking' && (route.indicator ? <TrackingPage slug={route.indicator} financeiro={data.financeiro} upsellScore={data.upsellScore} clientes={data.clientes} actions={actions} data={data}/> : <TrackingIndexPage data={data}/>)}
           {route.section === 'rotinas' && <RotinasPage data={data} actions={actions}/>}
           {route.section === 'demandas' && <DemandasPage data={data} actions={actions}/>}
         </div>
