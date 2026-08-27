@@ -455,6 +455,10 @@
   /* Painel de Detalhes em fonte/espaçamento reduzidos — não deve competir visualmente com o gráfico. */
   .detail-grid-side .section-block-title{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);}
   .detail-grid-side .kv-row{padding:8px 0;font-size:12px;}
+  /* Tabela Clientes x Meses (quando a meta tem uma) — largura total do card, abaixo do gráfico e do
+     painel de Detalhes, em vez de dividir espaço com a coluna do gráfico. */
+  .detail-grid-table-full{padding:0 22px 20px;border-top:1px solid var(--line-soft);margin-top:4px;}
+  .detail-grid-table-full > *:first-child{margin-top:14px;}
   .goals-mission-banner{
     background:var(--accent-soft, #eef1ff);color:var(--accent-ink, var(--ink));
     border-radius:var(--radius-lg);padding:16px 22px;margin-bottom:18px;
@@ -5336,30 +5340,42 @@ function GoalFullCard({goal, pessoas, data, clienteNomesFilter, pessoaId, onEdit
         </div>
       </div>
 
-      <div className="card detail-grid">
-        <div className="detail-grid-chart">
-          <BudgetChart budgetsByMonth={year} realizedByMonth={realizedByMonth} unidade={goal.unidadeMedida}/>
-          {isExterno && <div className="budget-note">Budget definido na tela do indicador, dentro de Acompanhamento de Metas.</div>}
-          <GoalClienteMesTable goal={goal} data={data} clienteNomesFilter={clienteNomesFilter} pessoaId={pessoaId}/>
-        </div>
+      <div className="card">
+        <div className="detail-grid">
+          <div className="detail-grid-chart">
+            <BudgetChart budgetsByMonth={year} realizedByMonth={realizedByMonth} unidade={goal.unidadeMedida}/>
+            {isExterno && <div className="budget-note">Budget definido na tela do indicador, dentro de Acompanhamento de Metas.</div>}
+          </div>
 
-        <div className="detail-grid-side">
-          <div className="section-block-title" style={{marginBottom:6}}>Detalhes</div>
-          <div className="kv-row"><span className="kv-label">Descrição</span><span className="kv-value">{goal.descricao || '—'}</span></div>
-          <div className="kv-row"><span className="kv-label">Fonte</span><span className="kv-value" style={{wordBreak:'break-all'}}>
-            {goal.fonte ? (isUrlLike(goal.fonte) ? <a href={goal.fonte} target="_blank" rel="noopener noreferrer">{goal.fonte}</a> : goal.fonte) : '—'}
-          </span></div>
-          <div className="kv-row"><span className="kv-label">Unidade de medida</span><span className="kv-value">{goal.unidadeMedida}</span></div>
-          <div className="kv-row"><span className="kv-label">Pessoas responsáveis</span>
-            <span className="kv-value">
-              {assoc.length === 0 ? '—' : (
-                <div className="chip-row" style={{justifyContent:'flex-end'}}>
-                  {assoc.map(p => <span className="tag" key={p.id}>{p.nome}</span>)}
-                </div>
-              )}
-            </span>
+          <div className="detail-grid-side">
+            <div className="section-block-title" style={{marginBottom:6}}>Detalhes</div>
+            <div className="kv-row"><span className="kv-label">Descrição</span><span className="kv-value">{goal.descricao || '—'}</span></div>
+            <div className="kv-row"><span className="kv-label">Fonte</span><span className="kv-value" style={{wordBreak:'break-all'}}>
+              {goal.fonte ? (isUrlLike(goal.fonte) ? <a href={goal.fonte} target="_blank" rel="noopener noreferrer">{goal.fonte}</a> : goal.fonte) : '—'}
+            </span></div>
+            <div className="kv-row"><span className="kv-label">Unidade de medida</span><span className="kv-value">{goal.unidadeMedida}</span></div>
+            <div className="kv-row"><span className="kv-label">Pessoas responsáveis</span>
+              <span className="kv-value">
+                {assoc.length === 0 ? '—' : (
+                  <div className="chip-row" style={{justifyContent:'flex-end'}}>
+                    {assoc.map(p => <span className="tag" key={p.id}>{p.nome}</span>)}
+                  </div>
+                )}
+              </span>
+            </div>
           </div>
         </div>
+
+        {/* Tabela Clientes x Meses usa a largura TOTAL do card (não fica presa à coluna do gráfico) —
+            evita precisar de scroll horizontal pra ver os 12 meses, já que ela tem muito mais colunas
+            do que cabem na coluna de 1.3fr do grid acima. Só existe pra metas com detalhamento por
+            cliente (ver META_GRANULAR_CLIENTE_SLUGS) — o wrapper só aparece nesse caso, senão sobraria
+            uma faixa vazia com a linha divisória em toda meta sem essa tabela. */}
+        {goal.slug && META_GRANULAR_CLIENTE_SLUGS.includes(goal.slug) && (
+          <div className="detail-grid-table-full">
+            <GoalClienteMesTable goal={goal} data={data} clienteNomesFilter={clienteNomesFilter} pessoaId={pessoaId}/>
+          </div>
+        )}
       </div>
     </div>
   );
