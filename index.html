@@ -778,7 +778,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-27.6';
+const APP_BUILD_ID = '2026-08-27.7';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3820,6 +3820,31 @@ async function persistPatch(patch){
 // de um campo específico sendo sobrescrito porque a ação usava mutate() (baseado em estado local,
 // possivelmente desatualizado se outra aba/pessoa gravou algo enquanto esta aba estava aberta). Esta
 // função generaliza a correção pra QUALQUER ação da aplicação, não só essas duas.
+// Comparação profunda de valores, ignorando a ORDEM das chaves de objetos — ao contrário de comparar
+// JSON.stringify(a) === JSON.stringify(b), que é sensível à ordem das chaves. Achado ao vivo em produção
+// (27/08/2026): depois de publicar o build com o fix de persistFieldsMerge, edições em Gestão de Metas
+// passaram a mostrar "Não foi possível salvar" mesmo quando a gravação tinha realmente funcionado no
+// servidor. Causa: o Firestore NÃO garante preservar a ordem das chaves dentro de um campo do tipo mapa/
+// objeto ao reler o documento — o valor gravado e o valor relido podem ter as mesmas chaves com os mesmos
+// valores, só que em ordem diferente, o que faz JSON.stringify gerar strings diferentes mesmo sendo dados
+// idênticos. Isso fazia a verificação pós-gravação (persistedOk) reportar falso negativo. `deepEqual`
+// compara por conteúdo real (percorrendo objetos e arrays recursivamente), não por igualdade de string.
+function deepEqual(a, b){
+  if(a === b) return true;
+  if(typeof a !== typeof b) return false;
+  if(a === null || b === null) return a === b;
+  if(typeof a !== 'object') return a === b;
+  if(Array.isArray(a) !== Array.isArray(b)) return false;
+  if(Array.isArray(a)){
+    if(a.length !== b.length) return false;
+    for(let i = 0; i < a.length; i++){ if(!deepEqual(a[i], b[i])) return false; }
+    return true;
+  }
+  const keysA = Object.keys(a), keysB = Object.keys(b);
+  if(keysA.length !== keysB.length) return false;
+  return keysA.every(k => Object.prototype.hasOwnProperty.call(b, k) && deepEqual(a[k], b[k]));
+}
+
 async function persistFieldsMerge(mergeFns, extraTopLevelPatch){
   try{
     const fb = await waitForFirebase();
@@ -3831,7 +3856,7 @@ async function persistFieldsMerge(mergeFns, extraTopLevelPatch){
     await fb.updateDoc(ref, patch);
     const verifySnap = await fb.getDoc(ref);
     const verifyData = verifySnap.exists() ? verifySnap.data() : {};
-    const persistedOk = Object.keys(patch).every(k => JSON.stringify(verifyData[k]) === JSON.stringify(patch[k]));
+    const persistedOk = Object.keys(patch).every(k => deepEqual(verifyData[k], patch[k]));
     if(!persistedOk){
       return { ok: false, error: 'A gravação não foi confirmada pelo servidor ao reler o documento logo em seguida — tente novamente.' };
     }
@@ -3867,7 +3892,7 @@ async function persistDemandasCustomMerge(mergeFn, extraTopLevelPatch){
     // basta o updateDoc "resolver", já vimos gravações resolverem sem persistir de fato neste ambiente.
     const verifySnap = await fb.getDoc(ref);
     const verifyData = verifySnap.exists() ? verifySnap.data() : {};
-    const persistedOk = Object.keys(mergedDemandasCustom).every(k => JSON.stringify((verifyData.demandasCustom||{})[k]) === JSON.stringify(mergedDemandasCustom[k]));
+    const persistedOk = Object.keys(mergedDemandasCustom).every(k => deepEqual((verifyData.demandasCustom||{})[k], mergedDemandasCustom[k]));
     if(!persistedOk){
       return { ok: false, error: 'A gravação não foi confirmada pelo servidor ao reler o documento logo em seguida — tente novamente.' };
     }
