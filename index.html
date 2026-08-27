@@ -9793,16 +9793,40 @@ function App(){
     }, null),
 
     // demandas (campos personalizados por nº de ticket, preservados ao atualizar a base)
-    updateDemandaCustom: (numero, patch) => mutate(d => {
-      const demandasCustom = {...(d.demandasCustom||{})};
-      const prev = demandasCustom[numero] || {};
+    //
+    // ACHADO IMPORTANTE (causa raiz real do CSAT "sincronizado mas nunca aparecendo na tabela"): esta
+    // ação roda toda vez que ALGUÉM edita qualquer campo de QUALQUER ticket na tabela de Demandas
+    // (Prioridade, Esforço, Prazo, Classificação, Tipo, Responsável Desenvolvimento, Concluído em
+    // manual) — ou seja, é a ação mais usada do dia a dia da ferramenta, em uso constante por várias
+    // pessoas do time ao mesmo tempo. Antes desta correção, ela usava `mutate()` (substituição do campo
+    // demandasCustom INTEIRO, calculada a partir do estado local desta aba). Isso significa que, sempre
+    // que alguém editasse UM campo de UM ticket qualquer, a gravação sobrescrevia demandasCustom inteiro
+    // — inclusive quaisquer notas de CSAT que a sincronização em lote (ver importCsatAvaliacao) tivesse
+    // acabado de gravar em outro ticket segundos antes, se o estado local desta aba ainda não tivesse
+    // recebido a atualização via onSnapshot. Confirmado ao vivo: depois de "Atualizar CSAT" reportar 19
+    // tickets sincronizados, o documento no Firestore não tinha NENHUM campo csatSheet gravado em NENHUM
+    // dos 40 tickets com dados customizados — batendo exatamente com esse padrão (uma edição normal de
+    // ticket, feita por qualquer pessoa, apagando o lote inteiro de CSAT). Agora usa o mesmo mecanismo
+    // seguro do CSAT (mutateDemandasCustomGranular): lê o demandasCustom mais recente do SERVIDOR no
+    // momento da gravação e aplica só esta edição em cima dele.
+    updateDemandaCustom: (numero, patch) => {
       const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
       const nowIso = new Date().toISOString();
-      const editMeta = {...(prev._editMeta||{})};
-      Object.keys(patch).forEach(k => { editMeta[k] = {by: who, at: nowIso}; });
-      demandasCustom[numero] = {...prev, ...patch, _editMeta: editMeta};
-      return {...d, demandasCustom};
-    }, null),
+      const aplicarPatch = (demandasCustomBase) => {
+        const demandasCustom = {...(demandasCustomBase || {})};
+        const prev = demandasCustom[numero] || {};
+        const editMeta = {...(prev._editMeta||{})};
+        Object.keys(patch).forEach(k => { editMeta[k] = {by: who, at: nowIso}; });
+        demandasCustom[numero] = {...prev, ...patch, _editMeta: editMeta};
+        return demandasCustom;
+      };
+      return mutateDemandasCustomGranular(
+        d => ({...d, demandasCustom: aplicarPatch(d.demandasCustom)}),
+        aplicarPatch,
+        [],
+        null
+      );
+    },
 
     // Cria um ticket 100% manual (fora do Movidesk) — usado pelo botão "+ Nova Demanda Manual" na aba
     // Demandas. `fields` é o "o" de um ticket (n/a/s/u/c/r/d/re/tr/csat), já com o número gerado via
@@ -9824,12 +9848,26 @@ function App(){
 
     // Exclui um ticket manual por completo (base + qualquer dado em demandasCustom) — só faz sentido
     // para tickets manuais, já que um ticket sincronizado do Movidesk reapareceria na próxima atualização.
-    deleteDemandaManual: (numero) => mutate(d => {
-      const demandasManuais = (d.demandasManuais||[]).filter(o => o.n !== numero);
-      const demandasCustom = {...(d.demandasCustom||{})};
-      delete demandasCustom[numero];
-      return {...d, demandasManuais, demandasCustom};
-    }, `Ticket manual excluído (${numero})`),
+    // Usa o mesmo mecanismo seguro de gravação de demandasCustom (ver updateDemandaCustom acima) — a
+    // parte de demandasManuais continua vindo do estado local, já que essa lista é editada com bem menos
+    // frequência/concorrência do que demandasCustom.
+    deleteDemandaManual: (numero) => {
+      const aplicarDelete = (demandasCustomBase) => {
+        const demandasCustom = {...(demandasCustomBase || {})};
+        delete demandasCustom[numero];
+        return demandasCustom;
+      };
+      return mutateDemandasCustomGranular(
+        d => ({
+          ...d,
+          demandasManuais: (d.demandasManuais||[]).filter(o => o.n !== numero),
+          demandasCustom: aplicarDelete(d.demandasCustom),
+        }),
+        aplicarDelete,
+        ['demandasManuais'],
+        `Ticket manual excluído (${numero})`
+      );
+    },
 
     // Sincroniza as notas de CSAT (1-5) da planilha separada de Avaliação, indexadas por número de
     // ticket. Grava em demandasCustom[numero].csatSheet — buildDemandasMerged prioriza esse valor sobre
