@@ -778,7 +778,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-27.4';
+const APP_BUILD_ID = '2026-08-27.6';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3800,6 +3800,52 @@ async function persistPatch(patch){
 // grava o resultado — tudo atomicamente. Isso evita a "perda de atualização" que uma substituição direta
 // do campo demandasCustom inteiro (baseada em estado local antigo) causaria se outro usuário/aba tivesse
 // editado um ticket diferente entre o carregamento da página e o clique em "Atualizar CSAT".
+// Generaliza o mesmo padrão seguro de persistDemandasCustomMerge (ler o valor mais recente do SERVIDOR,
+// aplicar `mergeFn` em cima dele, gravar, e reler pra confirmar) para QUALQUER campo de topo que seja uma
+// lista/objeto compartilhado por várias ações (ex.: `metas`) — não só `demandasCustom`. Achado ao vivo em
+// produção (27/08/2026): o mesmo padrão de "substituir o campo inteiro a partir do estado local desta
+// aba" que causava o bug do CSAT em `demandasCustom` também afeta `metas` (e, por extensão, qualquer outro
+// campo editado por `mutate()`) — reproduzido ao editar a descrição da meta "Margem Bruta": a edição
+// aparecia na tela por ~2s e depois revertia de verdade no servidor, porque outra gravação (de outra
+// aba/sessão, com a lista de metas desatualizada) reescreveu `metas` inteiro por cima. `editGoal`/
+// `addGoal`/`deleteGoal` foram migrados pra usar isto em vez de `mutate()` — os demais campos (pessoas,
+// rotinas, tarefas etc.) continuam com o padrão antigo e podem sofrer do mesmo problema se dois usuários
+// mexerem neles quase ao mesmo tempo.
+// Versão geral de persistTopLevelFieldMerge: aceita UM OU MAIS campos de topo de uma vez, cada um com sua
+// própria função de merge — `mergeFns` é um objeto {nomeDoCampo: (valorAtualNoServidor) => novoValor}.
+// Lê o documento UMA vez, aplica cada mergeFn sobre o valor atual DAQUELE campo no servidor (não sobre o
+// estado local desta aba), grava todos os campos resultantes numa única chamada, e confirma relendo.
+// Extraído em 27/08/2026 depois de encontrar (e corrigir) o mesmo bug de "substituir o campo inteiro a
+// partir do estado local" em `demandasCustom` (CSAT) e depois em `metas` (Gestão de Metas) — ambos casos
+// de um campo específico sendo sobrescrito porque a ação usava mutate() (baseado em estado local,
+// possivelmente desatualizado se outra aba/pessoa gravou algo enquanto esta aba estava aberta). Esta
+// função generaliza a correção pra QUALQUER ação da aplicação, não só essas duas.
+async function persistFieldsMerge(mergeFns, extraTopLevelPatch){
+  try{
+    const fb = await waitForFirebase();
+    const ref = await getAppDataDocRef();
+    const snap = await fb.getDoc(ref);
+    const current = snap.exists() ? snap.data() : {};
+    const patch = { ...(extraTopLevelPatch || {}) };
+    Object.keys(mergeFns).forEach(fieldName => { patch[fieldName] = mergeFns[fieldName](current[fieldName]); });
+    await fb.updateDoc(ref, patch);
+    const verifySnap = await fb.getDoc(ref);
+    const verifyData = verifySnap.exists() ? verifySnap.data() : {};
+    const persistedOk = Object.keys(patch).every(k => JSON.stringify(verifyData[k]) === JSON.stringify(patch[k]));
+    if(!persistedOk){
+      return { ok: false, error: 'A gravação não foi confirmada pelo servidor ao reler o documento logo em seguida — tente novamente.' };
+    }
+    return { ok: true };
+  }catch(e){
+    console.error('Firestore write error (persistFieldsMerge)', e);
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+async function persistTopLevelFieldMerge(fieldName, mergeFn, extraTopLevelPatch){
+  return persistFieldsMerge({ [fieldName]: mergeFn }, extraTopLevelPatch);
+}
+
 async function persistDemandasCustomMerge(mergeFn, extraTopLevelPatch){
   try{
     const fb = await waitForFirebase();
@@ -9458,345 +9504,508 @@ function App(){
     return resultPromise;
   }, [push]);
 
+  // Versão genérica de mutateDemandasCustomGranular pra qualquer campo de topo (ver
+  // persistTopLevelFieldMerge acima) — usada por editGoal/addGoal/deleteGoal pra proteger `metas` do
+  // mesmo jeito que `demandasCustom` já é protegido.
+  const mutateTopLevelFieldGranular = useCallback((fieldName, updater, mergeFn, successMsg) => {
+    let resultPromise;
+    setData(prev => {
+      const next = updater(prev);
+      resultPromise = persistTopLevelFieldMerge(fieldName, mergeFn).then(result => {
+        if(!result.ok) push('Não foi possível salvar. Tente novamente.', 'error');
+        else if(successMsg) push(successMsg);
+        return result;
+      });
+      return next;
+    });
+    return resultPromise;
+  }, [push]);
+
+  // Versão geral de mutateTopLevelFieldGranular pra ações que precisam gravar MAIS DE UM campo de topo
+  // atomicamente (ex.: excluir uma pessoa mexe em pessoas + responsabilidades + metas ao mesmo tempo) —
+  // ver persistFieldsMerge acima. `mergeFns` é {nomeDoCampo: (valorAtualNoServidor) => novoValor}.
+  //
+  // ACHADO AO VIVO (27/08/2026): usado pra migrar TODAS as ações da aplicação que ainda usavam mutate()
+  // (substituição de campo inteiro a partir do estado local desta aba) pro mesmo mecanismo seguro já
+  // comprovado no CSAT e em Gestão de Metas — qualquer uma dessas ações podia, em teoria, ter uma edição
+  // revertida se outra aba/pessoa gravasse algo enquanto esta aba estava aberta com dados desatualizados.
+  const mutateFieldsGranular = useCallback((updater, mergeFns, successMsg) => {
+    let resultPromise;
+    setData(prev => {
+      const next = updater(prev);
+      resultPromise = persistFieldsMerge(mergeFns).then(result => {
+        if(!result.ok) push('Não foi possível salvar. Tente novamente.', 'error');
+        else if(successMsg) push(successMsg);
+        return result;
+      });
+      return next;
+    });
+    return resultPromise;
+  }, [push]);
+
   const actions = useMemo(() => ({
     // pessoas
-    addPessoa: (p) => mutate(d => ({...d, pessoas:[...d.pessoas, {id:uid(), ...p}]}), 'Pessoa adicionada'),
-    editPessoa: (id, p) => mutate(d => ({...d, pessoas: d.pessoas.map(x => x.id===id ? {...x, ...p} : x)}), 'Pessoa atualizada'),
-    deletePessoa: (id) => mutate(d => ({
-      ...d,
-      pessoas: d.pessoas
-        .filter(x => x.id !== id)
-        .map(x => x.reportsToId === id ? {...x, reportsToId: null} : x),
-      responsabilidades: d.responsabilidades.filter(r => r.responsavelId !== id),
-      metas: d.metas.map(m => ({...m, pessoaIds: (m.pessoaIds||[]).filter(pid => pid !== id)}))
-    }), 'Pessoa excluída'),
+    //
+    // ACHADO AO VIVO (27/08/2026, mesma causa raiz do CSAT/metas): todas as ações abaixo usavam mutate()
+    // — substituição do campo inteiro a partir do estado local desta aba. Convertidas pra
+    // mutateTopLevelFieldGranular/mutateFieldsGranular (lê o valor mais recente do SERVIDOR antes de
+    // gravar) pra eliminar o mesmo risco de "perda de atualização" já confirmado em produção.
+    addPessoa: (p) => {
+      const aplicar = (base) => [...(base||[]), {id:uid(), ...p}];
+      return mutateTopLevelFieldGranular('pessoas', d => ({...d, pessoas: aplicar(d.pessoas)}), aplicar, 'Pessoa adicionada');
+    },
+    editPessoa: (id, p) => {
+      const aplicar = (base) => (base||[]).map(x => x.id===id ? {...x, ...p} : x);
+      return mutateTopLevelFieldGranular('pessoas', d => ({...d, pessoas: aplicar(d.pessoas)}), aplicar, 'Pessoa atualizada');
+    },
+    deletePessoa: (id) => {
+      const aplicarPessoas = (base) => (base||[]).filter(x => x.id !== id).map(x => x.reportsToId === id ? {...x, reportsToId: null} : x);
+      const aplicarResponsabilidades = (base) => (base||[]).filter(r => r.responsavelId !== id);
+      const aplicarMetas = (base) => (base||[]).map(m => ({...m, pessoaIds: (m.pessoaIds||[]).filter(pid => pid !== id)}));
+      return mutateFieldsGranular(
+        d => ({...d, pessoas: aplicarPessoas(d.pessoas), responsabilidades: aplicarResponsabilidades(d.responsabilidades), metas: aplicarMetas(d.metas)}),
+        { pessoas: aplicarPessoas, responsabilidades: aplicarResponsabilidades, metas: aplicarMetas },
+        'Pessoa excluída'
+      );
+    },
 
     // links
-    addLink: (l) => mutate(d => ({...d, links:[...d.links, {id:uid(), ...l}]}), 'Link adicionado'),
-    editLink: (id, l) => mutate(d => ({...d, links: d.links.map(x => x.id===id ? {...x, ...l} : x)}), 'Link atualizado'),
-    deleteLink: (id) => mutate(d => ({...d, links: d.links.filter(x => x.id !== id)}), 'Link excluído'),
+    addLink: (l) => {
+      const aplicar = (base) => [...(base||[]), {id:uid(), ...l}];
+      return mutateTopLevelFieldGranular('links', d => ({...d, links: aplicar(d.links)}), aplicar, 'Link adicionado');
+    },
+    editLink: (id, l) => {
+      const aplicar = (base) => (base||[]).map(x => x.id===id ? {...x, ...l} : x);
+      return mutateTopLevelFieldGranular('links', d => ({...d, links: aplicar(d.links)}), aplicar, 'Link atualizado');
+    },
+    deleteLink: (id) => {
+      const aplicar = (base) => (base||[]).filter(x => x.id !== id);
+      return mutateTopLevelFieldGranular('links', d => ({...d, links: aplicar(d.links)}), aplicar, 'Link excluído');
+    },
 
     // responsabilidades
-    addRole: (r) => mutate(d => ({...d, responsabilidades:[...d.responsabilidades, {id:uid(), ...r}]}), 'Função adicionada'),
-    editRole: (id, r) => mutate(d => ({...d, responsabilidades: d.responsabilidades.map(x => x.id===id ? {...x, ...r} : x)}), 'Função atualizada'),
-    deleteRole: (id) => mutate(d => ({...d, responsabilidades: d.responsabilidades.filter(x => x.id !== id)}), 'Função excluída'),
+    addRole: (r) => {
+      const aplicar = (base) => [...(base||[]), {id:uid(), ...r}];
+      return mutateTopLevelFieldGranular('responsabilidades', d => ({...d, responsabilidades: aplicar(d.responsabilidades)}), aplicar, 'Função adicionada');
+    },
+    editRole: (id, r) => {
+      const aplicar = (base) => (base||[]).map(x => x.id===id ? {...x, ...r} : x);
+      return mutateTopLevelFieldGranular('responsabilidades', d => ({...d, responsabilidades: aplicar(d.responsabilidades)}), aplicar, 'Função atualizada');
+    },
+    deleteRole: (id) => {
+      const aplicar = (base) => (base||[]).filter(x => x.id !== id);
+      return mutateTopLevelFieldGranular('responsabilidades', d => ({...d, responsabilidades: aplicar(d.responsabilidades)}), aplicar, 'Função excluída');
+    },
 
     // metas
-    addGoal: (g) => mutate(d => ({...d, metas:[...d.metas, {id:uid(), ...g}]}), 'Meta adicionada'),
+    //
+    // ACHADO AO VIVO (27/08/2026, mesma causa raiz do bug do CSAT): editar/adicionar/excluir uma meta
+    // usava mutate() — substituição da lista `metas` INTEIRA a partir do estado local desta aba. Se
+    // qualquer outra aba/sessão (sua ou de outra pessoa) tivesse uma cópia mais antiga de `metas` na
+    // memória e disparasse qualquer gravação, ela reescrevia a lista inteira por cima, revertendo a
+    // edição em segundos — reproduzido ao vivo editando a descrição de "Margem Bruta" (aparecia na tela,
+    // sumia ~2s depois, inclusive no servidor). Agora usa o mesmo mecanismo seguro do CSAT
+    // (mutateTopLevelFieldGranular / persistTopLevelFieldMerge): lê `metas` mais recente do SERVIDOR no
+    // momento da gravação e aplica só esta mudança em cima dele.
+    addGoal: (g) => {
+      const aplicarAdd = (metasBase) => [...(metasBase||[]), {id:uid(), ...g}];
+      return mutateTopLevelFieldGranular('metas', d => ({...d, metas: aplicarAdd(d.metas)}), aplicarAdd, 'Meta adicionada');
+    },
     // Casa por slug quando disponível (mais estável que id — ver comentário na migração de dedupe em
     // runMigrations), com fallback pra id (metas customizadas, sem slug, só têm id mesmo).
     // `defsCustomizadas: true` marca que Título/Descrição/Fonte/Unidade foram editados manualmente pelo
     // usuário (só o GoalModal grava esses 4 campos juntos) — a migração de sincronização com INDICADORES
     // (ver runMigrations) passa a respeitar essa edição e não sobrescrever mais esses campos nessa meta.
-    editGoal: (id, g) => mutate(d => ({...d, metas: d.metas.map(x => (g.slug && x.slug===g.slug) || x.id===id ? {...x, ...g, defsCustomizadas: true} : x)}), 'Meta atualizada'),
-    deleteGoal: (id) => mutate(d => ({...d, metas: d.metas.filter(x => x.id !== id)}), 'Meta excluída'),
+    editGoal: (id, g) => {
+      const aplicarEdit = (metasBase) => (metasBase||[]).map(x => (g.slug && x.slug===g.slug) || x.id===id ? {...x, ...g, defsCustomizadas: true} : x);
+      return mutateTopLevelFieldGranular('metas', d => ({...d, metas: aplicarEdit(d.metas)}), aplicarEdit, 'Meta atualizada');
+    },
+    deleteGoal: (id) => {
+      const aplicarDelete = (metasBase) => (metasBase||[]).filter(x => x.id !== id);
+      return mutateTopLevelFieldGranular('metas', d => ({...d, metas: aplicarDelete(d.metas)}), aplicarDelete, 'Meta excluída');
+    },
 
     // rotinas
-    addRotina: (r) => mutate(d => ({...d, rotinas:[...(d.rotinas||[]), {id:uid(), ...r}]}), 'Reunião adicionada'),
-    editRotina: (id, r) => mutate(d => ({...d, rotinas: (d.rotinas||[]).map(x => x.id===id ? {...x, ...r} : x)}), 'Reunião atualizada'),
-    deleteRotina: (id) => mutate(d => ({...d, rotinas: (d.rotinas||[]).filter(x => x.id !== id)}), 'Reunião excluída'),
+    addRotina: (r) => {
+      const aplicar = (base) => [...(base||[]), {id:uid(), ...r}];
+      return mutateTopLevelFieldGranular('rotinas', d => ({...d, rotinas: aplicar(d.rotinas)}), aplicar, 'Reunião adicionada');
+    },
+    editRotina: (id, r) => {
+      const aplicar = (base) => (base||[]).map(x => x.id===id ? {...x, ...r} : x);
+      return mutateTopLevelFieldGranular('rotinas', d => ({...d, rotinas: aplicar(d.rotinas)}), aplicar, 'Reunião atualizada');
+    },
+    deleteRotina: (id) => {
+      const aplicar = (base) => (base||[]).filter(x => x.id !== id);
+      return mutateTopLevelFieldGranular('rotinas', d => ({...d, rotinas: aplicar(d.rotinas)}), aplicar, 'Reunião excluída');
+    },
 
     // tarefas
-    addTarefa: (t) => mutate(d => ({...d, tarefas:[...(d.tarefas||[]), {id:uid(), responsaveis:{}, ...t}]}), 'Tarefa adicionada'),
-    editTarefa: (id, t) => mutate(d => ({...d, tarefas: (d.tarefas||[]).map(x => x.id===id ? {...x, ...t} : x)}), 'Tarefa atualizada'),
-    setTarefaResponsavel: (id, clienteId, pessoaId) => mutate(d => ({
-      ...d,
-      tarefas: (d.tarefas||[]).map(x => {
+    addTarefa: (t) => {
+      const aplicar = (base) => [...(base||[]), {id:uid(), responsaveis:{}, ...t}];
+      return mutateTopLevelFieldGranular('tarefas', d => ({...d, tarefas: aplicar(d.tarefas)}), aplicar, 'Tarefa adicionada');
+    },
+    editTarefa: (id, t) => {
+      const aplicar = (base) => (base||[]).map(x => x.id===id ? {...x, ...t} : x);
+      return mutateTopLevelFieldGranular('tarefas', d => ({...d, tarefas: aplicar(d.tarefas)}), aplicar, 'Tarefa atualizada');
+    },
+    setTarefaResponsavel: (id, clienteId, pessoaId) => {
+      const aplicar = (base) => (base||[]).map(x => {
         if(x.id !== id) return x;
         const responsaveis = {...(x.responsaveis||{})};
         if(pessoaId) responsaveis[clienteId] = pessoaId; else delete responsaveis[clienteId];
         return {...x, responsaveis};
-      })
-    }), 'Responsável atualizado'),
-    deleteTarefa: (id) => mutate(d => ({...d, tarefas: (d.tarefas||[]).filter(x => x.id !== id)}), 'Tarefa excluída'),
+      });
+      return mutateTopLevelFieldGranular('tarefas', d => ({...d, tarefas: aplicar(d.tarefas)}), aplicar, 'Responsável atualizado');
+    },
+    deleteTarefa: (id) => {
+      const aplicar = (base) => (base||[]).filter(x => x.id !== id);
+      return mutateTopLevelFieldGranular('tarefas', d => ({...d, tarefas: aplicar(d.tarefas)}), aplicar, 'Tarefa excluída');
+    },
 
     // upsell score (per client)
-    setUpsellValue: (mesN, clienteId, kpiKey, value) => mutate(d => {
-      const upsellScore = {...(d.upsellScore||{})};
-      const yearData = {...(upsellScore[CURRENT_YEAR]||{})};
-      const monthData = {...(yearData[mesN]||{})};
-      const clienteData = {...(monthData[clienteId]||{})};
-      if(value === null || value === undefined || value === ''){
-        delete clienteData[kpiKey];
-      } else {
-        clienteData[kpiKey] = value;
-      }
-      monthData[clienteId] = clienteData;
-      yearData[mesN] = monthData;
-      upsellScore[CURRENT_YEAR] = yearData;
-      return {...d, upsellScore};
-    }, null),
-    setUpsellSubValue: (mesN, clienteId, kpiKey, subKey, value) => mutate(d => {
-      const upsellScore = {...(d.upsellScore||{})};
-      const yearData = {...(upsellScore[CURRENT_YEAR]||{})};
-      const monthData = {...(yearData[mesN]||{})};
-      const clienteData = {...(monthData[clienteId]||{})};
-      const subData = {...(clienteData[kpiKey]||{})};
-      if(value === null || value === undefined || value === false){
-        delete subData[subKey];
-      } else {
-        subData[subKey] = value;
-      }
-      clienteData[kpiKey] = subData;
-      monthData[clienteId] = clienteData;
-      yearData[mesN] = monthData;
-      upsellScore[CURRENT_YEAR] = yearData;
-      return {...d, upsellScore};
-    }, null),
+    setUpsellValue: (mesN, clienteId, kpiKey, value) => {
+      const aplicar = (base) => {
+        const upsellScore = {...(base||{})};
+        const yearData = {...(upsellScore[CURRENT_YEAR]||{})};
+        const monthData = {...(yearData[mesN]||{})};
+        const clienteData = {...(monthData[clienteId]||{})};
+        if(value === null || value === undefined || value === ''){
+          delete clienteData[kpiKey];
+        } else {
+          clienteData[kpiKey] = value;
+        }
+        monthData[clienteId] = clienteData;
+        yearData[mesN] = monthData;
+        upsellScore[CURRENT_YEAR] = yearData;
+        return upsellScore;
+      };
+      return mutateTopLevelFieldGranular('upsellScore', d => ({...d, upsellScore: aplicar(d.upsellScore)}), aplicar, null);
+    },
+    setUpsellSubValue: (mesN, clienteId, kpiKey, subKey, value) => {
+      const aplicar = (base) => {
+        const upsellScore = {...(base||{})};
+        const yearData = {...(upsellScore[CURRENT_YEAR]||{})};
+        const monthData = {...(yearData[mesN]||{})};
+        const clienteData = {...(monthData[clienteId]||{})};
+        const subData = {...(clienteData[kpiKey]||{})};
+        if(value === null || value === undefined || value === false){
+          delete subData[subKey];
+        } else {
+          subData[subKey] = value;
+        }
+        clienteData[kpiKey] = subData;
+        monthData[clienteId] = clienteData;
+        yearData[mesN] = monthData;
+        upsellScore[CURRENT_YEAR] = yearData;
+        return upsellScore;
+      };
+      return mutateTopLevelFieldGranular('upsellScore', d => ({...d, upsellScore: aplicar(d.upsellScore)}), aplicar, null);
+    },
 
     // efetividade de regras (manual, por cliente/mês)
-    setEfetividadeRegras: (mesN, clienteId, value) => mutate(d => {
-      const efetividadeRegras = {...(d.efetividadeRegras||{})};
-      const yearData = {...(efetividadeRegras[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteId]||{})};
-      if(value === null || value === undefined || value === ''){
-        delete clienteData[mesN];
-      } else {
-        clienteData[mesN] = value;
-      }
-      yearData[clienteId] = clienteData;
-      efetividadeRegras[CURRENT_YEAR] = yearData;
-      return {...d, efetividadeRegras};
-    }, null),
+    setEfetividadeRegras: (mesN, clienteId, value) => {
+      const aplicar = (base) => {
+        const efetividadeRegras = {...(base||{})};
+        const yearData = {...(efetividadeRegras[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteId]||{})};
+        if(value === null || value === undefined || value === ''){
+          delete clienteData[mesN];
+        } else {
+          clienteData[mesN] = value;
+        }
+        yearData[clienteId] = clienteData;
+        efetividadeRegras[CURRENT_YEAR] = yearData;
+        return efetividadeRegras;
+      };
+      return mutateTopLevelFieldGranular('efetividadeRegras', d => ({...d, efetividadeRegras: aplicar(d.efetividadeRegras)}), aplicar, null);
+    },
 
     // penetração de regras (manual, por cliente/mês)
-    setPenetracaoRegras: (mesN, clienteId, value) => mutate(d => {
-      const penetracaoRegras = {...(d.penetracaoRegras||{})};
-      const yearData = {...(penetracaoRegras[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteId]||{})};
-      if(value === null || value === undefined || value === ''){
-        delete clienteData[mesN];
-      } else {
-        clienteData[mesN] = value;
-      }
-      yearData[clienteId] = clienteData;
-      penetracaoRegras[CURRENT_YEAR] = yearData;
-      return {...d, penetracaoRegras};
-    }, null),
+    setPenetracaoRegras: (mesN, clienteId, value) => {
+      const aplicar = (base) => {
+        const penetracaoRegras = {...(base||{})};
+        const yearData = {...(penetracaoRegras[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteId]||{})};
+        if(value === null || value === undefined || value === ''){
+          delete clienteData[mesN];
+        } else {
+          clienteData[mesN] = value;
+        }
+        yearData[clienteId] = clienteData;
+        penetracaoRegras[CURRENT_YEAR] = yearData;
+        return penetracaoRegras;
+      };
+      return mutateTopLevelFieldGranular('penetracaoRegras', d => ({...d, penetracaoRegras: aplicar(d.penetracaoRegras)}), aplicar, null);
+    },
 
     // budgets definidos direto na tela do indicador (Efetividade/Penetração Regras, Contas Finalizadas)
-    setEfetividadeRegrasBudget: (mesN, clienteId, value) => mutate(d => {
-      const efetividadeRegrasBudget = {...(d.efetividadeRegrasBudget||{})};
-      const yearData = {...(efetividadeRegrasBudget[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteId]||{})};
-      if(value === null || value === undefined || value === ''){
-        delete clienteData[mesN];
-      } else {
-        clienteData[mesN] = value;
-      }
-      yearData[clienteId] = clienteData;
-      efetividadeRegrasBudget[CURRENT_YEAR] = yearData;
-      return {...d, efetividadeRegrasBudget};
-    }, null),
-    setPenetracaoRegrasBudget: (mesN, clienteId, value) => mutate(d => {
-      const penetracaoRegrasBudget = {...(d.penetracaoRegrasBudget||{})};
-      const yearData = {...(penetracaoRegrasBudget[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteId]||{})};
-      if(value === null || value === undefined || value === ''){
-        delete clienteData[mesN];
-      } else {
-        clienteData[mesN] = value;
-      }
-      yearData[clienteId] = clienteData;
-      penetracaoRegrasBudget[CURRENT_YEAR] = yearData;
-      return {...d, penetracaoRegrasBudget};
-    }, null),
-    setContasFinalizadasBudget: (mesN, clienteNome, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const contasFinalizadasBudget = {...(financeiro.contasFinalizadasBudget||{})};
-      const yearData = {...(contasFinalizadasBudget[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteNome]||{})};
-      if(value === null || value === undefined || value === ''){
-        delete clienteData[mesN];
-      } else {
-        clienteData[mesN] = value;
-      }
-      yearData[clienteNome] = clienteData;
-      contasFinalizadasBudget[CURRENT_YEAR] = yearData;
-      financeiro.contasFinalizadasBudget = contasFinalizadasBudget;
-      return {...d, financeiro};
-    }, null),
+    setEfetividadeRegrasBudget: (mesN, clienteId, value) => {
+      const aplicar = (base) => {
+        const efetividadeRegrasBudget = {...(base||{})};
+        const yearData = {...(efetividadeRegrasBudget[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteId]||{})};
+        if(value === null || value === undefined || value === ''){
+          delete clienteData[mesN];
+        } else {
+          clienteData[mesN] = value;
+        }
+        yearData[clienteId] = clienteData;
+        efetividadeRegrasBudget[CURRENT_YEAR] = yearData;
+        return efetividadeRegrasBudget;
+      };
+      return mutateTopLevelFieldGranular('efetividadeRegrasBudget', d => ({...d, efetividadeRegrasBudget: aplicar(d.efetividadeRegrasBudget)}), aplicar, null);
+    },
+    setPenetracaoRegrasBudget: (mesN, clienteId, value) => {
+      const aplicar = (base) => {
+        const penetracaoRegrasBudget = {...(base||{})};
+        const yearData = {...(penetracaoRegrasBudget[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteId]||{})};
+        if(value === null || value === undefined || value === ''){
+          delete clienteData[mesN];
+        } else {
+          clienteData[mesN] = value;
+        }
+        yearData[clienteId] = clienteData;
+        penetracaoRegrasBudget[CURRENT_YEAR] = yearData;
+        return penetracaoRegrasBudget;
+      };
+      return mutateTopLevelFieldGranular('penetracaoRegrasBudget', d => ({...d, penetracaoRegrasBudget: aplicar(d.penetracaoRegrasBudget)}), aplicar, null);
+    },
+    setContasFinalizadasBudget: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const contasFinalizadasBudget = {...(financeiro.contasFinalizadasBudget||{})};
+        const yearData = {...(contasFinalizadasBudget[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        contasFinalizadasBudget[CURRENT_YEAR] = yearData;
+        financeiro.contasFinalizadasBudget = contasFinalizadasBudget;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
 
     // Subfaturamento e % Contas Automático (manual, por cliente/mês — Realizado e Budget),
     // seguindo o mesmo modelo de dados de Contas Finalizadas.
-    setSubfaturamentoRealizado: (mesN, clienteNome, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const subfaturamento = {...(financeiro.subfaturamento||{})};
-      const yearData = {...(subfaturamento[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteNome]||{})};
-      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
-      else { clienteData[mesN] = value; }
-      yearData[clienteNome] = clienteData;
-      subfaturamento[CURRENT_YEAR] = yearData;
-      financeiro.subfaturamento = subfaturamento;
-      return {...d, financeiro};
-    }, null),
-    setSubfaturamentoBudget: (mesN, clienteNome, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const subfaturamentoBudget = {...(financeiro.subfaturamentoBudget||{})};
-      const yearData = {...(subfaturamentoBudget[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteNome]||{})};
-      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
-      else { clienteData[mesN] = value; }
-      yearData[clienteNome] = clienteData;
-      subfaturamentoBudget[CURRENT_YEAR] = yearData;
-      financeiro.subfaturamentoBudget = subfaturamentoBudget;
-      return {...d, financeiro};
-    }, null),
+    setSubfaturamentoRealizado: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const subfaturamento = {...(financeiro.subfaturamento||{})};
+        const yearData = {...(subfaturamento[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        subfaturamento[CURRENT_YEAR] = yearData;
+        financeiro.subfaturamento = subfaturamento;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
+    setSubfaturamentoBudget: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const subfaturamentoBudget = {...(financeiro.subfaturamentoBudget||{})};
+        const yearData = {...(subfaturamentoBudget[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        subfaturamentoBudget[CURRENT_YEAR] = yearData;
+        financeiro.subfaturamentoBudget = subfaturamentoBudget;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
 
     // Budget de receita por cliente e mês (usado para calcular a meta de Ticket Médio filtrada por
     // responsável/cliente em Gestão de Metas) — mesmo modelo de dados de Contas Finalizadas/Subfaturamento.
-    setTicketMedioReceitaBudget: (mesN, clienteNome, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const ticketMedioReceitaBudget = {...(financeiro.ticketMedioReceitaBudget||{})};
-      const yearData = {...(ticketMedioReceitaBudget[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteNome]||{})};
-      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
-      else { clienteData[mesN] = value; }
-      yearData[clienteNome] = clienteData;
-      ticketMedioReceitaBudget[CURRENT_YEAR] = yearData;
-      financeiro.ticketMedioReceitaBudget = ticketMedioReceitaBudget;
-      return {...d, financeiro};
-    }, null),
-    setContasAutomaticoRealizado: (mesN, clienteNome, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const contasAutomatico = {...(financeiro.contasAutomatico||{})};
-      const yearData = {...(contasAutomatico[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteNome]||{})};
-      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
-      else { clienteData[mesN] = value; }
-      yearData[clienteNome] = clienteData;
-      contasAutomatico[CURRENT_YEAR] = yearData;
-      financeiro.contasAutomatico = contasAutomatico;
-      return {...d, financeiro};
-    }, null),
-    setContasAutomaticoBudget: (mesN, clienteNome, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const contasAutomaticoBudget = {...(financeiro.contasAutomaticoBudget||{})};
-      const yearData = {...(contasAutomaticoBudget[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteNome]||{})};
-      if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
-      else { clienteData[mesN] = value; }
-      yearData[clienteNome] = clienteData;
-      contasAutomaticoBudget[CURRENT_YEAR] = yearData;
-      financeiro.contasAutomaticoBudget = contasAutomaticoBudget;
-      return {...d, financeiro};
-    }, null),
-    setTempoProcessamentoRealizado: (mesN, categoria, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const tempoProcessamento = {...(financeiro.tempoProcessamento||{})};
-      const yearData = {...(tempoProcessamento[CURRENT_YEAR]||{})};
-      const catData = {...(yearData[categoria]||{})};
-      if(value === null || value === undefined || value === ''){ delete catData[mesN]; }
-      else { catData[mesN] = value; }
-      yearData[categoria] = catData;
-      tempoProcessamento[CURRENT_YEAR] = yearData;
-      financeiro.tempoProcessamento = tempoProcessamento;
-      return {...d, financeiro};
-    }, null),
-    setTempoProcessamentoBudget: (mesN, categoria, value) => mutate(d => {
-      const financeiro = {...d.financeiro};
-      const tempoProcessamentoBudget = {...(financeiro.tempoProcessamentoBudget||{})};
-      const yearData = {...(tempoProcessamentoBudget[CURRENT_YEAR]||{})};
-      const catData = {...(yearData[categoria]||{})};
-      if(value === null || value === undefined || value === ''){ delete catData[mesN]; }
-      else { catData[mesN] = value; }
-      yearData[categoria] = catData;
-      tempoProcessamentoBudget[CURRENT_YEAR] = yearData;
-      financeiro.tempoProcessamentoBudget = tempoProcessamentoBudget;
-      return {...d, financeiro};
-    }, null),
+    setTicketMedioReceitaBudget: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const ticketMedioReceitaBudget = {...(financeiro.ticketMedioReceitaBudget||{})};
+        const yearData = {...(ticketMedioReceitaBudget[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        ticketMedioReceitaBudget[CURRENT_YEAR] = yearData;
+        financeiro.ticketMedioReceitaBudget = ticketMedioReceitaBudget;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
+    setContasAutomaticoRealizado: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const contasAutomatico = {...(financeiro.contasAutomatico||{})};
+        const yearData = {...(contasAutomatico[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        contasAutomatico[CURRENT_YEAR] = yearData;
+        financeiro.contasAutomatico = contasAutomatico;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
+    setContasAutomaticoBudget: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const contasAutomaticoBudget = {...(financeiro.contasAutomaticoBudget||{})};
+        const yearData = {...(contasAutomaticoBudget[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        contasAutomaticoBudget[CURRENT_YEAR] = yearData;
+        financeiro.contasAutomaticoBudget = contasAutomaticoBudget;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
+    setTempoProcessamentoRealizado: (mesN, categoria, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const tempoProcessamento = {...(financeiro.tempoProcessamento||{})};
+        const yearData = {...(tempoProcessamento[CURRENT_YEAR]||{})};
+        const catData = {...(yearData[categoria]||{})};
+        if(value === null || value === undefined || value === ''){ delete catData[mesN]; }
+        else { catData[mesN] = value; }
+        yearData[categoria] = catData;
+        tempoProcessamento[CURRENT_YEAR] = yearData;
+        financeiro.tempoProcessamento = tempoProcessamento;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
+    setTempoProcessamentoBudget: (mesN, categoria, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const tempoProcessamentoBudget = {...(financeiro.tempoProcessamentoBudget||{})};
+        const yearData = {...(tempoProcessamentoBudget[CURRENT_YEAR]||{})};
+        const catData = {...(yearData[categoria]||{})};
+        if(value === null || value === undefined || value === ''){ delete catData[mesN]; }
+        else { catData[mesN] = value; }
+        yearData[categoria] = catData;
+        tempoProcessamentoBudget[CURRENT_YEAR] = yearData;
+        financeiro.tempoProcessamentoBudget = tempoProcessamentoBudget;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
 
     // NPS (manual, por cliente/mês, com total também editável)
-    setNPS: (mesN, clienteId, value) => mutate(d => {
-      const nps = {...(d.nps||{})};
-      const yearData = {...(nps[CURRENT_YEAR]||{})};
-      const clienteData = {...(yearData[clienteId]||{})};
-      if(value === null || value === undefined || value === ''){
-        delete clienteData[mesN];
-      } else {
-        clienteData[mesN] = value;
-      }
-      yearData[clienteId] = clienteData;
-      nps[CURRENT_YEAR] = yearData;
-      return {...d, nps};
-    }, null),
-    setNPSTotal: (mesN, value) => mutate(d => {
-      const nps = {...(d.nps||{})};
-      const yearData = {...(nps[CURRENT_YEAR]||{})};
-      const totalData = {...(yearData['_total']||{})};
-      if(value === null || value === undefined || value === ''){
-        delete totalData[mesN];
-      } else {
-        totalData[mesN] = value;
-      }
-      yearData['_total'] = totalData;
-      nps[CURRENT_YEAR] = yearData;
-      return {...d, nps};
-    }, null),
+    setNPS: (mesN, clienteId, value) => {
+      const aplicar = (base) => {
+        const nps = {...(base||{})};
+        const yearData = {...(nps[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteId]||{})};
+        if(value === null || value === undefined || value === ''){
+          delete clienteData[mesN];
+        } else {
+          clienteData[mesN] = value;
+        }
+        yearData[clienteId] = clienteData;
+        nps[CURRENT_YEAR] = yearData;
+        return nps;
+      };
+      return mutateTopLevelFieldGranular('nps', d => ({...d, nps: aplicar(d.nps)}), aplicar, null);
+    },
+    setNPSTotal: (mesN, value) => {
+      const aplicar = (base) => {
+        const nps = {...(base||{})};
+        const yearData = {...(nps[CURRENT_YEAR]||{})};
+        const totalData = {...(yearData['_total']||{})};
+        if(value === null || value === undefined || value === ''){
+          delete totalData[mesN];
+        } else {
+          totalData[mesN] = value;
+        }
+        yearData['_total'] = totalData;
+        nps[CURRENT_YEAR] = yearData;
+        return nps;
+      };
+      return mutateTopLevelFieldGranular('nps', d => ({...d, nps: aplicar(d.nps)}), aplicar, null);
+    },
 
     // cobertura de dados (checklist por base/item/cliente, agora com uma tabela por mês)
-    toggleCoberturaDados: (mesN, rowKey, clienteId) => mutate(d => {
-      const coberturaDados = {...(d.coberturaDados||{})};
-      const yearData = {...(coberturaDados[CURRENT_YEAR]||{})};
-      const monthData = {...(yearData[mesN]||{})};
-      const rowData = {...(monthData[rowKey]||{})};
-      if(rowData[clienteId]){
-        delete rowData[clienteId];
-      } else {
-        rowData[clienteId] = true;
-      }
-      monthData[rowKey] = rowData;
-      yearData[mesN] = monthData;
-      coberturaDados[CURRENT_YEAR] = yearData;
-      return {...d, coberturaDados};
-    }, null),
+    toggleCoberturaDados: (mesN, rowKey, clienteId) => {
+      const aplicar = (base) => {
+        const coberturaDados = {...(base||{})};
+        const yearData = {...(coberturaDados[CURRENT_YEAR]||{})};
+        const monthData = {...(yearData[mesN]||{})};
+        const rowData = {...(monthData[rowKey]||{})};
+        if(rowData[clienteId]){
+          delete rowData[clienteId];
+        } else {
+          rowData[clienteId] = true;
+        }
+        monthData[rowKey] = rowData;
+        yearData[mesN] = monthData;
+        coberturaDados[CURRENT_YEAR] = yearData;
+        return coberturaDados;
+      };
+      return mutateTopLevelFieldGranular('coberturaDados', d => ({...d, coberturaDados: aplicar(d.coberturaDados)}), aplicar, null);
+    },
 
     // Cobertura Produto: cadastro de funções do produto (grade funções x clientes) + KPIs derivados.
-    addProdutoFuncao: ({categoria, descricao}) => mutate(d => ({
-      ...d,
-      produtoFuncoes: [...(d.produtoFuncoes||[]), {id: uid(), categoria, descricao}],
-    }), 'Função de produto adicionada'),
-    editProdutoFuncao: (id, {categoria, descricao}) => mutate(d => ({
-      ...d,
-      produtoFuncoes: (d.produtoFuncoes||[]).map(f => f.id===id ? {...f, categoria, descricao} : f),
-    }), 'Função de produto atualizada'),
-    deleteProdutoFuncao: (id) => mutate(d => {
-      const produtoFuncoesChecks = {...(d.produtoFuncoesChecks||{})};
-      delete produtoFuncoesChecks[id];
-      return {
-        ...d,
-        produtoFuncoes: (d.produtoFuncoes||[]).filter(f => f.id !== id),
-        produtoFuncoesChecks,
+    addProdutoFuncao: ({categoria, descricao}) => {
+      const aplicar = (base) => [...(base||[]), {id: uid(), categoria, descricao}];
+      return mutateTopLevelFieldGranular('produtoFuncoes', d => ({...d, produtoFuncoes: aplicar(d.produtoFuncoes)}), aplicar, 'Função de produto adicionada');
+    },
+    editProdutoFuncao: (id, {categoria, descricao}) => {
+      const aplicar = (base) => (base||[]).map(f => f.id===id ? {...f, categoria, descricao} : f);
+      return mutateTopLevelFieldGranular('produtoFuncoes', d => ({...d, produtoFuncoes: aplicar(d.produtoFuncoes)}), aplicar, 'Função de produto atualizada');
+    },
+    deleteProdutoFuncao: (id) => {
+      const aplicarFuncoes = (base) => (base||[]).filter(f => f.id !== id);
+      const aplicarChecks = (base) => { const c = {...(base||{})}; delete c[id]; return c; };
+      return mutateFieldsGranular(
+        d => ({...d, produtoFuncoes: aplicarFuncoes(d.produtoFuncoes), produtoFuncoesChecks: aplicarChecks(d.produtoFuncoesChecks)}),
+        { produtoFuncoes: aplicarFuncoes, produtoFuncoesChecks: aplicarChecks },
+        'Função de produto excluída'
+      );
+    },
+    toggleProdutoFuncaoCheck: (funcaoId, clienteId) => {
+      const aplicar = (base) => {
+        const produtoFuncoesChecks = {...(base||{})};
+        const rowData = {...(produtoFuncoesChecks[funcaoId]||{})};
+        if(rowData[clienteId]){ delete rowData[clienteId]; } else { rowData[clienteId] = true; }
+        produtoFuncoesChecks[funcaoId] = rowData;
+        return produtoFuncoesChecks;
       };
-    }, 'Função de produto excluída'),
-    toggleProdutoFuncaoCheck: (funcaoId, clienteId) => mutate(d => {
-      const produtoFuncoesChecks = {...(d.produtoFuncoesChecks||{})};
-      const rowData = {...(produtoFuncoesChecks[funcaoId]||{})};
-      if(rowData[clienteId]){ delete rowData[clienteId]; } else { rowData[clienteId] = true; }
-      produtoFuncoesChecks[funcaoId] = rowData;
-      return {...d, produtoFuncoesChecks};
-    }, null),
-    setProdutoFuncoesRealizado: (kpi, mesN, value) => mutate(d => {
-      const produtoFuncoesRealizado = {...(d.produtoFuncoesRealizado||{})};
-      const yearData = {...(produtoFuncoesRealizado[CURRENT_YEAR]||{})};
-      const kpiData = {...(yearData[kpi]||{})};
-      if(value === null || value === undefined || value === ''){ delete kpiData[mesN]; }
-      else { kpiData[mesN] = value; }
-      yearData[kpi] = kpiData;
-      produtoFuncoesRealizado[CURRENT_YEAR] = yearData;
-      return {...d, produtoFuncoesRealizado};
-    }, null),
-    setProdutoFuncoesBudget: (kpi, mesN, value) => mutate(d => {
-      const produtoFuncoesBudget = {...(d.produtoFuncoesBudget||{})};
-      const yearData = {...(produtoFuncoesBudget[CURRENT_YEAR]||{})};
-      const kpiData = {...(yearData[kpi]||{})};
-      if(value === null || value === undefined || value === ''){ delete kpiData[mesN]; }
-      else { kpiData[mesN] = value; }
-      yearData[kpi] = kpiData;
-      produtoFuncoesBudget[CURRENT_YEAR] = yearData;
-      return {...d, produtoFuncoesBudget};
-    }, null),
+      return mutateTopLevelFieldGranular('produtoFuncoesChecks', d => ({...d, produtoFuncoesChecks: aplicar(d.produtoFuncoesChecks)}), aplicar, null);
+    },
+    setProdutoFuncoesRealizado: (kpi, mesN, value) => {
+      const aplicar = (base) => {
+        const produtoFuncoesRealizado = {...(base||{})};
+        const yearData = {...(produtoFuncoesRealizado[CURRENT_YEAR]||{})};
+        const kpiData = {...(yearData[kpi]||{})};
+        if(value === null || value === undefined || value === ''){ delete kpiData[mesN]; }
+        else { kpiData[mesN] = value; }
+        yearData[kpi] = kpiData;
+        produtoFuncoesRealizado[CURRENT_YEAR] = yearData;
+        return produtoFuncoesRealizado;
+      };
+      return mutateTopLevelFieldGranular('produtoFuncoesRealizado', d => ({...d, produtoFuncoesRealizado: aplicar(d.produtoFuncoesRealizado)}), aplicar, null);
+    },
+    setProdutoFuncoesBudget: (kpi, mesN, value) => {
+      const aplicar = (base) => {
+        const produtoFuncoesBudget = {...(base||{})};
+        const yearData = {...(produtoFuncoesBudget[CURRENT_YEAR]||{})};
+        const kpiData = {...(yearData[kpi]||{})};
+        if(value === null || value === undefined || value === ''){ delete kpiData[mesN]; }
+        else { kpiData[mesN] = value; }
+        yearData[kpi] = kpiData;
+        produtoFuncoesBudget[CURRENT_YEAR] = yearData;
+        return produtoFuncoesBudget;
+      };
+      return mutateTopLevelFieldGranular('produtoFuncoesBudget', d => ({...d, produtoFuncoesBudget: aplicar(d.produtoFuncoesBudget)}), aplicar, null);
+    },
 
     // demandas (campos personalizados por nº de ticket, preservados ao atualizar a base)
     //
@@ -9838,19 +10047,18 @@ function App(){
     // Demandas. `fields` é o "o" de um ticket (n/a/s/u/c/r/d/re/tr/csat), já com o número gerado via
     // nextManualDemandaNumero. Fica em d.demandasManuais, separado da base sincronizada — ver
     // buildDemandasMerged (que concatena os dois antes de aplicar as colunas editáveis via demandasCustom).
-    addDemandaManual: (fields) => mutate(d => {
-      const demandasManuais = [...(d.demandasManuais||[])];
-      demandasManuais.push(fields);
-      return {...d, demandasManuais};
-    }, `Ticket manual criado (${fields.n})`),
+    addDemandaManual: (fields) => {
+      const aplicar = (base) => [...(base||[]), fields];
+      return mutateTopLevelFieldGranular('demandasManuais', d => ({...d, demandasManuais: aplicar(d.demandasManuais)}), aplicar, `Ticket manual criado (${fields.n})`);
+    },
 
     // Edita os campos "base" (assunto, status, urgência, cliente, responsável, data de abertura, CSAT,
     // tempo 1ª resposta) de um ticket manual já criado — diferente de updateDemandaCustom, que edita as
     // colunas "overlay" (classificação, tipo, prazo, etc.) compartilhadas com tickets do Movidesk.
-    updateDemandaManual: (numero, patch) => mutate(d => {
-      const demandasManuais = (d.demandasManuais||[]).map(o => o.n === numero ? {...o, ...patch} : o);
-      return {...d, demandasManuais};
-    }, null),
+    updateDemandaManual: (numero, patch) => {
+      const aplicar = (base) => (base||[]).map(o => o.n === numero ? {...o, ...patch} : o);
+      return mutateTopLevelFieldGranular('demandasManuais', d => ({...d, demandasManuais: aplicar(d.demandasManuais)}), aplicar, null);
+    },
 
     // Exclui um ticket manual por completo (base + qualquer dado em demandasCustom) — só faz sentido
     // para tickets manuais, já que um ticket sincronizado do Movidesk reapareceria na próxima atualização.
@@ -9907,125 +10115,162 @@ function App(){
     },
 
     // substitui a base de tickets do Movidesk (puxada do Drive) — compartilhada em tempo real
-    importDemandasBase: (rows) => mutate(d => ({
-      ...d,
-      demandasBase: rows,
-      demandasBaseSync: {
+    //
+    // ACHADO AO VIVO (27/08/2026): as ações de sincronização/importação abaixo também usavam mutate() —
+    // convertidas pro mesmo mecanismo seguro (mutateFieldsGranular/mutateTopLevelFieldGranular) usado
+    // pelo CSAT e por Gestão de Metas. Cada uma grava seu(s) campo(s) de topo lendo o valor mais recente
+    // do SERVIDOR antes de gravar, em vez de substituir a partir do estado local desta aba.
+    importDemandasBase: (rows) => {
+      const aplicarBase = () => rows;
+      const aplicarSync = () => ({
         by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
         at: new Date().toISOString(),
         count: rows.length,
-      },
-    }), `Base do Movidesk atualizada (${rows.length} tickets)`),
+      });
+      return mutateFieldsGranular(
+        d => ({...d, demandasBase: rows, demandasBaseSync: aplicarSync()}),
+        { demandasBase: aplicarBase, demandasBaseSync: aplicarSync },
+        `Base do Movidesk atualizada (${rows.length} tickets)`
+      );
+    },
 
     // substitui o P&L do ano vigente (puxado da aba Finance da planilha Gestão Metas) — compartilhado em tempo real
-    importMargemBrutaBase: (monthsData) => mutate(d => {
-      const financeiro = {...(d.financeiro||{})};
-      const pnl = {...(financeiro.pnl||{})};
-      pnl[CURRENT_YEAR] = monthsData;
-      financeiro.pnl = pnl;
-      return {
-        ...d,
-        financeiro,
-        financeiroSync: {
-          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
-          at: new Date().toISOString(),
-          count: Object.keys(monthsData).length,
-        },
+    importMargemBrutaBase: (monthsData) => {
+      const aplicarFinanceiro = (base) => {
+        const financeiro = {...(base||{})};
+        const pnl = {...(financeiro.pnl||{})};
+        pnl[CURRENT_YEAR] = monthsData;
+        financeiro.pnl = pnl;
+        return financeiro;
       };
-    }, `Base de Margem Bruta atualizada (${Object.keys(monthsData).length} mês${Object.keys(monthsData).length===1?'':'es'})`),
+      const aplicarSync = () => ({
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(monthsData).length,
+      });
+      return mutateFieldsGranular(
+        d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), financeiroSync: aplicarSync()}),
+        { financeiro: aplicarFinanceiro, financeiroSync: aplicarSync },
+        `Base de Margem Bruta atualizada (${Object.keys(monthsData).length} mês${Object.keys(monthsData).length===1?'':'es'})`
+      );
+    },
 
     // Realizado sincronizado da aba "Contas Finalizadas" da planilha Gestão Metas (por cliente, nome como chave).
-    importContasFinalizadasRealizado: (porCliente) => mutate(d => {
-      const financeiro = {...(d.financeiro||{})};
-      const contasFinalizadas = {...(financeiro.contasFinalizadas||{})};
-      contasFinalizadas[CURRENT_YEAR] = porCliente;
-      financeiro.contasFinalizadas = contasFinalizadas;
-      return {
-        ...d,
-        financeiro,
-        contasFinalizadasSync: {
-          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
-          at: new Date().toISOString(),
-          count: Object.keys(porCliente).length,
-        },
+    importContasFinalizadasRealizado: (porCliente) => {
+      const aplicarFinanceiro = (base) => {
+        const financeiro = {...(base||{})};
+        const contasFinalizadas = {...(financeiro.contasFinalizadas||{})};
+        contasFinalizadas[CURRENT_YEAR] = porCliente;
+        financeiro.contasFinalizadas = contasFinalizadas;
+        return financeiro;
       };
-    }, `Base de Contas Finalizadas atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
+      const aplicarSync = () => ({
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(porCliente).length,
+      });
+      return mutateFieldsGranular(
+        d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), contasFinalizadasSync: aplicarSync()}),
+        { financeiro: aplicarFinanceiro, contasFinalizadasSync: aplicarSync },
+        `Base de Contas Finalizadas atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`
+      );
+    },
 
     // Realizado sincronizado da aba "Subfaturamento" da planilha Gestão Metas (por cliente, nome como chave).
-    importSubfaturamentoRealizado: (porCliente) => mutate(d => {
-      const financeiro = {...(d.financeiro||{})};
-      const subfaturamento = {...(financeiro.subfaturamento||{})};
-      subfaturamento[CURRENT_YEAR] = porCliente;
-      financeiro.subfaturamento = subfaturamento;
-      return {
-        ...d,
-        financeiro,
-        subfaturamentoSync: {
-          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
-          at: new Date().toISOString(),
-          count: Object.keys(porCliente).length,
-        },
+    importSubfaturamentoRealizado: (porCliente) => {
+      const aplicarFinanceiro = (base) => {
+        const financeiro = {...(base||{})};
+        const subfaturamento = {...(financeiro.subfaturamento||{})};
+        subfaturamento[CURRENT_YEAR] = porCliente;
+        financeiro.subfaturamento = subfaturamento;
+        return financeiro;
       };
-    }, `Base de Subfaturamento atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
+      const aplicarSync = () => ({
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(porCliente).length,
+      });
+      return mutateFieldsGranular(
+        d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), subfaturamentoSync: aplicarSync()}),
+        { financeiro: aplicarFinanceiro, subfaturamentoSync: aplicarSync },
+        `Base de Subfaturamento atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`
+      );
+    },
 
     // Realizado sincronizado da aba "Contas Automáticas" da planilha Gestão Metas (por cliente, nome como chave).
-    importContasAutomaticoRealizado: (porCliente) => mutate(d => {
-      const financeiro = {...(d.financeiro||{})};
-      const contasAutomatico = {...(financeiro.contasAutomatico||{})};
-      contasAutomatico[CURRENT_YEAR] = porCliente;
-      financeiro.contasAutomatico = contasAutomatico;
-      return {
-        ...d,
-        financeiro,
-        contasAutomaticoSync: {
-          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
-          at: new Date().toISOString(),
-          count: Object.keys(porCliente).length,
-        },
+    importContasAutomaticoRealizado: (porCliente) => {
+      const aplicarFinanceiro = (base) => {
+        const financeiro = {...(base||{})};
+        const contasAutomatico = {...(financeiro.contasAutomatico||{})};
+        contasAutomatico[CURRENT_YEAR] = porCliente;
+        financeiro.contasAutomatico = contasAutomatico;
+        return financeiro;
       };
-    }, `Base de % Contas Automático atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`),
+      const aplicarSync = () => ({
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(porCliente).length,
+      });
+      return mutateFieldsGranular(
+        d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), contasAutomaticoSync: aplicarSync()}),
+        { financeiro: aplicarFinanceiro, contasAutomaticoSync: aplicarSync },
+        `Base de % Contas Automático atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`
+      );
+    },
 
     // Realizado sincronizado da aba "Tempo Processamento" da planilha Gestão Metas (por categoria, nome como chave).
-    importTempoProcessamentoRealizado: (porCategoria) => mutate(d => {
-      const financeiro = {...(d.financeiro||{})};
-      const tempoProcessamento = {...(financeiro.tempoProcessamento||{})};
-      tempoProcessamento[CURRENT_YEAR] = porCategoria;
-      financeiro.tempoProcessamento = tempoProcessamento;
-      return {
-        ...d,
-        financeiro,
-        tempoProcessamentoSync: {
-          by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
-          at: new Date().toISOString(),
-          count: Object.keys(porCategoria).length,
-        },
+    importTempoProcessamentoRealizado: (porCategoria) => {
+      const aplicarFinanceiro = (base) => {
+        const financeiro = {...(base||{})};
+        const tempoProcessamento = {...(financeiro.tempoProcessamento||{})};
+        tempoProcessamento[CURRENT_YEAR] = porCategoria;
+        financeiro.tempoProcessamento = tempoProcessamento;
+        return financeiro;
       };
-    }, `Base de Tempo Processamento atualizada (${Object.keys(porCategoria).length} categoria${Object.keys(porCategoria).length===1?'':'s'})`),
+      const aplicarSync = () => ({
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(porCategoria).length,
+      });
+      return mutateFieldsGranular(
+        d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), tempoProcessamentoSync: aplicarSync()}),
+        { financeiro: aplicarFinanceiro, tempoProcessamentoSync: aplicarSync },
+        `Base de Tempo Processamento atualizada (${Object.keys(porCategoria).length} categoria${Object.keys(porCategoria).length===1?'':'s'})`
+      );
+    },
 
     // Realizado sincronizado da aba "Penetração Regras" (por cliente, já convertido para clienteId
     // antes de chegar aqui — ver mapClienteNomeParaId).
-    importPenetracaoRegrasRealizado: (porClienteId) => mutate(d => ({
-      ...d,
-      penetracaoRegras: {...(d.penetracaoRegras||{}), [CURRENT_YEAR]: porClienteId},
-      penetracaoRegrasSync: {
+    importPenetracaoRegrasRealizado: (porClienteId) => {
+      const aplicarRegras = (base) => ({...(base||{}), [CURRENT_YEAR]: porClienteId});
+      const aplicarSync = () => ({
         by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
         at: new Date().toISOString(),
         count: Object.keys(porClienteId).length,
-      },
-    }), `Base de Penetração Regras atualizada (${Object.keys(porClienteId).length} cliente${Object.keys(porClienteId).length===1?'':'s'})`),
+      });
+      return mutateFieldsGranular(
+        d => ({...d, penetracaoRegras: aplicarRegras(d.penetracaoRegras), penetracaoRegrasSync: aplicarSync()}),
+        { penetracaoRegras: aplicarRegras, penetracaoRegrasSync: aplicarSync },
+        `Base de Penetração Regras atualizada (${Object.keys(porClienteId).length} cliente${Object.keys(porClienteId).length===1?'':'s'})`
+      );
+    },
 
     // Realizado sincronizado da aba "Efetividade Regras" (por cliente, já convertido para clienteId
     // antes de chegar aqui — ver mapClienteNomeParaId).
-    importEfetividadeRegrasRealizado: (porClienteId) => mutate(d => ({
-      ...d,
-      efetividadeRegras: {...(d.efetividadeRegras||{}), [CURRENT_YEAR]: porClienteId},
-      efetividadeRegrasSync: {
+    importEfetividadeRegrasRealizado: (porClienteId) => {
+      const aplicarRegras = (base) => ({...(base||{}), [CURRENT_YEAR]: porClienteId});
+      const aplicarSync = () => ({
         by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
         at: new Date().toISOString(),
         count: Object.keys(porClienteId).length,
-      },
-    }), `Base de Efetividade Regras atualizada (${Object.keys(porClienteId).length} cliente${Object.keys(porClienteId).length===1?'':'s'})`),
-  }), [mutate, authUser]);
+      });
+      return mutateFieldsGranular(
+        d => ({...d, efetividadeRegras: aplicarRegras(d.efetividadeRegras), efetividadeRegrasSync: aplicarSync()}),
+        { efetividadeRegras: aplicarRegras, efetividadeRegrasSync: aplicarSync },
+        `Base de Efetividade Regras atualizada (${Object.keys(porClienteId).length} cliente${Object.keys(porClienteId).length===1?'':'s'})`
+      );
+    },
+  }), [mutateTopLevelFieldGranular, mutateFieldsGranular, mutateDemandasCustomGranular, authUser]);
 
   if(authUser === undefined){
     return <div className="loading-screen"><span className="spinner"></span>Verificando login...</div>;
