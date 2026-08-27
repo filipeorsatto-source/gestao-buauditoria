@@ -1285,6 +1285,33 @@ function parseCsatAvaliacaoSheet(values){
   return { porTicket, total: Object.keys(porTicket).length, ignoradas };
 }
 
+// Nome (pode vir truncado no cabeçalho da aba, ex.: o Sheets corta nomes de aba longos) da aba de
+// dentro da planilha de CSAT que tem as colunas "Ticket"/"Avaliação".
+const CSAT_AVALIACAO_SHEET_TAB = 'Resultado da pesquisa de satisf';
+
+// Localiza, dentro do workbook baixado da planilha de CSAT, a aba certa — tenta pelo nome configurado
+// em CSAT_AVALIACAO_SHEET_TAB (tolerante a acento/caixa/truncamento em qualquer direção, já que nomes
+// de aba longos às vezes aparecem cortados de formas diferentes), e cai para a primeira aba em que as
+// colunas "Ticket"/"Avaliação" sejam reconhecidas, ou a primeira aba do arquivo como último recurso —
+// pra não travar a sincronização por completo se o nome da aba mudar.
+function findCsatSheetRows(wb){
+  const alvo = normalizarTextoAvaliacao(CSAT_AVALIACAO_SHEET_TAB);
+  for(const nome of wb.SheetNames){
+    const n = normalizarTextoAvaliacao(nome);
+    if(n === alvo || n.startsWith(alvo) || alvo.startsWith(n)){
+      return XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: false, defval: null });
+    }
+  }
+  for(const nome of wb.SheetNames){
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: false, defval: null });
+    try{
+      const r = parseCsatAvaliacaoSheet(rows);
+      if(r.total > 0) return rows;
+    }catch(e){ /* essa aba não tem as colunas "Ticket"/"Avaliação" — tenta a próxima */ }
+  }
+  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: null });
+}
+
 const DEMANDAS_SEED = [
   {n:'2961', a:'CATE 2752 ', s:'Em aberto', u:'Baixa', c:'Sírio SP', r:'Amélio ', d:'2026-08-18T20:54:00'},
   {n:'2957', a:'Integração da Informação de Precaução/Isolamento do Tasy para o Marvin', s:'Em aberto', u:'Baixa', c:'Einstein GO', r:'William Rocha', d:'2026-08-18T16:25:00'},
@@ -8309,7 +8336,7 @@ function NovaDemandaManualModal({data, devTeam, actions, onClose}){
 // facilita enxergar rapidamente quais entregas estão próximas. Só entram tickets AINDA NÃO concluídos
 // (um ticket já entregue não é mais uma "entrega próxima") e com Prazo preenchido, e respeita os
 // filtros já aplicados na página (recebe `filtered`, não `merged`).
-function EntregasPorDataSection({filtered}){
+function EntregasPorDataSection({filtered, devNameById}){
   const porMes = useMemo(() => {
     const comPrazo = filtered.filter(m => m.prazo && !m.concluidoEm);
     const meses = {};
@@ -8357,14 +8384,24 @@ function EntregasPorDataSection({filtered}){
                       <td style={{whiteSpace:'nowrap', fontWeight:600, verticalAlign:'top'}}>{fmtDataAbertura(diaKey)}</td>
                       <td>
                         <div style={{display:'flex', flexDirection:'column', gap:8}}>
-                          {porMes[mesKey][diaKey].map(m => (
-                            <div key={m.numero} style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
-                              <span className="tag tag-client">{m.cliente}</span>
-                              <span>{m.assunto || '(sem assunto)'}</span>
-                              <span style={{color:'var(--ink-soft)', fontSize:12}}>#{m.numero}</span>
-                              {m.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
-                            </div>
-                          ))}
+                          {porMes[mesKey][diaKey].map(m => {
+                            const devNome = m.responsavelDesenvolvimentoId ? devNameById[m.responsavelDesenvolvimentoId] : null;
+                            return (
+                              <div key={m.numero} style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap'}}>
+                                <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
+                                  <span className="tag tag-client">{m.cliente}</span>
+                                  <span>{m.assunto || '(sem assunto)'}</span>
+                                  <span style={{color:'var(--ink-soft)', fontSize:12}}>#{m.numero}</span>
+                                </div>
+                                <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', fontSize:12, color:'var(--ink-soft)'}}>
+                                  {m.responsavel && <span title="Responsável Atendimento">Atend.: <strong style={{color:'var(--ink)', fontWeight:600}}>{m.responsavel}</strong></span>}
+                                  {devNome && <span title="Desenvolvedor Alocado">Dev.: <strong style={{color:'var(--ink)', fontWeight:600}}>{devNome}</strong></span>}
+                                  {!isEmptyVal(m.csat) && <span title="CSAT">CSAT: <strong style={{color:'var(--ink)', fontWeight:600}}>{m.csat}</strong></span>}
+                                  {m.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </td>
                     </tr>
@@ -8382,6 +8419,7 @@ function EntregasPorDataSection({filtered}){
 function DemandasPage({data, actions}){
   const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento' || p.area === 'Atendimento'), [data.pessoas]);
+  const devNameById = useMemo(() => { const m={}; devTeam.forEach(p=>{ m[p.id]=p.nome; }); return m; }, [devTeam]);
 
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState(null);
@@ -8389,14 +8427,35 @@ function DemandasPage({data, actions}){
   const [novoManualOpen, setNovoManualOpen] = useState(false);
   const [confirmDelManual, setConfirmDelManual] = useState(null); // numero do ticket manual a excluir
 
-  // Sincroniza o CSAT a partir da planilha separada de Avaliação (colunas "Ticket" e "Avaliação",
-  // convertidas numa nota de 1 a 5). O nome da aba não foi informado, então lê a primeira aba da
-  // planilha (ver fetchSheetTabValues, sheetName omitido).
+  // Sincroniza o CSAT a partir da planilha separada de Avaliação (aba "Resultado da pesquisa de
+  // satisf...", colunas "Ticket" e "Avaliação", convertidas numa nota de 1 a 5). Essa planilha é um
+  // arquivo Excel (.xlsx) hospedado no Drive, não uma planilha nativa do Google Sheets — a API do
+  // Sheets (usada pelas outras sincronizações, que leem abas de dentro de "Gestão Metas") não consegue
+  // ler esse tipo de arquivo (erro "This operation is not supported... must not be an Office file").
+  // Por isso aqui baixa o arquivo binário direto do Drive e processa com XLSX.read, no mesmo padrão já
+  // usado pela sincronização do Movidesk (outro .xlsx no Drive) — ver handleSyncMovidesk mais abaixo.
   const handleSyncCsat = async () => {
     const token = await getGoogleDriveAccessToken();
-    const values = await fetchSheetTabValues(token, null, CSAT_AVALIACAO_SHEET_ID);
-    const { porTicket, total, ignoradas } = parseCsatAvaliacaoSheet(values);
-    if(!total) throw new Error('Nenhuma avaliação reconhecida na planilha — confirme se as colunas "Ticket" e "Avaliação" estão preenchidas.');
+    const metaRes = await fetch(
+      'https://www.googleapis.com/drive/v3/files/' + CSAT_AVALIACAO_SHEET_ID
+      + '?fields=' + encodeURIComponent('id,name,mimeType') + '&supportsAllDrives=true',
+      { headers: { Authorization: 'Bearer ' + token } }
+    );
+    if(!metaRes.ok) throw new Error('Não foi possível localizar a planilha de CSAT no Drive (HTTP ' + metaRes.status + '). Confirme se o link ainda dá acesso ao mesmo arquivo.');
+    const meta = await metaRes.json();
+    // Mesma lógica do Movidesk: pode ser um .xlsx binário de verdade, ou ter sido convertido
+    // automaticamente pelo Drive para uma planilha nativa do Google Sheets no upload.
+    const isGoogleSheet = meta.mimeType === 'application/vnd.google-apps.spreadsheet';
+    const downloadUrl = isGoogleSheet
+      ? 'https://www.googleapis.com/drive/v3/files/' + CSAT_AVALIACAO_SHEET_ID + '/export?mimeType=' + encodeURIComponent('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      : 'https://www.googleapis.com/drive/v3/files/' + CSAT_AVALIACAO_SHEET_ID + '?alt=media&supportsAllDrives=true';
+    const res = await fetch(downloadUrl, { headers: { Authorization: 'Bearer ' + token } });
+    if(!res.ok) throw new Error('Não foi possível baixar a planilha de CSAT do Drive (HTTP ' + res.status + ').');
+    const buf = await res.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array', cellDates: true });
+    const rows = findCsatSheetRows(wb);
+    const { porTicket, total, ignoradas } = parseCsatAvaliacaoSheet(rows);
+    if(!total) throw new Error('Nenhuma avaliação reconhecida na planilha — confirme se as colunas "Ticket" e "Avaliação" estão preenchidas na aba "' + CSAT_AVALIACAO_SHEET_TAB + '".');
     actions.importCsatAvaliacao(porTicket);
     return ignoradas ? `${ignoradas} linha${ignoradas===1?'':'s'} ignorada${ignoradas===1?'':'s'} por ter uma Avaliação não reconhecida (esperado: Péssimo, Ruim, Neutro, Bom ou Ótimo).` : null;
   };
@@ -8727,7 +8786,7 @@ function DemandasPage({data, actions}){
         />
       ))}
 
-      <EntregasPorDataSection filtered={filtered}/>
+      <EntregasPorDataSection filtered={filtered} devNameById={devNameById}/>
 
       {novoManualOpen && (
         <NovaDemandaManualModal
