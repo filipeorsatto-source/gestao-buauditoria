@@ -774,6 +774,12 @@ const MONTHS = [
 ];
 const CURRENT_YEAR = new Date().getFullYear();
 
+// Identificador da versão do código, atualizado manualmente a cada entrega — aparece no rodapé da barra
+// lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
+// a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
+// não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
+const APP_BUILD_ID = '2026-08-27.3';
+
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
 // Número de clientes usado como divisor do Ticket Médio (Margem Bruta / Gestão de Metas).
@@ -886,6 +892,15 @@ function transformMovideskRows(rows){
     const tokens = normalizeHeaderName(h).split(' ').filter(Boolean);
     return tokens.includes('resposta') && tokens.includes('1');
   });
+  // Coluna "CSAT" (opcional) — se o usuário adicionar uma coluna com esse nome DIRETO na mesma planilha
+  // do Movidesk (ex.: via VLOOKUP/PROCV puxando a nota da aba de Avaliação pelo número do ticket, feito
+  // uma vez na própria planilha em vez de depender de uma sincronização separada no app), o CSAT passa a
+  // vir junto com o resto dos dados do ticket nesta mesma sincronização — sem precisar de uma gravação
+  // separada em demandasCustom (e, portanto, sem o risco de "perda de atualização" entre sincronizações
+  // concorrentes que esse caminho separado tinha). Se a coluna não existir, csat fica vazio aqui e o app
+  // continua aceitando o valor da sincronização separada de CSAT (ver importCsatAvaliacao) como fallback
+  // — csatSheet (dessa sincronização separada) tem prioridade sobre este valor, ver buildDemandasMerged.
+  const csatCol = headerRow.findIndex(h => normalizeHeaderName(h) === 'csat');
 
   for(let i = 1; i < rows.length; i++){
     const row = rows[i];
@@ -926,6 +941,10 @@ function transformMovideskRows(rows){
     // "Tempo 1º Resposta" — convertido para minutos (ver parseDuracaoParaMinutos). null quando a
     // coluna não existe na exportação ou está vazia para o ticket.
     const tempo1aResposta = tempo1aRespostaCol !== -1 ? parseDuracaoParaMinutos(row[tempo1aRespostaCol]) : null;
+    // "CSAT" — aceita tanto o texto (Péssimo..Ótimo) quanto a nota numérica 1-5 já calculada pela
+    // planilha (ex.: resultado de um VLOOKUP/PROCV), reaproveitando o mesmo parser da sincronização
+    // separada de CSAT (ver avaliacaoTextoParaNota).
+    const csatDaMovidesk = csatCol !== -1 ? avaliacaoTextoParaNota(row[csatCol]) : null;
 
     out.push({
       n: String(numero).trim(),
@@ -937,6 +956,7 @@ function transformMovideskRows(rows){
       d: iso,
       re: resolvidoEmIso,
       tr: tempo1aResposta,
+      csat: csatDaMovidesk || '',
     });
   }
   const stats = {
@@ -2748,7 +2768,7 @@ function buildDemandasMerged(customMap, baseRows, manualRows){
       abertoEm: o.d,
       diasEmAberto: dias,
       tempoPrimeiraResposta: (o.tr === undefined || o.tr === null) ? null : o.tr, // minutos, vem direto do Movidesk
-      csat: c.csatSheet || o.csat || '', // csatSheet vem da sincronização da planilha de CSAT (ver importCsatAvaliacao); o.csat é placeholder — ainda não disponível na base do Movidesk
+      csat: c.csatSheet || o.csat || '', // c.csatSheet vem da sincronização SEPARADA da planilha de CSAT (ver importCsatAvaliacao) e tem prioridade; o.csat vem direto da base do Movidesk quando a própria planilha do Movidesk tiver uma coluna "CSAT" (ex.: preenchida com VLOOKUP/PROCV na planilha) — ver transformMovideskRows. Esse segundo caminho evita depender de uma gravação separada em demandasCustom.
       classificacao: c.classificacao || '',
       tipo: c.tipo || '',
       responsavelDesenvolvimentoId: c.responsavelDesenvolvimentoId || '',
@@ -3799,10 +3819,15 @@ async function persistDemandasCustomMerge(mergeFn, extraTopLevelPatch){
       const mergedDemandasCustom = mergeFn(current.demandasCustom || {});
       await fb.updateDoc(ref, { demandasCustom: mergedDemandasCustom, ...(extraTopLevelPatch || {}) });
     }
-    return true;
+    return { ok: true };
   }catch(e){
+    // Guarda a mensagem de erro real (ex.: "Missing or insufficient permissions" de uma regra de
+    // segurança do Firestore) — sem isso, uma falha de gravação só aparecia como um toast genérico e
+    // passageiro ("Não foi possível salvar"), fácil de não notar no meio de outros avisos da tela; quem
+    // chama esta função (ver handleSyncCsat) usa esse texto pra colocar o erro real num aviso PERSISTENTE
+    // na própria tela, em vez de depender de alguém ter visto o toast a tempo.
     console.error('Firestore transaction write error', e);
-    return false;
+    return { ok: false, error: (e && e.message) || String(e) };
   }
 }
 
@@ -4113,7 +4138,7 @@ function Sidebar({route, setRoute}){
         </div>
       </div>
 
-      <div className="sidebar-footer">v1 · estrutura base</div>
+      <div className="sidebar-footer" title="Se você reportar um problema, confira este código antes de testar de novo — se ele não bater com a versão mais recente enviada, o navegador (ou o GitHub Pages) ainda está servindo uma versão em cache; tente atualizar com Ctrl+Shift+R (ou Cmd+Shift+R no Mac) ou abrir numa aba anônima.">build {APP_BUILD_ID}</div>
     </div>
   );
 }
@@ -8538,12 +8563,20 @@ function DemandasPage({data, actions}){
     // não foram sincronizados da base do Movidesk.
     const numerosConhecidos = new Set(merged.map(m => m.numero));
     const semCorrespondencia = Object.keys(porTicket).filter(n => !numerosConhecidos.has(n));
-    actions.importCsatAvaliacao(porTicket);
+    // Espera o resultado REAL da gravação (em vez de só disparar e seguir em frente) — se o Firestore
+    // recusar a escrita (ex.: uma regra de segurança bloqueando, sem conexão, etc.), isso normalmente só
+    // aparecia como um toast passageiro que era fácil de não notar no meio do aviso de "tickets sem
+    // correspondência" já mostrado na tela. Agora, se a gravação falhar, isso vira parte do próprio aviso
+    // PERSISTENTE desta sincronização — impossível de passar despercebido.
+    const saveResult = await actions.importCsatAvaliacao(porTicket);
     // Guarda o resultado bruto desta sincronização (nota lida por ticket, direto da planilha, antes de
     // qualquer gravação) para o painel de diagnóstico abaixo — permite checar ticket a ticket sem
     // depender de acesso aos dados reais da planilha/Firestore.
     setLastCsatSync({ porTicket, total, ignoradas, amostrasIgnoradas, semCorrespondencia, at: new Date().toISOString() });
     const avisos = [];
+    if(saveResult && saveResult.ok === false){
+      avisos.push(`ERRO AO SALVAR: as notas foram lidas corretamente da planilha, mas NÃO foram salvas no banco de dados (motivo: "${saveResult.error}"). Tente sincronizar de novo — se o erro persistir, envie esta mensagem exata para o suporte.`);
+    }
     if(ignoradas){
       // Mostra alguns exemplos concretos (ticket + valor bruto da célula Avaliação) — sem isso, "19
       // linhas ignoradas" não dá pra investigar; com a amostra dá pra ver na hora se é um problema de
@@ -9399,17 +9432,24 @@ function App(){
   // uma transação: lê o demandasCustom mais recente do SERVIDOR no momento da escrita (não o estado local
   // desta aba, que pode estar desatualizado) e aplica `mergeFn` em cima dele — elimina o risco de "perda
   // de atualização" em lote.
+  // Retorna a PROMISE da gravação (diferente de `mutate`, que é "fire and forget") — quem chama pode
+  // esperar o resultado real e mostrar o erro de forma persistente na tela, em vez de depender só do
+  // toast genérico (que pode passar despercebido, especialmente quando a mesma ação já mostra outro
+  // aviso na tela — ver handleSyncCsat).
   const mutateDemandasCustomGranular = useCallback((updater, mergeFn, extraTopLevelKeys, successMsg) => {
+    let resultPromise;
     setData(prev => {
       const next = updater(prev);
       const extraTopLevelPatch = {};
       (extraTopLevelKeys || []).forEach(k => { extraTopLevelPatch[k] = next[k]; });
-      persistDemandasCustomMerge(mergeFn, extraTopLevelPatch).then(ok => {
-        if(!ok) push('Não foi possível salvar. Tente novamente.', 'error');
+      resultPromise = persistDemandasCustomMerge(mergeFn, extraTopLevelPatch).then(result => {
+        if(!result.ok) push('Não foi possível salvar. Tente novamente.', 'error');
         else if(successMsg) push(successMsg);
+        return result;
       });
       return next;
     });
+    return resultPromise;
   }, [push]);
 
   const actions = useMemo(() => ({
