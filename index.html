@@ -440,8 +440,26 @@
     cursor:pointer;margin-bottom:10px;
   }
   .back-link:hover{color:var(--ink);}
-  .detail-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:18px;align-items:start;}
+  /* Layout padrão do bloco de uma meta em Gestão de Metas: gráfico à esquerda e painel de Detalhes à
+     direita, dentro do MESMO card branco (um único fundo/borda/sombra) — antes eram dois .card
+     separados lado a lado, o que deixava o painel de Detalhes "flutuando" mais à direita/desalinhado
+     em metas sem a tabela Clientes x Meses (menos conteúdo à esquerda). */
+  .detail-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:0;align-items:stretch;}
   @media(max-width:900px){.detail-grid{grid-template-columns:1fr;}}
+  /* min-width:0 é necessário pra o item do grid respeitar o overflow-x:auto do .table-wrap por dentro
+     (ex.: a tabela "Clientes x Meses") em vez de forçar a coluna — e o card inteiro — a alargar além da
+     tela; sem isso, metas com essa tabela empurravam o painel de Detalhes pra fora da viewport. */
+  .detail-grid-chart{padding:20px 22px;min-width:0;}
+  .detail-grid-side{padding:20px 22px;border-left:1px solid var(--line-soft);min-width:0;}
+  @media(max-width:900px){.detail-grid-side{border-left:none;border-top:1px solid var(--line-soft);}}
+  /* Painel de Detalhes em fonte/espaçamento reduzidos — não deve competir visualmente com o gráfico. */
+  .detail-grid-side .section-block-title{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);}
+  .detail-grid-side .kv-row{padding:8px 0;font-size:12px;}
+  .goals-mission-banner{
+    background:var(--accent-soft, #eef1ff);color:var(--accent-ink, var(--ink));
+    border-radius:var(--radius-lg);padding:16px 22px;margin-bottom:18px;
+    font-size:14px;font-weight:600;line-height:1.5;font-style:italic;
+  }
   .kv-row{display:flex;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--line-soft);font-size:12.8px;}
   .kv-row:last-child{border-bottom:none;}
   .kv-label{color:var(--ink-soft);}
@@ -3610,11 +3628,16 @@ function runMigrations(parsed){
       // Usa ind.metaTitulo quando definido (ex.: 'margem-bruta' aparece só como "Margem Bruta" em
       // Gestão de Metas, apesar da aba combinada em Acompanhamento de Metas se chamar "Margem Bruta &
       // Ticket Médio") — ind.titulo continua sendo o nome usado na barra lateral e no cabeçalho da página.
+      // Metas com `defsCustomizadas: true` (usuário editou Título/Descrição/Fonte/Unidade manualmente
+      // pelo modal "Editar meta" — ver actions.editGoal) NÃO são mais sobrescritas aqui, senão a edição
+      // "não salva de verdade": ela fica visível por um instante e volta pro texto padrão assim que essa
+      // migração roda de novo (a cada carregamento/snapshot).
       if(parsed.metas){
         const indBySlug = {};
         INDICADORES.forEach(ind => { indBySlug[ind.slug] = ind; });
         let defsChanged = false;
         parsed.metas = parsed.metas.map(m => {
+          if(m.defsCustomizadas) return m;
           const ind = m.slug && indBySlug[m.slug];
           if(!ind) return m;
           const tituloEsperado = ind.metaTitulo || ind.titulo;
@@ -5286,14 +5309,14 @@ function GoalFullCard({goal, pessoas, data, clienteNomesFilter, pessoaId, onEdit
         </div>
       </div>
 
-      <div className="detail-grid">
-        <div className="card card-pad">
+      <div className="card detail-grid">
+        <div className="detail-grid-chart">
           <BudgetChart budgetsByMonth={year} realizedByMonth={realizedByMonth} unidade={goal.unidadeMedida}/>
           {isExterno && <div className="budget-note">Budget definido na tela do indicador, dentro de Acompanhamento de Metas.</div>}
           <GoalClienteMesTable goal={goal} data={data} clienteNomesFilter={clienteNomesFilter} pessoaId={pessoaId}/>
         </div>
 
-        <div className="card card-pad">
+        <div className="detail-grid-side">
           <div className="section-block-title" style={{marginBottom:6}}>Detalhes</div>
           <div className="kv-row"><span className="kv-label">Descrição</span><span className="kv-value">{goal.descricao || '—'}</span></div>
           <div className="kv-row"><span className="kv-label">Fonte</span><span className="kv-value" style={{wordBreak:'break-all'}}>
@@ -5335,6 +5358,11 @@ function GoalsPage({data, actions}){
           <div className="section-block-desc">Cadastro, budget e realizado de todas as metas do time.</div>
         </div>
         <button className="btn btn-primary" onClick={()=>setModal('new')}><IconPlus width="14" height="14"/>Adicionar Meta</button>
+      </div>
+
+      <div className="goals-mission-banner">
+        Estabelecer a unidade de negócio como uma frente sustentável, entregando valor consistente e se
+        tornando referência de confiança para os hospitais clientes
       </div>
 
       <div className="filters-bar" style={{marginBottom:18}}>
@@ -9179,7 +9207,10 @@ function App(){
     addGoal: (g) => mutate(d => ({...d, metas:[...d.metas, {id:uid(), ...g}]}), 'Meta adicionada'),
     // Casa por slug quando disponível (mais estável que id — ver comentário na migração de dedupe em
     // runMigrations), com fallback pra id (metas customizadas, sem slug, só têm id mesmo).
-    editGoal: (id, g) => mutate(d => ({...d, metas: d.metas.map(x => (g.slug && x.slug===g.slug) || x.id===id ? {...x, ...g} : x)}), 'Meta atualizada'),
+    // `defsCustomizadas: true` marca que Título/Descrição/Fonte/Unidade foram editados manualmente pelo
+    // usuário (só o GoalModal grava esses 4 campos juntos) — a migração de sincronização com INDICADORES
+    // (ver runMigrations) passa a respeitar essa edição e não sobrescrever mais esses campos nessa meta.
+    editGoal: (id, g) => mutate(d => ({...d, metas: d.metas.map(x => (g.slug && x.slug===g.slug) || x.id===id ? {...x, ...g, defsCustomizadas: true} : x)}), 'Meta atualizada'),
     deleteGoal: (id) => mutate(d => ({...d, metas: d.metas.filter(x => x.id !== id)}), 'Meta excluída'),
 
     // rotinas
