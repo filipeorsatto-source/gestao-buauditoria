@@ -778,7 +778,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-27.7';
+const APP_BUILD_ID = '2026-08-27.9';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2782,6 +2782,12 @@ function buildDemandasMerged(customMap, baseRows, manualRows){
       // existindo aqui (com o mês do Prazo) para não precisar alterar todo indicador/filtro que já lia
       // esse campo (% Entregas Prazo, CSAT por mês, filtro "Mês Planning" etc.).
       mesPlanning: mesDoPrazo(prazo),
+      // Mês de conclusão do ticket (data de "Concluído Em", não a data de Prazo) — usado especificamente
+      // pelas metas de CSAT (CSAT Tech/Atendimento/Produto), que devem contar o CSAT no mês em que o
+      // ticket foi de fato concluído/avaliado, não no mês do prazo original (ajuste pedido em 27/08/2026).
+      // mesDoPrazo funciona igual para qualquer string de data "YYYY-MM-DD..." (extrai o 2º campo ao
+      // dividir por "-"), então reaproveitada aqui em vez de duplicar a lógica.
+      mesConclusao: mesDoPrazo(concluidoEm),
       prioridade: c.prioridade || '',
       esforco: (c.esforco === undefined || c.esforco === null || c.esforco === '') ? null : Number(c.esforco),
       atrasado: isDemandaAtrasado(prazo, statusEfetivo, concluidoEm),
@@ -4911,13 +4917,15 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   }
 
   if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
+    // Agrupa pelo mês de CONCLUSÃO do ticket (mesConclusao), não pelo mês do Prazo (mesPlanning) — ajuste
+    // pedido em 27/08/2026: ver comentário em CsatMatrixPage / no campo mesConclusao.
     const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
-    const scoped = merged.filter(m => m.classificacao && matchFn(m.classificacao) && m.mesPlanning
+    const scoped = merged.filter(m => m.classificacao && matchFn(m.classificacao) && m.mesConclusao
       && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
     MONTHS.forEach(m => {
-      const subset = scoped.filter(x => String(x.mesPlanning) === String(m.n));
+      const subset = scoped.filter(x => String(x.mesConclusao) === String(m.n));
       out[m.n] = avgCsat(subset.map(x => x.csat));
     });
     return out;
@@ -5120,9 +5128,11 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     return subset.length ? (subset.filter(x => x.concluidaNoPrazo).length / subset.length * 100) : null;
   }
   if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
+    // Agrupa pelo mês de CONCLUSÃO do ticket (mesConclusao), não pelo mês do Prazo (mesPlanning) — ajuste
+    // pedido em 27/08/2026: ver comentário em CsatMatrixPage / no campo mesConclusao.
     const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
-    const subset = merged.filter(x => x.classificacao && matchFn(x.classificacao) && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome
+    const subset = merged.filter(x => x.classificacao && matchFn(x.classificacao) && String(x.mesConclusao) === String(mesN) && x.cliente === clienteNome
       && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return avgCsat(subset.map(x => x.csat));
   }
@@ -5250,7 +5260,12 @@ function GoalClienteMesTable({goal, data, clienteNomesFilter, pessoaId}){
 
 function GoalModal({initial, pessoas, onSave, onClose}){
   const [titulo, setTitulo] = useState(initial ? initial.titulo : '');
-  const [descricao, setDescricao] = useState(initial ? initial.descricao : '');
+  // Campo Descrição removido do modal (27/08/2026) — mesmo depois do fix de comparação por conteúdo em
+  // persistFieldsMerge, editar a descrição de uma meta continuava revertendo (só esse campo, não os
+  // demais), aparentemente por causa da migração de sincronização com INDICADORES em runMigrations que
+  // ainda concorre com a edição em cenários não totalmente isolados. Pra não deixar essa tela quebrada
+  // pro usuário, a descrição deixa de ser editável por aqui — o valor existente continua sendo exibido
+  // no card da meta, só não é mais alterável nem enviado no payload de editGoal/addGoal.
   const [fonte, setFonte] = useState(initial ? initial.fonte : '');
   const [pessoaIds, setPessoaIds] = useState(initial ? initial.pessoaIds : []);
   const [unidadeMedida, setUnidadeMedida] = useState(initial ? initial.unidadeMedida : '%');
@@ -5266,7 +5281,7 @@ function GoalModal({initial, pessoas, onSave, onClose}){
         <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
         <button className="btn btn-primary" disabled={!canSave} style={!canSave?{opacity:0.5}:undefined}
           onClick={()=> canSave && onSave({
-            titulo: titulo.trim(), descricao: descricao.trim(), fonte: fonte.trim(),
+            titulo: titulo.trim(), fonte: fonte.trim(),
             pessoaIds, unidadeMedida,
             ...(initial && initial.slug ? {slug: initial.slug} : {}),
             budgets: {...(initial ? initial.budgets : {}), [CURRENT_YEAR]: budgets}
@@ -5278,10 +5293,6 @@ function GoalModal({initial, pessoas, onSave, onClose}){
       <div className="field">
         <label>Título da Meta<span className="required-mark">*</span></label>
         <input className="input" value={titulo} onChange={e=>setTitulo(e.target.value)} autoFocus/>
-      </div>
-      <div className="field">
-        <label>Descrição</label>
-        <textarea className="input" value={descricao} onChange={e=>setDescricao(e.target.value)} placeholder="Fórmula ou detalhamento da meta"/>
       </div>
       <div className="field-row">
         <div className="field">
@@ -7662,8 +7673,11 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
   const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
   const devTeam = useMemo(() => (data.pessoas||[]).filter(p => p.area === 'Desenvolvimento' || p.area === 'Atendimento'), [data.pessoas]);
 
+  // Agrupa pelo mês de CONCLUSÃO do ticket (m.mesConclusao), não pelo mês do Prazo (m.mesPlanning) —
+  // ajuste pedido em 27/08/2026: a meta de CSAT deve refletir o mês em que o ticket foi de fato
+  // concluído/avaliado, não o mês do prazo original combinado com o cliente.
   const scoped = useMemo(() =>
-    merged.filter(m => m.classificacao && matchFn(m.classificacao) && !!m.mesPlanning),
+    merged.filter(m => m.classificacao && matchFn(m.classificacao) && !!m.mesConclusao),
   [merged]);
 
   const overallAvg = useMemo(() => avgCsat(scoped.map(m => m.csat)), [scoped]);
@@ -7695,7 +7709,7 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
   [scoped]);
 
   function avgForRowMes(row, mesN){
-    const subset = scoped.filter(m => row.match(m) && String(m.mesPlanning) === String(mesN));
+    const subset = scoped.filter(m => row.match(m) && String(m.mesConclusao) === String(mesN));
     return avgCsat(subset.map(m => m.csat));
   }
 
@@ -7713,14 +7727,14 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
 
       <CsatMatrixTable
         title="CSAT médio por pessoa e mês"
-        desc="Colunas = mês do Prazo do ticket. Linhas = Responsável Desenvolvimento (Tech/Produto) ou Responsável do Movidesk (Atendimento)."
+        desc="Colunas = mês de Conclusão do ticket. Linhas = Responsável Desenvolvimento (Tech/Produto) ou Responsável do Movidesk (Atendimento)."
         rows={personRows}
         avgFn={avgForRowMes}
       />
       {extraDevTable && (
         <CsatMatrixTable
           title="CSAT médio por desenvolvedor e mês"
-          desc="Tickets de Atendimento que também tiveram um desenvolvedor alocado (Responsável Desenvolvimento). Colunas = mês do Prazo do ticket."
+          desc="Tickets de Atendimento que também tiveram um desenvolvedor alocado (Responsável Desenvolvimento). Colunas = mês de Conclusão do ticket."
           rows={devRows}
           avgFn={avgForRowMes}
           emptyText="Nenhum ticket de Atendimento com Responsável Desenvolvimento alocado ainda."
@@ -7728,7 +7742,7 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
       )}
       <CsatMatrixTable
         title="CSAT médio por cliente e mês"
-        desc="Colunas = mês do Prazo do ticket. Linhas = clientes."
+        desc="Colunas = mês de Conclusão do ticket. Linhas = clientes."
         rows={clienteRows}
         avgFn={avgForRowMes}
       />
@@ -7971,17 +7985,17 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   if(slug === 'csat-tech'){
     return <CsatMatrixPage data={data} personMode="dev" titulo="CSAT Tech"
       matchFn={c => c.startsWith('Desenvolvimento')}
-      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento (Bug, Personalização ou Produto), agrupados pelo mês do Prazo."/>;
+      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento (Bug, Personalização ou Produto), agrupados pelo mês de Conclusão do ticket."/>;
   }
   if(slug === 'csat-atendimento'){
     return <CsatMatrixPage data={data} personMode="responsavel" titulo="CSAT Atendimento" extraDevTable
       matchFn={c => c.startsWith('Atendimento')}
-      formulaHint="Média do CSAT de tickets classificados como Atendimento (Bug, Dúvida, Personalização ou Regra), agrupados pelo mês do Prazo."/>;
+      formulaHint="Média do CSAT de tickets classificados como Atendimento (Bug, Dúvida, Personalização ou Regra), agrupados pelo mês de Conclusão do ticket."/>;
   }
   if(slug === 'csat-produto'){
     return <CsatMatrixPage data={data} personMode="dev" titulo="CSAT Produto"
       matchFn={c => c === 'Desenvolvimento Produto'}
-      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento Produto, agrupados pelo mês do Prazo."/>;
+      formulaHint="Média do CSAT de tickets classificados como Desenvolvimento Produto, agrupados pelo mês de Conclusão do ticket."/>;
   }
   if(slug === 'dias-ticket-aberto'){
     return <DiasTicketAbertoPage data={data}/>;
