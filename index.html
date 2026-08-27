@@ -778,7 +778,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-27.3';
+const APP_BUILD_ID = '2026-08-27.4';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3804,20 +3804,26 @@ async function persistDemandasCustomMerge(mergeFn, extraTopLevelPatch){
   try{
     const fb = await waitForFirebase();
     const ref = await getAppDataDocRef();
-    if(fb.runTransaction){
-      await fb.runTransaction(fb.db, async (tx) => {
-        const snap = await tx.get(ref);
-        const current = snap.exists() ? snap.data() : {};
-        const mergedDemandasCustom = mergeFn(current.demandasCustom || {});
-        tx.update(ref, { demandasCustom: mergedDemandasCustom, ...(extraTopLevelPatch || {}) });
-      });
-    } else {
-      // Fallback (não deveria ocorrer em produção, mas evita quebrar se o SDK carregado não expuser
-      // runTransaction por algum motivo): lê e grava em duas chamadas separadas, sem a garantia atômica.
-      const snap = await fb.getDoc(ref);
-      const current = snap.exists() ? snap.data() : {};
-      const mergedDemandasCustom = mergeFn(current.demandasCustom || {});
-      await fb.updateDoc(ref, { demandasCustom: mergedDemandasCustom, ...(extraTopLevelPatch || {}) });
+    // IMPORTANTE — achado ao vivo em produção (27/08/2026): `fb.runTransaction` NÃO é confiável neste
+    // ambiente. Testado diretamente no Firestore real: a transação resolve sem lançar nenhum erro, mas a
+    // escrita simplesmente não chega a ser persistida no servidor (confirmado lendo de volta com
+    // getDocFromServer — o dado nunca aparece, nem mesmo momentaneamente como "pending write" local). Um
+    // `updateDoc` comum, feito logo em seguida com os mesmos dados, persiste normalmente. Por isso essa
+    // função usa deliberadamente o padrão ler-mesclar-gravar em duas chamadas separadas (sem
+    // runTransaction) como mecanismo PRINCIPAL, não como fallback — e confirma a gravação lendo de volta
+    // antes de reportar sucesso, já que aqui já vimos escritas "resolverem" sem realmente acontecer.
+    const snap = await fb.getDoc(ref);
+    const current = snap.exists() ? snap.data() : {};
+    const mergedDemandasCustom = mergeFn(current.demandasCustom || {});
+    const patch = { demandasCustom: mergedDemandasCustom, ...(extraTopLevelPatch || {}) };
+    await fb.updateDoc(ref, patch);
+    // Confirma que a gravação realmente chegou ao servidor antes de reportar sucesso pro chamador — não
+    // basta o updateDoc "resolver", já vimos gravações resolverem sem persistir de fato neste ambiente.
+    const verifySnap = await fb.getDoc(ref);
+    const verifyData = verifySnap.exists() ? verifySnap.data() : {};
+    const persistedOk = Object.keys(mergedDemandasCustom).every(k => JSON.stringify((verifyData.demandasCustom||{})[k]) === JSON.stringify(mergedDemandasCustom[k]));
+    if(!persistedOk){
+      return { ok: false, error: 'A gravação não foi confirmada pelo servidor ao reler o documento logo em seguida — tente novamente.' };
     }
     return { ok: true };
   }catch(e){
