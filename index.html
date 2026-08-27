@@ -993,8 +993,14 @@ const CSAT_AVALIACAO_PARA_NOTA = {
   'bom': 4,
   'otimo': 5,
 };
-function avaliacaoTextoParaNota(str){
-  const nota = CSAT_AVALIACAO_PARA_NOTA[normalizarTextoAvaliacao(str)];
+// Além do texto (Péssimo..Ótimo), também aceita a célula já vir como o número da nota (1 a 5) — comum
+// em exportações de formulário que gravam a nota numérica escolhida em vez do rótulo, ou uma planilha
+// que já converteu o texto pra número numa coluna auxiliar.
+function avaliacaoTextoParaNota(raw){
+  if(typeof raw === 'number' && Number.isInteger(raw) && raw >= 1 && raw <= 5) return raw;
+  const s = String(raw === undefined || raw === null ? '' : raw).trim();
+  if(/^[1-5]$/.test(s)) return Number(s);
+  const nota = CSAT_AVALIACAO_PARA_NOTA[normalizarTextoAvaliacao(raw)];
   return nota || null;
 }
 
@@ -1277,16 +1283,21 @@ function parseCsatAvaliacaoSheet(values){
   if(headerRowIdx === -1) throw new Error('Não foi possível localizar as colunas "Ticket" e "Avaliação" na planilha.');
 
   const porTicket = {};
+  const amostrasIgnoradas = []; // {numero, avaliacaoBruta} — só as primeiras, pra diagnóstico sem poluir a mensagem
   let ignoradas = 0;
   for(let i = headerRowIdx + 1; i < values.length; i++){
     const row = values[i] || [];
     const numero = String(row[colTicket] || '').trim();
     if(!numero) continue;
     const nota = avaliacaoTextoParaNota(row[colAvaliacao]);
-    if(nota === null){ ignoradas++; continue; }
+    if(nota === null){
+      ignoradas++;
+      if(amostrasIgnoradas.length < 15) amostrasIgnoradas.push({numero, avaliacaoBruta: row[colAvaliacao]});
+      continue;
+    }
     porTicket[numero] = nota;
   }
-  return { porTicket, total: Object.keys(porTicket).length, ignoradas };
+  return { porTicket, total: Object.keys(porTicket).length, ignoradas, amostrasIgnoradas };
 }
 
 // Nome (pode vir truncado no cabeçalho da aba, ex.: o Sheets corta nomes de aba longos) da aba de
@@ -8477,7 +8488,7 @@ function DemandasPage({data, actions}){
     const buf = await res.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array', cellDates: true });
     const rows = findCsatSheetRows(wb);
-    const { porTicket, total, ignoradas } = parseCsatAvaliacaoSheet(rows);
+    const { porTicket, total, ignoradas, amostrasIgnoradas } = parseCsatAvaliacaoSheet(rows);
     if(!total) throw new Error('Nenhuma avaliação reconhecida na planilha — confirme se as colunas "Ticket" e "Avaliação" estão preenchidas na aba "' + CSAT_AVALIACAO_SHEET_TAB + '".');
     // Aviso (não bloqueante) quando os números de ticket da planilha não batem com nenhum ticket
     // conhecido (Movidesk + manuais) — nesse caso a sincronização "funciona" (grava tudo em
@@ -8489,7 +8500,13 @@ function DemandasPage({data, actions}){
     const semCorrespondencia = Object.keys(porTicket).filter(n => !numerosConhecidos.has(n));
     actions.importCsatAvaliacao(porTicket);
     const avisos = [];
-    if(ignoradas) avisos.push(`${ignoradas} linha${ignoradas===1?'':'s'} ignorada${ignoradas===1?'':'s'} por ter uma Avaliação não reconhecida (esperado: Péssimo, Ruim, Neutro, Bom ou Ótimo).`);
+    if(ignoradas){
+      // Mostra alguns exemplos concretos (ticket + valor bruto da célula Avaliação) — sem isso, "19
+      // linhas ignoradas" não dá pra investigar; com a amostra dá pra ver na hora se é um problema de
+      // texto (ex.: "Otimo!" com pontuação) ou um formato totalmente diferente do esperado.
+      const amostraIgnoradas = amostrasIgnoradas.slice(0, 6).map(a => `#${a.numero || '(sem número)'}="${a.avaliacaoBruta}"`).join(', ');
+      avisos.push(`${ignoradas} linha${ignoradas===1?'':'s'} ignorada${ignoradas===1?'':'s'} por ter uma Avaliação não reconhecida (esperado: Péssimo, Ruim, Neutro, Bom, Ótimo, ou uma nota de 1 a 5). Exemplos: ${amostraIgnoradas}${ignoradas > amostrasIgnoradas.length ? '...' : ''}.`);
+    }
     if(semCorrespondencia.length){
       const amostra = semCorrespondencia.slice(0, 8).join(', ') + (semCorrespondencia.length > 8 ? '...' : '');
       avisos.push(`${semCorrespondencia.length} de ${total} ticket(s) da planilha de CSAT não têm nenhuma demanda correspondente na base atual (números: ${amostra}) — pode ser um ticket ainda não sincronizado do Movidesk, ou um número de ticket em formato diferente na planilha.`);
