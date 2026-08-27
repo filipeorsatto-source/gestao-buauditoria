@@ -8460,6 +8460,12 @@ function DemandasPage({data, actions}){
   const [syncWarning, setSyncWarning] = useState(null);
   const [novoManualOpen, setNovoManualOpen] = useState(false);
   const [confirmDelManual, setConfirmDelManual] = useState(null); // numero do ticket manual a excluir
+  // Diagnóstico da última sincronização de CSAT (não persistido — só dura enquanto a página estiver
+  // aberta) — guarda o resultado bruto (nota por ticket lida da planilha) para permitir conferir, ticket
+  // a ticket, em qual etapa um CSAT específico eventualmente se perde: (1) não foi lido da planilha,
+  // (2) foi lido mas não gravado em demandasCustom, ou (3) foi gravado mas não aparece na tabela.
+  const [lastCsatSync, setLastCsatSync] = useState(null);
+  const [csatDebugTicket, setCsatDebugTicket] = useState('');
 
   // Sincroniza o CSAT a partir da planilha separada de Avaliação (aba "Resultado da pesquisa de
   // satisf...", colunas "Ticket" e "Avaliação", convertidas numa nota de 1 a 5). Essa planilha é um
@@ -8499,6 +8505,10 @@ function DemandasPage({data, actions}){
     const numerosConhecidos = new Set(merged.map(m => m.numero));
     const semCorrespondencia = Object.keys(porTicket).filter(n => !numerosConhecidos.has(n));
     actions.importCsatAvaliacao(porTicket);
+    // Guarda o resultado bruto desta sincronização (nota lida por ticket, direto da planilha, antes de
+    // qualquer gravação) para o painel de diagnóstico abaixo — permite checar ticket a ticket sem
+    // depender de acesso aos dados reais da planilha/Firestore.
+    setLastCsatSync({ porTicket, total, ignoradas, amostrasIgnoradas, semCorrespondencia, at: new Date().toISOString() });
     const avisos = [];
     if(ignoradas){
       // Mostra alguns exemplos concretos (ticket + valor bruto da célula Avaliação) — sem isso, "19
@@ -8730,6 +8740,56 @@ function DemandasPage({data, actions}){
           )}
         </div>
       </div>
+
+      {lastCsatSync && (
+        <div className="card" style={{fontSize:12.5, padding:'12px 16px'}}>
+          <div style={{fontWeight:600, marginBottom:4}}>Diagnóstico da última sincronização de CSAT</div>
+          <div style={{color:'#8a8fa3', marginBottom:8}}>
+            {lastCsatSync.total} nota{lastCsatSync.total===1?'':'s'} lida{lastCsatSync.total===1?'':'s'} da planilha em {fmtDataAbertura(lastCsatSync.at)}
+            {lastCsatSync.ignoradas ? ` · ${lastCsatSync.ignoradas} linha(s) ignorada(s)` : ''}
+            {lastCsatSync.semCorrespondencia.length ? ` · ${lastCsatSync.semCorrespondencia.length} ticket(s) sem correspondência` : ''}.
+            Digite um número de ticket para conferir, etapa a etapa, onde o CSAT dele está (ou não está).
+          </div>
+          <input
+            type="text"
+            className="upsell-input"
+            style={{maxWidth:180}}
+            placeholder="Nº do ticket (ex.: 2820)"
+            value={csatDebugTicket}
+            onChange={e => setCsatDebugTicket(e.target.value.trim())}
+          />
+          {csatDebugTicket && (() => {
+            const notaPlanilha = lastCsatSync.porTicket[csatDebugTicket];
+            const foiLida = notaPlanilha !== undefined;
+            const custom = (data.demandasCustom || {})[csatDebugTicket];
+            const csatSalvo = custom && custom.csatSheet;
+            const rowFinal = merged.find(m => m.numero === csatDebugTicket);
+            const ocorrencias = merged.filter(m => m.numero === csatDebugTicket).length;
+            return (
+              <ul style={{margin:'10px 0 0', paddingLeft:18, lineHeight:1.7}}>
+                <li>
+                  <strong>1. Nota lida da planilha nesta sincronização:</strong>{' '}
+                  {foiLida ? notaPlanilha : 'nenhuma — o ticket não apareceu com uma Avaliação reconhecida nesta última sincronização (confira se o número/linha existe na planilha e se a Avaliação está preenchida com um valor esperado).'}
+                </li>
+                <li>
+                  <strong>2. Valor gravado em demandasCustom (csatSheet):</strong>{' '}
+                  {csatSalvo !== undefined && csatSalvo !== '' && csatSalvo !== null
+                    ? csatSalvo
+                    : (foiLida ? 'nenhum — a nota foi lida da planilha mas não foi salva; pode ser um problema na gravação, tente sincronizar de novo.' : '(nenhum)')}
+                </li>
+                <li>
+                  <strong>3. Quantas vezes esse número aparece na base de Demandas:</strong> {ocorrencias}
+                  {ocorrencias > 1 ? ' — atenção: esse número está DUPLICADO na base (mais de um ticket com o mesmo número), o que pode causar comportamento inesperado na tabela.' : ''}
+                </li>
+                <li>
+                  <strong>4. Valor final que deveria aparecer na coluna CSAT:</strong>{' '}
+                  {rowFinal ? (rowFinal.csat || '(vazio — confira os passos 1 e 2 acima)') : 'ticket não encontrado na base atual de Demandas.'}
+                </li>
+              </ul>
+            );
+          })()}
+        </div>
+      )}
 
       <div className="card demandas-filters-card">
         <div className="demandas-filter-label">Status <span className="group-card-count">{totalFiltrado} ticket{totalFiltrado===1?'':'s'}</span></div>
