@@ -1298,22 +1298,29 @@ const CSAT_AVALIACAO_SHEET_TAB = 'Resultado da pesquisa de satisf';
 // de aba longos às vezes aparecem cortados de formas diferentes), e cai para a primeira aba em que as
 // colunas "Ticket"/"Avaliação" sejam reconhecidas, ou a primeira aba do arquivo como último recurso —
 // pra não travar a sincronização por completo se o nome da aba mudar.
+// raw:true (não raw:false) é importante aqui: com raw:false o SheetJS devolve o texto FORMATADO da
+// célula (respeitando a formatação numérica aplicada no Excel/Sheets — separador de milhar, casas
+// decimais etc.), que pode não bater com o número puro do ticket ("2.961" ou "2961,00" em vez de
+// "2961"). Isso fazia a coluna Ticket da planilha de CSAT não casar com o número do ticket vindo do
+// Movidesk mesmo quando a sincronização "dava certo" (linhas lidas, mas nenhuma batendo) — com raw:true
+// a célula numérica vem como número puro do JS, sem formatação, igual ao que já é feito para a coluna
+// Número na sincronização do Movidesk (ver transformMovideskRows).
 function findCsatSheetRows(wb){
   const alvo = normalizarTextoAvaliacao(CSAT_AVALIACAO_SHEET_TAB);
   for(const nome of wb.SheetNames){
     const n = normalizarTextoAvaliacao(nome);
     if(n === alvo || n.startsWith(alvo) || alvo.startsWith(n)){
-      return XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: false, defval: null });
+      return XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: true, defval: null });
     }
   }
   for(const nome of wb.SheetNames){
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: false, defval: null });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: true, defval: null });
     try{
       const r = parseCsatAvaliacaoSheet(rows);
       if(r.total > 0) return rows;
     }catch(e){ /* essa aba não tem as colunas "Ticket"/"Avaliação" — tenta a próxima */ }
   }
-  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: null });
+  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null });
 }
 
 const DEMANDAS_SEED = [
@@ -8472,8 +8479,22 @@ function DemandasPage({data, actions}){
     const rows = findCsatSheetRows(wb);
     const { porTicket, total, ignoradas } = parseCsatAvaliacaoSheet(rows);
     if(!total) throw new Error('Nenhuma avaliação reconhecida na planilha — confirme se as colunas "Ticket" e "Avaliação" estão preenchidas na aba "' + CSAT_AVALIACAO_SHEET_TAB + '".');
+    // Aviso (não bloqueante) quando os números de ticket da planilha não batem com nenhum ticket
+    // conhecido (Movidesk + manuais) — nesse caso a sincronização "funciona" (grava tudo em
+    // demandasCustom) mas o CSAT nunca aparece na tabela de Demandas, porque nenhuma linha existente
+    // tem esse número. Cenário mais comum: a coluna Ticket da planilha ficou formatada de um jeito que
+    // não bate mais com o número puro (ex.: texto com espaço/prefixo), ou os tickets avaliados ainda
+    // não foram sincronizados da base do Movidesk.
+    const numerosConhecidos = new Set(merged.map(m => m.numero));
+    const semCorrespondencia = Object.keys(porTicket).filter(n => !numerosConhecidos.has(n));
     actions.importCsatAvaliacao(porTicket);
-    return ignoradas ? `${ignoradas} linha${ignoradas===1?'':'s'} ignorada${ignoradas===1?'':'s'} por ter uma Avaliação não reconhecida (esperado: Péssimo, Ruim, Neutro, Bom ou Ótimo).` : null;
+    const avisos = [];
+    if(ignoradas) avisos.push(`${ignoradas} linha${ignoradas===1?'':'s'} ignorada${ignoradas===1?'':'s'} por ter uma Avaliação não reconhecida (esperado: Péssimo, Ruim, Neutro, Bom ou Ótimo).`);
+    if(semCorrespondencia.length){
+      const amostra = semCorrespondencia.slice(0, 8).join(', ') + (semCorrespondencia.length > 8 ? '...' : '');
+      avisos.push(`${semCorrespondencia.length} de ${total} ticket(s) da planilha de CSAT não têm nenhuma demanda correspondente na base atual (números: ${amostra}) — pode ser um ticket ainda não sincronizado do Movidesk, ou um número de ticket em formato diferente na planilha.`);
+    }
+    return avisos.length ? avisos.join(' ') : null;
   };
 
   const handleSyncMovidesk = async () => {
