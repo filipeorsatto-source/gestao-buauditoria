@@ -9080,7 +9080,7 @@ function DemandaRow({row, devTeam, actions, onRequestDeleteManual}){
         {row.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
       </td>
       <ConcluidoEmCell row={row} actions={actions}/>
-      <td className="demanda-csat">
+      <td className="demanda-csat" title={isManual ? undefined : (fmtEditMetaTooltip(row.editMeta && row.editMeta.csatSheet) || 'CSAT ainda não sincronizado para este ticket — use "Atualizar CSAT".')}>
         {isManual ? (
           <input
             type="number"
@@ -9283,6 +9283,38 @@ function App(){
       const next = updater(prev);
       const patch = {};
       Object.keys(next).forEach(k => { if(next[k] !== prev[k]) patch[k] = next[k]; });
+      if(Object.keys(patch).length){
+        persistPatch(patch).then(ok => {
+          if(!ok) push('Não foi possível salvar. Tente novamente.', 'error');
+          else if(successMsg) push(successMsg);
+        });
+      }
+      return next;
+    });
+  }, [push]);
+
+  // Como `mutate`, mas para escritas em lote que tocam MUITOS tickets de demandasCustom de uma vez (ex.:
+  // sincronização de CSAT, que pode atualizar dezenas de tickets numa única ação). `mutate` grava o campo
+  // demandasCustom INTEIRO via updateDoc — o Firestore substitui o valor do campo por completo, não faz
+  // merge do conteúdo do mapa. Numa ferramenta com múltiplos usuários/abas simultâneas, se outro usuário
+  // editar um ticket diferente (ex.: mudar a Prioridade do ticket X) entre o momento em que esta aba leu
+  // o estado local e o momento em que grava, essa escrita em lote sobrescreveria demandasCustom inteiro
+  // com a versão local (mais antiga) e o outro usuário perderia a edição — mesmo sem nenhum conflito real
+  // no MESMO ticket. Aqui, em vez disso, cada ticket afetado é gravado com um campo em notação de ponto
+  // ("demandasCustom.<numero>.<campo>"), que o Firestore trata como atualização pontual dentro do mapa,
+  // sem tocar nos demais tickets — elimina esse risco de "perda de atualização" em lote.
+  const mutateDemandasCustomGranular = useCallback((numeros, updater, extraTopLevelKeys, successMsg) => {
+    setData(prev => {
+      const next = updater(prev);
+      const patch = {};
+      numeros.forEach(numero => {
+        const val = (next.demandasCustom || {})[numero];
+        if(val === undefined) return;
+        Object.keys(val).forEach(campo => {
+          patch[`demandasCustom.${numero}.${campo}`] = val[campo];
+        });
+      });
+      (extraTopLevelKeys || []).forEach(k => { patch[k] = next[k]; });
       if(Object.keys(patch).length){
         persistPatch(patch).then(ok => {
           if(!ok) push('Não foi possível salvar. Tente novamente.', 'error');
@@ -9676,25 +9708,30 @@ function App(){
     // ticket. Grava em demandasCustom[numero].csatSheet — buildDemandasMerged prioriza esse valor sobre
     // o.csat (placeholder do Movidesk). Tickets sem avaliação na planilha simplesmente não são tocados
     // (mantém o valor anterior, se houver).
-    importCsatAvaliacao: (porTicket) => mutate(d => {
-      const demandasCustom = {...(d.demandasCustom||{})};
-      const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
-      const nowIso = new Date().toISOString();
-      Object.keys(porTicket).forEach(numero => {
-        const prev = demandasCustom[numero] || {};
-        const editMeta = {...(prev._editMeta||{}), csatSheet: {by: who, at: nowIso}};
-        demandasCustom[numero] = {...prev, csatSheet: porTicket[numero], _editMeta: editMeta};
-      });
-      return {
-        ...d,
-        demandasCustom,
-        csatAvaliacaoSync: {
-          by: who,
-          at: nowIso,
-          count: Object.keys(porTicket).length,
-        },
-      };
-    }, `CSAT atualizado (${Object.keys(porTicket).length} ticket${Object.keys(porTicket).length===1?'':'s'})`),
+    importCsatAvaliacao: (porTicket) => mutateDemandasCustomGranular(
+      Object.keys(porTicket),
+      d => {
+        const demandasCustom = {...(d.demandasCustom||{})};
+        const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
+        const nowIso = new Date().toISOString();
+        Object.keys(porTicket).forEach(numero => {
+          const prev = demandasCustom[numero] || {};
+          const editMeta = {...(prev._editMeta||{}), csatSheet: {by: who, at: nowIso}};
+          demandasCustom[numero] = {...prev, csatSheet: porTicket[numero], _editMeta: editMeta};
+        });
+        return {
+          ...d,
+          demandasCustom,
+          csatAvaliacaoSync: {
+            by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+            at: new Date().toISOString(),
+            count: Object.keys(porTicket).length,
+          },
+        };
+      },
+      ['csatAvaliacaoSync'],
+      `CSAT atualizado (${Object.keys(porTicket).length} ticket${Object.keys(porTicket).length===1?'':'s'})`
+    ),
 
     // substitui a base de tickets do Movidesk (puxada do Drive) — compartilhada em tempo real
     importDemandasBase: (rows) => mutate(d => ({
