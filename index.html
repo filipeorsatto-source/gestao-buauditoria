@@ -831,7 +831,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-28.13';
+const APP_BUILD_ID = '2026-08-28.14';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -9046,25 +9046,88 @@ function NovaDemandaManualModal({data, devTeam, actions, onClose}){
   );
 }
 
+// Uma linha de ticket dentro de "Entregas por Data" (compartilhada pelos dois segmentos, Em Aberto e
+// Entregue) — inclui a tag de Classificação ao lado do Cliente quando o ticket tiver uma vinculada
+// (pedido em 28/08/2026), deixando em branco (sem tag) quando não tiver.
+function EntregaPorDataLinha({m, devNameById}){
+  const devNome = m.responsavelDesenvolvimentoId ? devNameById[m.responsavelDesenvolvimentoId] : null;
+  return (
+    <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap'}}>
+      <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
+        <span className="tag tag-client">{m.cliente}</span>
+        {m.classificacao && <span className="tag">{m.classificacao}</span>}
+        <span>{m.assunto || '(sem assunto)'}</span>
+        <span style={{color:'var(--ink-soft)', fontSize:12}}>#{m.numero}</span>
+      </div>
+      <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', fontSize:12, color:'var(--ink-soft)'}}>
+        {m.responsavel && <span title="Responsável Atendimento">Atend.: <strong style={{color:'var(--ink)', fontWeight:600}}>{m.responsavel}</strong></span>}
+        {devNome && <span title="Desenvolvedor Alocado">Dev.: <strong style={{color:'var(--ink)', fontWeight:600}}>{devNome}</strong></span>}
+        {!isEmptyVal(m.csat) && <span title="CSAT">CSAT: <strong style={{color:'var(--ink)', fontWeight:600}}>{m.csat}</strong></span>}
+        {m.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
+      </div>
+    </div>
+  );
+}
+
+// Tabela de um segmento (Em Aberto ou Entregue) dentro do card de um mês — uma linha por dia exato,
+// com as entregas daquele dia dentro da célula.
+function EntregaPorDataTabela({porDia, devNameById}){
+  const dias = Object.keys(porDia).sort();
+  return (
+    <table className="tbl">
+      <thead><tr><th style={{width:110}}>Data</th><th>Entregas</th></tr></thead>
+      <tbody>
+        {dias.map(diaKey => (
+          <tr key={diaKey}>
+            <td style={{whiteSpace:'nowrap', fontWeight:600, verticalAlign:'top'}}>{fmtDataAbertura(diaKey)}</td>
+            <td>
+              <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                {porDia[diaKey].map(m => <EntregaPorDataLinha key={m.numero} m={m} devNameById={devNameById}/>)}
+              </div>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 // Visão de "Entregas por Data": tickets com Prazo definido, agrupados por mês e depois por dia exato —
-// facilita enxergar rapidamente quais entregas estão próximas. Só entram tickets AINDA NÃO concluídos
-// (um ticket já entregue não é mais uma "entrega próxima") e com Prazo preenchido, e respeita os
-// filtros já aplicados na página (recebe `filtered`, não `merged`).
+// facilita enxergar rapidamente quais entregas estão próximas. Dentro de cada mês, os tickets ficam
+// segmentados em duas quebras (pedido em 28/08/2026): "Em Aberto" (tickets ainda não concluídos, pela
+// data do Prazo — mesma lógica de sempre) e "Entregue" (tickets já concluídos com status Resolvido ou
+// Fechado, organizados pela data de entrega — campo "Concluído em" — em vez do Prazo). Isso deixa
+// visível o que o time já entregou naquele mês sempre que o filtro de Status na página permitir ver
+// tickets concluídos (por padrão todos os status entram). Respeita os filtros já aplicados na página
+// (recebe `filtered`, não `merged`).
 function EntregasPorDataSection({filtered, devNameById}){
-  const porMes = useMemo(() => {
-    const comPrazo = filtered.filter(m => m.prazo && !m.concluidoEm);
+  const agruparPorMesEDia = (rows, campoData) => {
     const meses = {};
-    comPrazo.forEach(m => {
-      const mesKey = m.prazo.slice(0, 7); // "YYYY-MM"
-      const diaKey = m.prazo; // "YYYY-MM-DD"
+    rows.forEach(m => {
+      const valor = m[campoData];
+      if(!valor) return;
+      const mesKey = valor.slice(0, 7); // "YYYY-MM"
+      const diaKey = valor.slice(0, 10); // "YYYY-MM-DD"
       meses[mesKey] = meses[mesKey] || {};
       meses[mesKey][diaKey] = meses[mesKey][diaKey] || [];
       meses[mesKey][diaKey].push(m);
     });
     return meses;
-  }, [filtered]);
+  };
 
-  const mesKeys = useMemo(() => Object.keys(porMes).sort(), [porMes]);
+  const porMesAberto = useMemo(
+    () => agruparPorMesEDia(filtered.filter(m => m.prazo && !m.concluidoEm), 'prazo'),
+    [filtered]
+  );
+  const porMesEntregue = useMemo(
+    () => agruparPorMesEDia(filtered.filter(m => m.concluidoEm && (m.statusEfetivo === 'Resolvido' || m.statusEfetivo === 'Fechado')), 'concluidoEm'),
+    [filtered]
+  );
+
+  const mesKeys = useMemo(() => {
+    const keys = new Set([...Object.keys(porMesAberto), ...Object.keys(porMesEntregue)]);
+    return Array.from(keys).sort();
+  }, [porMesAberto, porMesEntregue]);
 
   const fmtMesAno = (mesKey) => {
     const [ano, mes] = mesKey.split('-').map(Number);
@@ -9076,53 +9139,40 @@ function EntregasPorDataSection({filtered, devNameById}){
       <div className="section-block-head">
         <div>
           <div className="section-block-title">Entregas por Data</div>
-          <div className="section-block-desc">Tickets ainda não concluídos com Prazo definido, agrupados por mês e data — facilita enxergar o que está próximo de vencer. Respeita os filtros acima.</div>
+          <div className="section-block-desc">
+            Tickets agrupados por mês e segmentados em <strong>Em Aberto</strong> (ainda não concluídos,
+            pela data do Prazo) e <strong>Entregue</strong> (já concluídos com status Resolvido ou Fechado,
+            pela data de entrega). Respeita os filtros de Status e demais filtros acima.
+          </div>
         </div>
       </div>
       {mesKeys.length === 0 ? (
-        <div className="card"><EmptyState icon={IconClock} title="Nenhuma entrega com prazo pendente"
-          sub="Tickets ainda não concluídos com o campo Prazo preenchido aparecem aqui, organizados por data."/></div>
+        <div className="card"><EmptyState icon={IconClock} title="Nenhuma entrega com prazo pendente ou já concluída"
+          sub="Tickets com o campo Prazo preenchido (em aberto) ou já concluídos (Resolvido/Fechado) aparecem aqui, organizados por data."/></div>
       ) : mesKeys.map(mesKey => {
-        const dias = Object.keys(porMes[mesKey]).sort();
+        const diasAberto = porMesAberto[mesKey];
+        const diasEntregue = porMesEntregue[mesKey];
         return (
           <div className="card" key={mesKey} style={{marginBottom:16}}>
             <div className="section-block-head" style={{padding:'18px 22px 0'}}>
               <div className="section-block-title" style={{fontSize:15}}>{fmtMesAno(mesKey)}</div>
             </div>
-            <div className="table-wrap">
-              <table className="tbl">
-                <thead><tr><th style={{width:110}}>Data</th><th>Entregas</th></tr></thead>
-                <tbody>
-                  {dias.map(diaKey => (
-                    <tr key={diaKey}>
-                      <td style={{whiteSpace:'nowrap', fontWeight:600, verticalAlign:'top'}}>{fmtDataAbertura(diaKey)}</td>
-                      <td>
-                        <div style={{display:'flex', flexDirection:'column', gap:8}}>
-                          {porMes[mesKey][diaKey].map(m => {
-                            const devNome = m.responsavelDesenvolvimentoId ? devNameById[m.responsavelDesenvolvimentoId] : null;
-                            return (
-                              <div key={m.numero} style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, flexWrap:'wrap'}}>
-                                <div style={{display:'flex', alignItems:'center', gap:8, flexWrap:'wrap'}}>
-                                  <span className="tag tag-client">{m.cliente}</span>
-                                  <span>{m.assunto || '(sem assunto)'}</span>
-                                  <span style={{color:'var(--ink-soft)', fontSize:12}}>#{m.numero}</span>
-                                </div>
-                                <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', fontSize:12, color:'var(--ink-soft)'}}>
-                                  {m.responsavel && <span title="Responsável Atendimento">Atend.: <strong style={{color:'var(--ink)', fontWeight:600}}>{m.responsavel}</strong></span>}
-                                  {devNome && <span title="Desenvolvedor Alocado">Dev.: <strong style={{color:'var(--ink)', fontWeight:600}}>{devNome}</strong></span>}
-                                  {!isEmptyVal(m.csat) && <span title="CSAT">CSAT: <strong style={{color:'var(--ink)', fontWeight:600}}>{m.csat}</strong></span>}
-                                  {m.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {diasAberto && (
+              <>
+                <div style={{padding:'14px 22px 0', fontFamily:'var(--font-mono)', fontSize:11, textTransform:'uppercase', letterSpacing:'0.6px', color:'var(--ink-soft)'}}>Em Aberto</div>
+                <div className="table-wrap">
+                  <EntregaPorDataTabela porDia={diasAberto} devNameById={devNameById}/>
+                </div>
+              </>
+            )}
+            {diasEntregue && (
+              <>
+                <div style={{padding:'14px 22px 0', fontFamily:'var(--font-mono)', fontSize:11, textTransform:'uppercase', letterSpacing:'0.6px', color:'var(--positive)'}}>Entregue</div>
+                <div className="table-wrap">
+                  <EntregaPorDataTabela porDia={diasEntregue} devNameById={devNameById}/>
+                </div>
+              </>
+            )}
           </div>
         );
       })}
