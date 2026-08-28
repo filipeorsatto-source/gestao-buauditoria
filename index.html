@@ -625,6 +625,43 @@
   .kpi-hero-detail-label{font-size:10.5px;color:#8B90A8;font-family:var(--font-mono);text-transform:uppercase;margin-bottom:3px;}
   .kpi-hero-detail-value{font-size:14px;font-weight:600;}
 
+  /* REPORT MENSAL (tela de "Acompanhamento de Metas" sem indicador selecionado) — pedido em 27/08/2026
+     pra deixar de ser uma tela vazia/genérica (EmptyState) e virar uma tela própria, no mesmo padrão
+     visual de destaque usado no hero financeiro (.kpi-hero) acima. */
+  .report-hero{
+    background:linear-gradient(135deg, var(--sidebar) 0%, #1B2036 100%);
+    border-radius:var(--radius-lg);padding:34px 36px;color:#fff;position:relative;overflow:hidden;
+    box-shadow:var(--shadow-md);margin-bottom:20px;
+  }
+  .report-hero::after{
+    content:'';position:absolute;top:-70px;right:-70px;width:240px;height:240px;border-radius:50%;
+    background:radial-gradient(circle, rgba(44,90,160,0.4), transparent 70%);
+  }
+  .report-hero-icon{
+    width:46px;height:46px;border-radius:12px;background:rgba(255,255,255,0.08);
+    display:flex;align-items:center;justify-content:center;color:#8FE0C4;margin-bottom:18px;position:relative;
+  }
+  .report-hero-label{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.8px;color:#9BA0B8;margin-bottom:8px;position:relative;}
+  .report-hero-title{font-family:var(--font-display);font-size:29px;font-weight:700;margin:0 0 10px 0;position:relative;}
+  .report-hero-sub{font-size:13.2px;color:#C7CBDB;max-width:640px;line-height:1.6;position:relative;}
+
+  .report-grid{display:grid;grid-template-columns:1.15fr 0.85fr;gap:18px;align-items:start;}
+  @media(max-width:920px){.report-grid{grid-template-columns:1fr;}}
+
+  .report-card-title{font-weight:700;font-size:13.5px;color:var(--ink);margin-bottom:4px;}
+  .report-card-sub{font-size:12px;color:var(--ink-soft);margin-bottom:14px;}
+  .report-feature-item{display:flex;gap:13px;padding:13px 0;border-bottom:1px solid var(--line-soft);}
+  .report-feature-item:last-child{border-bottom:none;padding-bottom:2px;}
+  .report-feature-icon{
+    width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+    flex-shrink:0;color:#fff;
+  }
+  .report-feature-name{font-weight:700;font-size:13px;color:var(--ink);margin-bottom:2px;}
+  .report-feature-desc{font-size:12px;color:var(--ink-soft);line-height:1.5;}
+
+  .report-generate-card .field{margin-bottom:16px;}
+  .report-generate-btn{width:100%;justify-content:center;padding-top:11px;padding-bottom:11px;font-size:13.5px;}
+
   table.pnl-tbl{width:100%;border-collapse:collapse;font-size:12.2px;min-width:820px;}
   table.pnl-tbl th{
     padding:9px 12px;font-size:10.5px;font-family:var(--font-mono);text-transform:uppercase;color:var(--ink-soft);
@@ -794,7 +831,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-27.11';
+const APP_BUILD_ID = '2026-08-28.12';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -5886,7 +5923,11 @@ const RIVIO_PPTX = {
   cardEscuro: '141414',
   lilas: 'B08CF0',
   laranja: 'E08A2E',
-  verde: '1F8A5B',
+  // Vermelho/verde FORTES para sinalizar se um KPI está ou não batendo o budget (pedido em 27/08/2026,
+  // em vez do verde/laranja mais suaves usados na primeira versão do report) — usados em
+  // kpiStatusColorReport, nas tabelas por cliente e no Ranking Individual.
+  vermelho: 'E5342A',
+  verde: '1DA75A',
   linhaClara: 'E3E3E6',
   branco: 'FFFFFF',
 };
@@ -5978,36 +6019,67 @@ function buildReportClienteBreakdown(data, mesN, areaKpiSlugs){
   return {granularSlugs, rows};
 }
 
-// Monta o Slide 7 (Ranking Individual): para cada pessoa, para cada uma das 15 metas do report em que
-// ela está associada (meta.pessoaIds), o Real/Budget "mais específico possível" — por cliente quando o
-// KPI tem granularidade por cliente e a pessoa tem clientes associados (via tarefas — mesmo critério já
-// usado no filtro por pessoa de Gestão de Metas, ver getPessoaClienteNomes), e o valor GLOBAL da empresa
-// quando o KPI é um número único (NPS/Tempo Processamento/Cobertura Produto não entram aqui, mas o
-// mesmo princípio vale caso algum KPI de área não tenha corte por cliente). Critério confirmado com o
-// usuário em 27/08/2026.
-function buildReportPessoaRanking(data, mesN){
-  const allKpiSlugs = REPORT_AREAS.flatMap(a => a.kpis.map(slug => ({slug, area: a.nome})));
+// Monta o Ranking Individual de UMA área (agora um slide por área, no formato de tabela pedido em
+// 27/08/2026 — BGT / REAL / vs BGT % por KPI, uma tabela por área em vez de uma tabela única gigante
+// com as 15 metas): para cada pessoa da área, para cada KPI daquela área em que ela está associada
+// (meta.pessoaIds), o Real/Budget "mais específico possível" — por cliente quando o KPI tem
+// granularidade por cliente e a pessoa tem clientes associados (via tarefas — mesmo critério já usado no
+// filtro por pessoa de Gestão de Metas, ver getPessoaClienteNomes), e o valor GLOBAL da empresa quando o
+// KPI é um número único. Critério confirmado com o usuário em 27/08/2026.
+function buildReportPessoaRankingArea(data, mesN, area){
   const pessoas = (data.pessoas || []).slice().sort((a,b) => a.nome.localeCompare(b.nome, 'pt-BR'));
   const rows = pessoas.map(p => {
     const clienteNomesFilter = getPessoaClienteNomes(p.id, data);
     const valores = {};
-    allKpiSlugs.forEach(({slug}) => {
+    area.kpis.forEach(slug => {
       const goal = getMetaBySlug(data, slug);
       if(!goal || !(goal.pessoaIds||[]).includes(p.id)){ valores[slug] = null; return; }
       valores[slug] = getKpiRealBudgetNoMes(data, slug, mesN, clienteNomesFilter, p.id);
     });
     return {pessoa: p.nome, valores};
-  }).filter(r => allKpiSlugs.some(({slug}) => r.valores[slug]));
-  return {allKpiSlugs, rows};
+  }).filter(r => area.kpis.some(slug => r.valores[slug]));
+  return rows;
 }
 
-// Cor de status (verde = dentro/acima da meta, laranja = fora) de um KPI, considerando que alguns são
-// "quanto menor, melhor" (ver META_MENOR_MELHOR_SLUGS) — cinza quando não há budget definido pra comparar.
+// Série mensal (12 meses do ano corrente) de Real e Budget de um KPI, para o gráfico mês a mês de cada
+// meta nos slides de área (pedido em 27/08/2026) — sempre a visão GLOBAL da empresa (sem filtro de
+// cliente/pessoa), igual ao gráfico que já existe na própria tela do indicador em Acompanhamento de Metas.
+function getKpiSeriesForYear(data, slug){
+  const goal = getMetaBySlug(data, slug);
+  if(!goal) return {real: MONTHS.map(()=>null), budget: MONTHS.map(()=>null)};
+  const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(slug);
+  const realByMonth = getMetaRealizadoByMonth(slug, data, null, null) || {};
+  const budgetByMonth = isExterno ? (getMetaBudgetOverrideByMonth(slug, data, null) || {}) : (goal.budgets[CURRENT_YEAR] || {});
+  return {
+    real: MONTHS.map(m => (realByMonth[m.n] === undefined || realByMonth[m.n] === null) ? null : Number(realByMonth[m.n])),
+    budget: MONTHS.map(m => (budgetByMonth[m.n] === undefined || budgetByMonth[m.n] === null || budgetByMonth[m.n] === '') ? null : Number(budgetByMonth[m.n])),
+  };
+}
+
+// Cor de status (verde forte = dentro/acima da meta, vermelho forte = fora) de um KPI, considerando que
+// alguns são "quanto menor, melhor" (ver META_MENOR_MELHOR_SLUGS) — cinza quando não há budget definido
+// pra comparar. Trocado de verde/laranja pra verde/vermelho fortes em 27/08/2026, a pedido do usuário.
 function kpiStatusColorReport(real, budget, slug){
   if(real === null || real === undefined || budget === null || budget === undefined || budget === '') return RIVIO_PPTX.tintaSoft;
   const menorMelhor = META_MENOR_MELHOR_SLUGS.includes(slug);
   const atingiu = menorMelhor ? Number(real) <= Number(budget) : Number(real) >= Number(budget);
-  return atingiu ? RIVIO_PPTX.verde : RIVIO_PPTX.laranja;
+  return atingiu ? RIVIO_PPTX.verde : RIVIO_PPTX.vermelho;
+}
+
+// Variação percentual do Real em relação ao Budget ("vs BGT %"), sempre com o sinal orientado como
+// "positivo = bom": para KPIs normais (quanto maior melhor), real acima do budget é positivo; para os
+// "quanto menor, melhor" (ver META_MENOR_MELHOR_SLUGS), real ABAIXO do budget é que vira positivo — bate
+// com a cor (verde quando positivo, vermelho quando negativo) usada no Ranking Individual.
+function kpiVsBudgetPct(real, budget, slug){
+  if(real === null || real === undefined || budget === null || budget === undefined || budget === '' || Number(budget) === 0) return null;
+  const menorMelhor = META_MENOR_MELHOR_SLUGS.includes(slug);
+  const pct = ((Number(real) - Number(budget)) / Math.abs(Number(budget))) * 100;
+  return menorMelhor ? -pct : pct;
+}
+function fmtVsBudgetPct(pct){
+  if(pct === null || pct === undefined) return '—';
+  const sign = pct > 0 ? '+' : '';
+  return sign + pct.toLocaleString('pt-BR', {maximumFractionDigits: 0}) + '%';
 }
 
 // Cabeçalho padrão "onde estamos" (ver skill rivio-apresentacoes) + logo Rivio no rodapé direito, em
@@ -6067,12 +6139,11 @@ function addReportSlide1(pptx, areaSummary, mesLabel){
 function addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel){
   const slide = pptx.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
-  addReportHeader(pptx, slide, mesLabel, 'Resultados ' + area.nome + ' · abertura por cliente');
+  addReportHeader(pptx, slide, mesLabel, 'Resultados ' + area.nome + ' · por cliente');
 
   const {granularSlugs, rows} = buildReportClienteBreakdown(data, mesN, area.kpis);
-  const naoGranulares = area.kpis.filter(s => !granularSlugs.includes(s));
 
-  let tableBottomY = 1.7;
+  let tableBottomY = 1.6;
   if(granularSlugs.length && rows.length){
     const headerRow1 = [{text: 'Cliente', options: {bold: true, fill: {color: 'F4F4F5'}, valign: 'middle'}}];
     const headerRow2 = [{text: '', options: {fill: {color: 'F4F4F5'}}}];
@@ -6080,119 +6151,136 @@ function addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel
       const goal = getMetaBySlug(data, slug);
       headerRow1.push({
         text: goal ? goal.titulo : slug,
-        options: {colspan: 2, align: 'center', bold: true, fill: {color: 'F4F4F5'}, fontSize: 10},
+        options: {colspan: 2, align: 'center', bold: true, fill: {color: 'F4F4F5'}, fontSize: 9.5},
       });
-      headerRow2.push({text: 'Real', options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
-      headerRow2.push({text: 'Budget', options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
+      headerRow2.push({text: 'Real', options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 8.5, color: RIVIO_PPTX.tintaSoft}});
+      headerRow2.push({text: 'Budget', options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 8.5, color: RIVIO_PPTX.tintaSoft}});
     });
     const bodyRows = rows.map(r => {
-      const cells = [{text: r.cliente, options: {bold: true, fontSize: 10}}];
+      const cells = [{text: r.cliente, options: {bold: true, fontSize: 9.5}}];
       granularSlugs.forEach(slug => {
         const v = r.valores[slug] || {real: null, budget: null, unidade: 'Absoluto'};
         const cor = kpiStatusColorReport(v.real, v.budget, slug);
-        cells.push({text: fmtMetaValorReport(v.real, v.unidade), options: {align: 'center', fontSize: 10, color: cor}});
-        cells.push({text: fmtMetaValorReport(v.budget, v.unidade), options: {align: 'center', fontSize: 10, color: RIVIO_PPTX.tintaSoft}});
+        cells.push({text: fmtMetaValorReport(v.real, v.unidade), options: {align: 'center', fontSize: 9.5, color: cor, bold: true}});
+        cells.push({text: fmtMetaValorReport(v.budget, v.unidade), options: {align: 'center', fontSize: 9.5, color: RIVIO_PPTX.tintaSoft}});
       });
       return cells;
     });
-    const nCols = 1 + granularSlugs.length * 2;
-    const colW0 = 2.0;
+    const colW0 = 1.8;
     const otherColW = (12.53 - colW0) / (granularSlugs.length * 2);
     const colWs = [colW0, ...Array(granularSlugs.length * 2).fill(otherColW)];
+    const rowH = 0.26;
     slide.addTable([headerRow1, headerRow2, ...bodyRows], {
-      x: 0.4, y: 1.7, w: 12.53, colW: colWs,
+      x: 0.4, y: 1.6, w: 12.53, colW: colWs,
       fontFace: RIVIO_PPTX.fontFace, border: {type: 'solid', color: 'E3E3E6', pt: 0.5},
-      autoPage: false, rowH: 0.32,
+      autoPage: false, rowH,
     });
-    tableBottomY = 1.7 + 0.32 * (2 + bodyRows.length) + 0.25;
+    tableBottomY = 1.6 + rowH * (2 + bodyRows.length) + 0.22;
   } else {
     slide.addText('Nenhum cliente com dado disponível para os KPIs desta área neste mês.', {
-      x: 0.4, y: 1.7, w: 12.53, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 12, color: RIVIO_PPTX.tintaSoft,
+      x: 0.4, y: 1.6, w: 12.53, h: 0.35, fontFace: RIVIO_PPTX.fontFace, fontSize: 11, color: RIVIO_PPTX.tintaSoft,
     });
-    tableBottomY = 1.7 + 0.55;
+    tableBottomY = 1.6 + 0.5;
   }
 
-  if(naoGranulares.length){
-    const areaKpiInfo = areaSummary.find(a => a.nome === area.nome);
-    const notas = naoGranulares.map(slug => {
-      const info = (areaKpiInfo && areaKpiInfo.kpis.find(k => k.slug === slug)) || {};
-      return info.titulo + ' (sem abertura por cliente) — Real: ' + fmtMetaValorReport(info.real, info.unidade) + '  ·  Budget: ' + fmtMetaValorReport(info.budget, info.unidade);
-    }).join('     |     ');
-    slide.addText(notas, {
-      x: 0.4, y: Math.min(tableBottomY, 6.9), w: 12.53, h: 0.5,
-      fontFace: RIVIO_PPTX.fontFace, fontSize: 10.5, italic: true, color: RIVIO_PPTX.tintaSoft,
+  // Gráfico mês a mês (Real x Budget, série própria pra cada uma) de CADA KPI da área — pedido em
+  // 27/08/2026 — inclusive os que não têm abertura por cliente (ex.: Tempo Processamento), que antes só
+  // apareciam como uma nota de texto ao lado da tabela. Sempre a visão global da empresa no ano corrente.
+  const chartsY = Math.min(tableBottomY, 4.7);
+  const chartH = Math.max(1.55, Math.min(2.15, 6.85 - (chartsY + 0.3)));
+  const gap = 0.16;
+  const chartW = (12.53 - gap * (area.kpis.length - 1)) / area.kpis.length;
+  area.kpis.forEach((slug, i) => {
+    const goal = getMetaBySlug(data, slug);
+    const {real, budget} = getKpiSeriesForYear(data, slug);
+    const x = 0.4 + i * (chartW + gap);
+    slide.addText(goal ? goal.titulo : slug, {
+      x, y: chartsY, w: chartW, h: 0.24,
+      fontFace: RIVIO_PPTX.fontFace, fontSize: 10, bold: true, color: RIVIO_PPTX.tinta,
     });
-  }
+    const chartData = [
+      {name: 'Real', labels: MONTHS.map(m => m.label), values: real},
+      {name: 'Budget', labels: MONTHS.map(m => m.label), values: budget},
+    ];
+    slide.addChart(pptx.ChartType.line, chartData, {
+      x, y: chartsY + 0.26, w: chartW, h: chartH,
+      chartColors: [RIVIO_PPTX.azul, '9AA0AE'],
+      lineSize: 2, lineDataSymbol: 'circle', lineDataSymbolSize: 4,
+      showLegend: true, legendPos: 'b', legendFontSize: 7,
+      catAxisLabelFontSize: 7, valAxisLabelFontSize: 7,
+      catAxisLabelColor: RIVIO_PPTX.tintaSoft, valAxisLabelColor: RIVIO_PPTX.tintaSoft,
+    });
+  });
 }
 
-// Slide 7: Ranking Individual — pessoas nas linhas, as 15 metas (agrupadas por área) nas colunas.
-function addReportRankingSlide(pptx, data, mesN, mesLabel){
+// Ranking Individual — agora um slide POR ÁREA (pedido em 27/08/2026, no formato de tabela enviado pelo
+// usuário): cabeçalho de 3 linhas (nome da área · nome do KPI · BGT/REAL/vs BGT), uma linha por pessoa
+// associada a algum KPI daquela área, com o "vs BGT %" sinalizado em verde/vermelho forte.
+function addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel){
   const slide = pptx.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
-  addReportHeader(pptx, slide, mesLabel, 'Ranking Individual · Real x Budget por pessoa');
+  addReportHeader(pptx, slide, mesLabel, 'Ranking Individual · ' + area.nome);
 
-  const {allKpiSlugs, rows} = buildReportPessoaRanking(data, mesN);
+  const rows = buildReportPessoaRankingArea(data, mesN, area);
   if(!rows.length){
-    slide.addText('Nenhuma pessoa está associada a metas do report ainda (ver pessoaIds em Gestão de Metas).', {
+    slide.addText('Nenhuma pessoa está associada às metas de ' + area.nome + ' ainda (ver pessoaIds em Gestão de Metas).', {
       x: 0.4, y: 1.7, w: 12.53, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 12, color: RIVIO_PPTX.tintaSoft,
     });
     return;
   }
 
-  // Cabeçalho de duas linhas: área (colspan pelos kpis daquela área) + abreviação de cada meta (o nome
-  // completo de cada uma fica numa legenda abaixo da tabela, já que a coluna é estreita demais pro texto).
   const headerRow1 = [{text: '', options: {fill: {color: 'F4F4F5'}}}];
-  const headerRow2 = [{text: 'Pessoa', options: {bold: true, fill: {color: 'F4F4F5'}, fontSize: 9, valign: 'middle'}}];
-  REPORT_AREAS.forEach(area => {
-    headerRow1.push({
-      text: area.nome, options: {colspan: area.kpis.length, align: 'center', bold: true, fill: {color: 'F4F4F5'}, fontSize: 9, color: RIVIO_PPTX.azul},
-    });
-    area.kpis.forEach((slug, idx) => {
-      const goal = getMetaBySlug(data, slug);
-      const abrev = 'K' + (headerRow2.length);
-      headerRow2.push({text: abrev, options: {align: 'center', fill: {color: 'FAFAFA'}, fontSize: 8, bold: true}});
+  headerRow1.push({
+    text: area.nome.toUpperCase(), options: {colspan: area.kpis.length * 3, align: 'center', bold: true, fill: {color: 'F4F4F5'}, fontSize: 13, color: RIVIO_PPTX.azul},
+  });
+
+  const headerRow2 = [{text: '', options: {fill: {color: 'F4F4F5'}}}];
+  area.kpis.forEach(slug => {
+    const goal = getMetaBySlug(data, slug);
+    headerRow2.push({
+      text: goal ? goal.titulo.toUpperCase() : slug, options: {colspan: 3, align: 'center', bold: true, fill: {color: 'F4F4F5'}, fontSize: 10},
     });
   });
 
+  const headerRow3 = [{text: 'Pessoa', options: {bold: true, fill: {color: 'DCDCDC'}, fontSize: 9.5, valign: 'middle'}}];
+  area.kpis.forEach(() => {
+    headerRow3.push({text: 'BGT', options: {align: 'center', fill: {color: 'F0F0F0'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
+    headerRow3.push({text: 'REAL', options: {align: 'center', fill: {color: 'F0F0F0'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
+    headerRow3.push({text: 'vs BGT', options: {align: 'center', fill: {color: 'F0F0F0'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
+  });
+
   const bodyRows = rows.map(r => {
-    const cells = [{text: r.pessoa, options: {bold: true, fontSize: 8.5}}];
-    allKpiSlugs.forEach(({slug}) => {
+    const cells = [{text: r.pessoa, options: {bold: true, fontSize: 10}}];
+    area.kpis.forEach(slug => {
       const v = r.valores[slug];
-      if(!v){ cells.push({text: '—', options: {align: 'center', fontSize: 8, color: 'C7C9D1'}}); return; }
-      const cor = kpiStatusColorReport(v.real, v.budget, slug);
-      cells.push({
-        text: fmtMetaValorReport(v.real, v.unidade) + ' / ' + fmtMetaValorReport(v.budget, v.unidade),
-        options: {align: 'center', fontSize: 7.5, color: cor},
-      });
+      if(!v){
+        cells.push({text: '—', options: {align: 'center', fontSize: 9.5, color: 'C7C9D1'}});
+        cells.push({text: '—', options: {align: 'center', fontSize: 9.5, color: 'C7C9D1'}});
+        cells.push({text: '—', options: {align: 'center', fontSize: 9.5, color: 'C7C9D1'}});
+        return;
+      }
+      const pct = kpiVsBudgetPct(v.real, v.budget, slug);
+      const corPct = pct === null ? RIVIO_PPTX.tintaSoft : (pct >= 0 ? RIVIO_PPTX.verde : RIVIO_PPTX.vermelho);
+      cells.push({text: fmtMetaValorReport(v.budget, v.unidade), options: {align: 'center', fontSize: 9.5, color: RIVIO_PPTX.tintaSoft}});
+      cells.push({text: fmtMetaValorReport(v.real, v.unidade), options: {align: 'center', fontSize: 9.5, color: RIVIO_PPTX.tinta, bold: true}});
+      cells.push({text: fmtVsBudgetPct(pct), options: {align: 'center', fontSize: 9.5, bold: true, color: corPct, fill: {color: pct === null ? 'FFFFFF' : (pct >= 0 ? 'E8F7EE' : 'FCEAE8')}}});
     });
     return cells;
   });
 
-  const colW0 = 1.7;
-  const otherColW = (12.53 - colW0) / allKpiSlugs.length;
-  const colWs = [colW0, ...Array(allKpiSlugs.length).fill(otherColW)];
-  slide.addTable([headerRow1, headerRow2, ...bodyRows], {
-    x: 0.4, y: 1.65, w: 12.53, colW: colWs,
+  const colW0 = 1.9;
+  const nDataCols = area.kpis.length * 3;
+  const otherColW = (12.53 - colW0) / nDataCols;
+  const colWs = [colW0, ...Array(nDataCols).fill(otherColW)];
+  slide.addTable([headerRow1, headerRow2, headerRow3, ...bodyRows], {
+    x: 0.4, y: 1.6, w: 12.53, colW: colWs,
     fontFace: RIVIO_PPTX.fontFace, border: {type: 'solid', color: 'E3E3E6', pt: 0.5},
-    autoPage: false, rowH: 0.26,
-  });
-
-  // Legenda: K1, K2, ... -> nome completo da meta, na ordem das colunas (agrupada por área no texto).
-  const legendaTexto = REPORT_AREAS.map(area =>
-    area.nome + ': ' + area.kpis.map((slug, idx) => {
-      const goal = getMetaBySlug(data, slug);
-      const globalIdx = allKpiSlugs.findIndex(k => k.slug === slug);
-      return 'K' + (globalIdx + 1) + '=' + (goal ? goal.titulo : slug);
-    }).join(', ')
-  ).join('   ·   ');
-  const legendaY = 1.65 + 0.26 * (2 + bodyRows.length) + 0.15;
-  slide.addText(legendaTexto, {
-    x: 0.4, y: Math.min(legendaY, 7.0), w: 12.53, h: 0.55,
-    fontFace: RIVIO_PPTX.fontFace, fontSize: 7.5, color: RIVIO_PPTX.tintaSoft, italic: true,
+    autoPage: false, rowH: 0.36,
   });
 }
 
-// Ponto de entrada: monta o .pptx inteiro (7 slides) e dispara o download no navegador do usuário.
+// Ponto de entrada: monta o .pptx inteiro (11 slides: 1 visão geral + 5 abertura por cliente/evolução
+// mensal + 5 ranking individual, um de cada por área) e dispara o download no navegador do usuário.
 async function gerarReportPptx(data, mesN){
   const PptxCtor = window.PptxGenJS;
   if(!PptxCtor) throw new Error('A biblioteca de geração de PPTX não carregou — verifique sua conexão com a internet e tente novamente (ou dê um Ctrl+Shift+R e tente de novo).');
@@ -6210,7 +6298,7 @@ async function gerarReportPptx(data, mesN){
 
   addReportSlide1(pptx, areaSummary, mesLabel);
   REPORT_AREAS.forEach(area => addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel));
-  addReportRankingSlide(pptx, data, mesN, mesLabel);
+  REPORT_AREAS.forEach(area => addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel));
 
   const fileName = 'Report Auditoria - ' + mesNome + ' ' + CURRENT_YEAR + '.pptx';
   await pptx.writeFile({fileName});
@@ -6240,23 +6328,53 @@ function TrackingIndexPage({data}){
     }
   };
 
+  const features = [
+    {icon: IconGrid, cor: '#2C5AA0', nome: 'Visão geral por área', desc: 'Real x Budget dos 15 KPIs das 5 áreas (Deployment, Auditoria, Desenvolvimento, Atendimento e Produto), lado a lado.'},
+    {icon: IconUsers, cor: '#1F8A70', nome: 'Abertura por cliente', desc: 'Um slide por área com a tabela Cliente x KPI e a evolução mês a mês (Real e Budget) de cada indicador.'},
+    {icon: IconTarget, cor: '#8A4FBE', nome: 'Ranking individual', desc: 'Um slide por área com todas as pessoas e o desempenho de cada uma frente ao budget, sinalizado em verde/vermelho.'},
+  ];
+
   return (
-    <div className="card" style={{maxWidth:560}}>
-      <EmptyState icon={IconTrend} title="Report Mensal"
-        sub="Escolha um indicador no menu lateral para ver a página de acompanhamento correspondente, ou gere abaixo o Report Mensal consolidado (.pptx) com os principais KPIs de todas as áreas."/>
-      <div style={{marginTop:18, paddingTop:18, borderTop:'1px solid var(--line-soft)'}}>
-        <div className="field">
-          <label>Mês da análise</label>
-          <select className="select" value={mesRelatorio} onChange={e => setMesRelatorio(Number(e.target.value))}>
-            {MESES_PLANNING.map(m => <option value={m.n} key={m.n}>{m.nome} · {CURRENT_YEAR}</option>)}
-          </select>
+    <div>
+      <div className="report-hero">
+        <div className="report-hero-icon"><IconTrend width="22" height="22"/></div>
+        <div className="report-hero-label">Acompanhamento de Metas</div>
+        <div className="report-hero-title">Report Mensal</div>
+        <div className="report-hero-sub">
+          Escolha um indicador no menu lateral para ver o acompanhamento detalhado dele, ou gere aqui o
+          Report Mensal consolidado em .pptx — com os principais KPIs de todas as áreas, prontos para
+          apresentar, no padrão visual das apresentações Rivio.
         </div>
-        <button type="button" className="btn btn-primary" style={{marginTop:12}} disabled={gerando} onClick={handleGerar}>
-          {gerando ? 'Gerando report…' : 'Gerar Report'}
-        </button>
-        {erro && <div style={{marginTop:10, color:'var(--negative)', fontSize:12.5}}>{erro}</div>}
-        <div className="hint" style={{marginTop:10}}>
-          Gera um .pptx com 7 slides: visão geral por área, abertura por cliente de cada área, e ranking individual — com os dados do mês selecionado.
+      </div>
+
+      <div className="report-grid">
+        <div className="card">
+          <div className="report-card-title">O que o report inclui</div>
+          <div className="report-card-sub">11 slides gerados a partir dos dados já carregados no app — nenhuma configuração extra.</div>
+          {features.map(f => (
+            <div className="report-feature-item" key={f.nome}>
+              <span className="report-feature-icon" style={{background:f.cor}}><f.icon width="17" height="17"/></span>
+              <div>
+                <div className="report-feature-name">{f.nome}</div>
+                <div className="report-feature-desc">{f.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="card report-generate-card">
+          <div className="report-card-title">Gerar report</div>
+          <div className="report-card-sub">O download começa automaticamente assim que o report terminar de ser montado.</div>
+          <div className="field">
+            <label>Mês da análise</label>
+            <select className="select" value={mesRelatorio} onChange={e => setMesRelatorio(Number(e.target.value))}>
+              {MESES_PLANNING.map(m => <option value={m.n} key={m.n}>{m.nome} · {CURRENT_YEAR}</option>)}
+            </select>
+          </div>
+          <button type="button" className="btn btn-primary report-generate-btn" disabled={gerando} onClick={handleGerar}>
+            {gerando ? 'Gerando report…' : 'Gerar Report'}
+          </button>
+          {erro && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erro}</div>}
         </div>
       </div>
     </div>
