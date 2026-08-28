@@ -831,7 +831,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-28.12';
+const APP_BUILD_ID = '2026-08-28.13';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -6202,13 +6202,16 @@ function addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel
       {name: 'Real', labels: MONTHS.map(m => m.label), values: real},
       {name: 'Budget', labels: MONTHS.map(m => m.label), values: budget},
     ];
-    slide.addChart(pptx.ChartType.line, chartData, {
+    slide.addChart(pptx.ChartType.bar, chartData, {
       x, y: chartsY + 0.26, w: chartW, h: chartH,
-      chartColors: [RIVIO_PPTX.azul, '9AA0AE'],
-      lineSize: 2, lineDataSymbol: 'circle', lineDataSymbolSize: 4,
+      barDir: 'col', barGapWidthPct: 35, barOverlapPct: -8,
+      chartColors: [RIVIO_PPTX.azul, 'C7CCD6'],
       showLegend: true, legendPos: 'b', legendFontSize: 7,
       catAxisLabelFontSize: 7, valAxisLabelFontSize: 7,
       catAxisLabelColor: RIVIO_PPTX.tintaSoft, valAxisLabelColor: RIVIO_PPTX.tintaSoft,
+      catAxisLineShow: false, valAxisLineShow: false,
+      valGridLine: {color: RIVIO_PPTX.linhaClara, style: 'solid', size: 0.75},
+      catGridLine: {style: 'none'},
     });
   });
 }
