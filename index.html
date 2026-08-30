@@ -862,7 +862,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-30.26';
+const APP_BUILD_ID = '2026-08-30.27';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -6410,7 +6410,9 @@ class CanvasPdfPptx{
   set company(v){ this._company = v; }
   set title(v){ this._title = v; }
   addSlide(){
-    const slide = new CanvasPdfSlide(this._layout.width, this._layout.height, PDF_CANVAS_DPI);
+    // dpi maior que o padrão pro One-Pager (ver gerarOnePagerPng) — a imagem final é usada quase em
+    // página cheia dentro de um Word, então pede mais resolução do que os slides do Report/Planning.
+    const slide = new CanvasPdfSlide(this._layout.width, this._layout.height, this._dpi || PDF_CANVAS_DPI);
     this.slides.push(slide);
     return slide;
   }
@@ -6452,6 +6454,17 @@ function fmtMetaValorReport(v, unidade){
   if(unidade === '%') return fmtPercent(v, 1);
   if(unidade === 'R$') return fmtCurrency(v) || '—';
   return v.toLocaleString('pt-BR', {maximumFractionDigits: 1});
+}
+// Pedido em 30/08/2026: no card "visão geral por área" (Slide 1 do Report Mensal, e também no
+// One-Pager, que reaproveita o mesmo conteúdo), o valor de BUDGET sempre aparece arredondado, sem casa
+// decimal — inclusive quando o budget "linearizado" do mês em andamento (ver
+// linearizarBudgetContasFinalizadasReport) dá um número quebrado (ex.: 96,8 contas). O valor Real
+// continua com a formatação normal (fmtMetaValorReport), só o Budget dessa tela é que arredonda.
+function fmtMetaValorReportArredondado(v, unidade){
+  if(v === null || v === undefined || v === '') return '—';
+  if(unidade === '%') return fmtPercent(v, 0);
+  if(unidade === 'R$') return fmtCurrency(Math.round(Number(v))) || '—';
+  return Math.round(Number(v)).toLocaleString('pt-BR');
 }
 
 // Pedido em 30/08/2026: no Report Mensal (gerarReportPptx — Slide 1, abertura por cliente e ranking
@@ -6644,13 +6657,102 @@ function addReportSlide1(pptx, areaSummary, mesLabel){
         x: x + 0.12, y: y + 0.34, w: colW - 0.24, h: 0.42,
         fontFace: RIVIO_PPTX.fontFace, fontSize: 21, color: cor, bold: true, valign: 'top',
       });
-      slide.addText('Budget: ' + fmtMetaValorReport(kpi.budget, kpi.unidade), {
+      slide.addText('Budget: ' + fmtMetaValorReportArredondado(kpi.budget, kpi.unidade), {
         x: x + 0.12, y: y + cardH - 0.28, w: colW - 0.24, h: 0.24,
         fontFace: RIVIO_PPTX.fontFace, fontSize: 9, color: RIVIO_PPTX.tintaSoft, valign: 'bottom',
       });
       y += cardH + 0.1;
     });
   });
+}
+
+/* ---------------------------------------------------------------
+   ONE-PAGER EM PNG (pedido em 30/08/2026) — mesmo conteúdo do Slide 1 do Report Mensal (visão geral por
+   área), só que desenhado direto num <canvas> em formato RETRATO (não passa pelo PptxGenJS, nem monta um
+   .pptx/.pdf de verdade) e exportado como uma única imagem .png — pensado pra colar quase em página
+   cheia num documento Word, como pedido pelo usuário. Reaproveita CanvasPdfSlide (o mesmo "gêmeo" em
+   canvas usado no export em PDF) só que com dimensões de página A4/carta em retrato em vez do slide
+   16:9, e uma versão compacta do cabeçalho/cards (colunas mais estreitas, fontes menores) — o layout de
+   5 colunas lado a lado do Slide 1 não cabe do jeito landscape original numa página estreita e alta.
+--------------------------------------------------------------- */
+function downloadDataUrl(dataUrl, fileName){
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function addOnePagerContent(slide, areaSummary, mesLabel, pageW, pageH){
+  // Cabeçalho compacto (mesma linguagem visual do addReportHeader, redimensionado pra largura da página
+  // retrato em vez dos 13.333in do slide 16:9).
+  slide.addShape('ellipse', {x: 0.5, y: 0.42, w: 0.3, h: 0.3, fill: {color: RIVIO_PPTX.branco}, line: {color: '9AA0AE', width: 1.25}});
+  slide.addShape('ellipse', {x: 0.5 + 0.3/2 - 0.028, y: 0.42 + 0.3/2 - 0.028, w: 0.056, h: 0.056, fill: {color: RIVIO_PPTX.azul}, line: {type: 'none'}});
+  slide.addShape('line', {x: 0.95, y: 0.57, w: 1.1, h: 0, line: {color: 'CCCCCC', width: 1}});
+  slide.addText('Report Mensal · ' + mesLabel, {x: 2.15, y: 0.38, w: pageW - 2.65, h: 0.34, fontFace: RIVIO_PPTX.fontFace, fontSize: 12, color: RIVIO_PPTX.tinta, valign: 'middle'});
+  slide.addText('Resultados do mês · visão geral por área', {x: 0.5, y: 0.86, w: pageW - 1.0, h: 0.6, fontFace: RIVIO_PPTX.fontFace, fontSize: 21, color: RIVIO_PPTX.tinta, valign: 'middle'});
+
+  const startX = 0.5, startY = 1.62, gap = 0.14;
+  const totalW = pageW - startX * 2;
+  const colW = (totalW - gap * (areaSummary.length - 1)) / areaSummary.length;
+  const bottomMargin = 0.6;
+
+  areaSummary.forEach((area, i) => {
+    const x = startX + i * (colW + gap);
+    slide.addText(area.nome.toUpperCase(), {
+      x, y: startY, w: colW, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 8, color: RIVIO_PPTX.azul, bold: true,
+    });
+    let y = startY + 0.46;
+    const cardH = (pageH - bottomMargin - y) / area.kpis.length - 0.09;
+    area.kpis.forEach(kpi => {
+      slide.addShape('roundRect', {
+        x, y, w: colW, h: cardH, rectRadius: 0.06,
+        fill: {color: RIVIO_PPTX.branco}, line: {color: RIVIO_PPTX.linhaClara, width: 1},
+        shadow: {type: 'outer', color: '0A0A0A', opacity: 0.14, blur: 5, offset: 2, angle: 90},
+      });
+      const cor = kpiStatusColorReport(kpi.real, kpi.budget, kpi.slug);
+      slide.addText(kpi.titulo, {
+        x: x + 0.08, y: y + 0.06, w: colW - 0.16, h: 0.36,
+        fontFace: RIVIO_PPTX.fontFace, fontSize: 6.6, color: RIVIO_PPTX.tintaSoft, valign: 'top',
+      });
+      slide.addText(fmtMetaValorReport(kpi.real, kpi.unidade), {
+        x: x + 0.08, y: y + 0.42, w: colW - 0.16, h: 0.4,
+        fontFace: RIVIO_PPTX.fontFace, fontSize: 13.5, color: cor, bold: true, valign: 'top',
+      });
+      slide.addText('Budget: ' + fmtMetaValorReportArredondado(kpi.budget, kpi.unidade), {
+        x: x + 0.08, y: y + cardH - 0.22, w: colW - 0.16, h: 0.2,
+        fontFace: RIVIO_PPTX.fontFace, fontSize: 6.2, color: RIVIO_PPTX.tintaSoft, valign: 'bottom',
+      });
+      y += cardH + 0.09;
+    });
+  });
+
+  const logoW = 0.85, logoH = 0.2;
+  slide.addImage({data: 'image/png;base64,' + RIVIO_LOGO_PRETO_B64, x: pageW - 0.5 - logoW, y: pageH - 0.35 - logoH, w: logoW, h: logoH});
+}
+
+// Ponto de entrada do botão "Gerar One-Pager": monta a MESMA visão geral por área do Slide 1 do Report
+// Mensal (mesmos dados/cálculos — buildReportAreaSummary), só que numa página única em retrato
+// (formato carta, 8.5×11in, resolução alta pensada pra colar quase em página cheia num Word) e baixa
+// como .png em vez de .pptx/.pdf.
+async function gerarOnePagerPng(data, mesN){
+  await preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64);
+
+  const PAGE_W = 8.5, PAGE_H = 11, ONE_PAGER_DPI = 220;
+  const pptxLike = new CanvasPdfPptx();
+  pptxLike.defineLayout({width: PAGE_W, height: PAGE_H});
+  pptxLike._dpi = ONE_PAGER_DPI;
+  const slide = pptxLike.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+
+  const mesNome = mesPlanningNome(mesN);
+  const mesLabel = mesNome + '/' + CURRENT_YEAR;
+  const areaSummary = buildReportAreaSummary(data, mesN);
+  addOnePagerContent(slide, areaSummary, mesLabel, PAGE_W, PAGE_H);
+
+  const dataUrl = slide.canvas.toDataURL('image/png');
+  downloadDataUrl(dataUrl, 'One-Pager - ' + mesNome + ' ' + CURRENT_YEAR + '.png');
 }
 
 // Slides 2 a 6: uma área por slide, com uma tabela Cliente x KPI (Real/Budget) para os KPIs que têm
@@ -7579,6 +7681,24 @@ function TrackingIndexPage({data}){
     }
   };
 
+  const [gerandoOnePager, setGerandoOnePager] = useState(false);
+  const [erroOnePager, setErroOnePager] = useState('');
+  // Terceiro gerador (pedido em 30/08/2026): a MESMA visão geral por área do Slide 1 do Report Mensal,
+  // só que como uma única imagem .png em formato retrato — pra colar quase em página cheia num
+  // documento Word. Não depende do seletor de formato PPTX/PDF acima (esse botão sempre gera .png).
+  const handleGerarOnePager = async () => {
+    setGerandoOnePager(true);
+    setErroOnePager('');
+    try{
+      await gerarOnePagerPng(data, mesRelatorio);
+    }catch(e){
+      console.error('Erro ao gerar One-Pager', e);
+      setErroOnePager((e && e.message) || 'Não foi possível gerar o one-pager. Tente novamente.');
+    }finally{
+      setGerandoOnePager(false);
+    }
+  };
+
   const features = [
     {icon: IconGrid, cor: '#2C5AA0', nome: 'Visão geral por área', desc: 'Real x Budget dos 15 KPIs das 5 áreas (Deployment, Auditoria, Desenvolvimento, Atendimento e Produto), lado a lado.'},
     {icon: IconUsers, cor: '#1F8A70', nome: 'Abertura por cliente', desc: 'Um slide por área com a tabela Cliente x KPI e a evolução mês a mês (Real e Budget) de cada indicador.'},
@@ -7638,6 +7758,12 @@ function TrackingIndexPage({data}){
             {gerandoPlanning ? 'Gerando planning…' : 'Gerar Planning'}
           </button>
           {erroPlanning && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroPlanning}</div>}
+
+          <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:10}} disabled={gerandoOnePager} onClick={handleGerarOnePager}>
+            {gerandoOnePager ? 'Gerando one-pager…' : 'Gerar One-Pager'}
+          </button>
+          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Visão geral por área (mesmo conteúdo do 1º slide do Report), em uma única imagem .png, em formato retrato — pronta para colar num documento.</div>
+          {erroOnePager && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePager}</div>}
         </div>
       </div>
     </div>
