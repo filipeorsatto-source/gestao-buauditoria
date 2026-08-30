@@ -17,6 +17,13 @@
      isso este script (só este) vem do jsdelivr, que serve o pacote do npm diretamente e foi confirmado
      funcionando ao vivo. Não "corrigir" isso de volta para cdnjs sem antes testar a URL de verdade.  -->
 <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+<!-- Export em PDF do Report Mensal/Planning (pedido em 30/08/2026): como o PptxGenJS acima só sabe
+     gravar .pptx, quando o usuário escolhe "PDF" no seletor de formato os mesmos slides são desenhados
+     num <canvas> (ver CanvasPdfPptx/CanvasPdfSlide, que imitam a API do PptxGenJS usada pelas funções
+     addXSlide já existentes) e cada canvas vira uma página de imagem dentro de um PDF via jsPDF — o PDF
+     final tem o texto "achatado" em imagem (não é selecionável/editável), mas fica fiel ao layout, sem
+     depender de nenhum serviço externo de conversão. jsPDF está disponível no cdnjs normalmente. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
   import {
@@ -855,7 +862,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-30.25';
+const APP_BUILD_ID = '2026-08-30.26';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -6112,6 +6119,317 @@ const RIVIO_PPTX = {
   branco: 'FFFFFF',
 };
 
+/* ---------------------------------------------------------------
+   EXPORTAÇÃO EM PDF (pedido em 30/08/2026) — "gêmeo" em <canvas> do PptxGenJS
+   -----------------------------------------------------------------
+   O PptxGenJS não sabe gravar .pdf (só .pptx). Pra oferecer PDF sem depender de nenhum serviço externo
+   de conversão, as classes abaixo (CanvasPdfPptx/CanvasPdfSlide) imitam a MESMA fatia da API do
+   PptxGenJS que as funções addReportSlide1/addPlanning*Slide/etc. já usam (addSlide, addText, addShape,
+   addImage, addTable, addChart, ShapeType, ChartType) — só que desenhando num <canvas> em vez de montar
+   XML do PowerPoint. Assim, TODAS as funções addXSlide já existentes funcionam sem nenhuma alteração,
+   não importa se recebem um PptxGenJS de verdade ou um destes objetos "de mentira": só quem CRIA o objeto
+   pptx (gerarReportPptx/gerarPlanningPptx) e quem finaliza o arquivo (writeFile vs. salvar como PDF)
+   precisa saber a diferença. Cada slide vira uma imagem (canvas -> JPEG) e cada imagem vira uma página do
+   PDF (via jsPDF) — o texto fica "achatado" (não é selecionável), mas o layout sai fiel ao do .pptx.
+--------------------------------------------------------------- */
+const PDF_CANVAS_DPI = 140; // pixels por polegada do canvas de cada slide — qualidade boa sem pesar demais
+const __pdfImageCache = {}; // chave: mesma string passada em addImage({data}) — pré-carregada antes de gerar os slides
+
+function preloadPdfImage(dataSemPrefixo){
+  return new Promise((resolve, reject) => {
+    if(__pdfImageCache[dataSemPrefixo]){ resolve(__pdfImageCache[dataSemPrefixo]); return; }
+    const img = new Image();
+    img.onload = () => { __pdfImageCache[dataSemPrefixo] = img; resolve(img); };
+    img.onerror = () => reject(new Error('Falha ao carregar uma imagem embutida do report para o PDF.'));
+    img.src = 'data:' + dataSemPrefixo;
+  });
+}
+
+class CanvasPdfSlide{
+  constructor(widthIn, heightIn, dpi){
+    this.dpi = dpi;
+    this.widthIn = widthIn;
+    this.heightIn = heightIn;
+    this.canvas = document.createElement('canvas');
+    this.canvas.width = Math.round(widthIn * dpi);
+    this.canvas.height = Math.round(heightIn * dpi);
+    this.ctx = this.canvas.getContext('2d');
+    this.ctx.fillStyle = '#ffffff';
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  }
+  px(v){ return (v || 0) * this.dpi; }
+  pt(v){ return this.px((v || 0) / 72); } // pontos (fonte/linha, como no PptxGenJS) -> px
+
+  set background(bg){
+    if(bg && bg.color){
+      this.ctx.fillStyle = '#' + bg.color;
+      this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+  }
+
+  _roundRectPath(x, y, w, h, r){
+    const ctx = this.ctx;
+    r = Math.max(0, Math.min(r, w / 2, h / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  addShape(shapeType, opts){
+    const ctx = this.ctx;
+    const x = this.px(opts.x), y = this.px(opts.y), w = this.px(opts.w), h = this.px(opts.h);
+    ctx.save();
+    if(shapeType === 'line'){
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + w, y + h);
+      ctx.lineWidth = Math.max(1, this.pt(opts.line && opts.line.width || 1));
+      ctx.strokeStyle = '#' + ((opts.line && opts.line.color) || '000000');
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    if(opts.shadow){
+      ctx.shadowColor = 'rgba(0,0,0,' + (opts.shadow.opacity != null ? opts.shadow.opacity : 0.2) + ')';
+      ctx.shadowBlur = this.pt(opts.shadow.blur || 0);
+      ctx.shadowOffsetY = this.pt(opts.shadow.offset || 0);
+    }
+    if(shapeType === 'ellipse'){
+      ctx.beginPath();
+      ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+    } else { // rect ou roundRect
+      const r = shapeType === 'roundRect' ? this.px(opts.rectRadius || 0) : 0;
+      this._roundRectPath(x, y, w, h, r);
+    }
+    if(opts.fill && opts.fill.color){ ctx.fillStyle = '#' + opts.fill.color; ctx.fill(); }
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0; // sombra só na área preenchida, não na borda
+    if(opts.line && opts.line.type !== 'none' && opts.line.color){
+      ctx.lineWidth = Math.max(0.5, this.pt(opts.line.width || 1));
+      ctx.strokeStyle = '#' + opts.line.color;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  addImage(opts){
+    const img = __pdfImageCache[opts.data];
+    if(!img) return; // não pré-carregada — só usado pras logos, sempre pré-carregadas antes de montar os slides
+    this.ctx.drawImage(img, this.px(opts.x), this.px(opts.y), this.px(opts.w), this.px(opts.h));
+  }
+
+  // Monta a fonte CSS equivalente ao par fontFace/fontSize/bold/italic do PptxGenJS.
+  _fontFor(style){
+    const sizePx = Math.max(1, this.pt(style.fontSize || 12));
+    return (style.italic ? 'italic ' : '') + (style.bold ? 'bold ' : '') + sizePx.toFixed(1) + 'px "' + (style.fontFace || 'Arial') + '", Arial, sans-serif';
+  }
+
+  // addText aceita tanto uma string simples quanto um array de "runs" ({text, options}) com estilos
+  // diferentes por trecho (usado, por ex., em "Meta Contas Finalizadas: <valor em negrito>"). Faz quebra
+  // de linha automática (wrap) respeitando a largura w, e alinhamento horizontal/vertical dentro de w×h.
+  addText(text, opts){
+    const ctx = this.ctx;
+    const x0 = this.px(opts.x), y0 = this.px(opts.y), w = this.px(opts.w), h = this.px(opts.h);
+    if(opts.fill && opts.fill.color){ ctx.fillStyle = '#' + opts.fill.color; ctx.fillRect(x0, y0, w, h); }
+
+    const runs = Array.isArray(text) ? text : [{text: text, options: {}}];
+    const paragraphs = [];
+    let currentPara = [];
+    runs.forEach(run => {
+      const style = {...opts, ...(run.options || {})};
+      const runText = run.text != null ? String(run.text) : '';
+      const partes = runText.split('\n');
+      partes.forEach((parte, idx) => {
+        if(idx > 0){ paragraphs.push(currentPara); currentPara = []; }
+        parte.split(/(\s+)/).filter(s => s.length).forEach(word => currentPara.push({word, style}));
+      });
+      if(run.options && run.options.breakLine){ paragraphs.push(currentPara); currentPara = []; }
+    });
+    paragraphs.push(currentPara);
+
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    const lines = [];
+    paragraphs.forEach(para => {
+      let currentLine = [], currentWidth = 0;
+      if(!para.length){ lines.push({tokens: [], width: 0}); return; }
+      para.forEach(tok => {
+        ctx.font = this._fontFor(tok.style);
+        const wWord = ctx.measureText(tok.word).width;
+        if(/^\s+$/.test(tok.word)){
+          if(currentLine.length){ currentLine.push(tok); currentWidth += wWord; }
+          return;
+        }
+        if(currentWidth + wWord > w && currentLine.length){
+          lines.push({tokens: currentLine, width: currentWidth});
+          currentLine = [tok]; currentWidth = wWord;
+        } else {
+          currentLine.push(tok); currentWidth += wWord;
+        }
+      });
+      lines.push({tokens: currentLine, width: currentWidth});
+    });
+
+    const lineHeight = Math.max(1, this.pt((opts.fontSize || 12) * 1.22));
+    const totalH = lineHeight * lines.length;
+    let startY;
+    if(opts.valign === 'middle') startY = y0 + (h - totalH) / 2;
+    else if(opts.valign === 'bottom') startY = y0 + h - totalH;
+    else startY = y0;
+
+    lines.forEach((line, i) => {
+      const ly = startY + i * lineHeight + lineHeight * 0.78;
+      let lx;
+      if(opts.align === 'center') lx = x0 + (w - line.width) / 2;
+      else if(opts.align === 'right') lx = x0 + w - line.width;
+      else lx = x0;
+      line.tokens.forEach(tok => {
+        ctx.font = this._fontFor(tok.style);
+        ctx.fillStyle = '#' + (tok.style.color || '000000');
+        ctx.fillText(tok.word, lx, ly);
+        lx += ctx.measureText(tok.word).width;
+      });
+    });
+  }
+
+  // Tabela genérica (cabeçalho + linhas), com suporte a colspan e estilo por célula — cobre os 4 usos de
+  // addTable no Report/Planning (abertura por cliente, ranking individual, demandas por cliente).
+  addTable(rows, opts){
+    const ctx = this.ctx;
+    const x0 = this.px(opts.x), y0 = this.px(opts.y);
+    const colWsIn = opts.colW && opts.colW.length ? opts.colW : null;
+    const nCols = colWsIn ? colWsIn.length : Math.max(1, ...rows.map(r => r.reduce((sum, c) => sum + ((c && c.options && c.options.colspan) || 1), 0)));
+    const colWsPx = (colWsIn || Array(nCols).fill((opts.w || 10) / nCols)).map(v => this.px(v));
+    const rowHsPx = Array.isArray(opts.rowH) ? opts.rowH.map(v => this.px(v)) : rows.map(() => this.px(opts.rowH || 0.3));
+
+    let y = y0;
+    rows.forEach((row, ri) => {
+      const rh = rowHsPx[ri] != null ? rowHsPx[ri] : rowHsPx[rowHsPx.length - 1];
+      let x = x0, colIdx = 0;
+      row.forEach(cellRaw => {
+        const cell = (cellRaw && typeof cellRaw === 'object' && 'text' in cellRaw) ? cellRaw : {text: cellRaw, options: {}};
+        const cOpts = cell.options || {};
+        const span = cOpts.colspan || 1;
+        const cellW = colWsPx.slice(colIdx, colIdx + span).reduce((a, b) => a + b, 0);
+        if(cOpts.fill && cOpts.fill.color){ ctx.fillStyle = '#' + cOpts.fill.color; ctx.fillRect(x, y, cellW, rh); }
+        if(opts.border){
+          ctx.strokeStyle = '#' + (opts.border.color || 'CCCCCC');
+          ctx.lineWidth = Math.max(0.5, this.pt(opts.border.pt || 0.5));
+          ctx.strokeRect(x, y, cellW, rh);
+        }
+        this.addText(cell.text != null ? String(cell.text) : '', {
+          x: x / this.dpi + 0.02, y: y / this.dpi, w: cellW / this.dpi - 0.04, h: rh / this.dpi,
+          fontFace: opts.fontFace, fontSize: cOpts.fontSize || opts.fontSize || 9,
+          bold: cOpts.bold, italic: cOpts.italic, color: cOpts.color || '333333',
+          align: cOpts.align || 'left', valign: 'middle',
+        });
+        x += cellW;
+        colIdx += span;
+      });
+      y += rh;
+    });
+  }
+
+  // Gráfico de barras agrupadas (Real x Budget por mês) — único tipo de gráfico usado no Report
+  // (addReportAreaClienteSlide). Aproximação visual do gráfico do PptxGenJS: barras + grade + rótulos de
+  // categoria + legenda, sem pretender ser pixel-a-pixel idêntico.
+  addChart(chartType, chartData, opts){
+    const ctx = this.ctx;
+    const x0 = this.px(opts.x), y0 = this.px(opts.y), w = this.px(opts.w), h = this.px(opts.h);
+    const legendH = opts.showLegend ? this.px(0.22) : 0;
+    const axisLabelH = this.px(0.2);
+    const plotH = h - legendH - axisLabelH;
+    const series = chartData || [];
+    const labels = (series[0] && series[0].labels) || [];
+    const nCats = Math.max(1, labels.length);
+    const allVals = series.flatMap(s => (s.values || []).filter(v => v !== null && v !== undefined));
+    const maxVal = Math.max(1, ...allVals, 0);
+    const groupW = w / nCats;
+    const barGap = groupW * 0.14;
+    const barW = Math.max(1, (groupW - barGap * 2) / Math.max(1, series.length));
+
+    if(opts.valGridLine && opts.valGridLine.style !== 'none'){
+      ctx.strokeStyle = '#' + (opts.valGridLine.color || 'DDDDDD');
+      ctx.lineWidth = 1;
+      for(let g = 0; g <= 4; g++){
+        const gy = y0 + plotH - (plotH * g / 4);
+        ctx.beginPath(); ctx.moveTo(x0, gy); ctx.lineTo(x0 + w, gy); ctx.stroke();
+      }
+    }
+
+    series.forEach((s, si) => {
+      ctx.fillStyle = '#' + ((opts.chartColors && opts.chartColors[si]) || '2C5AA0');
+      (s.values || []).forEach((v, ci) => {
+        if(v === null || v === undefined) return;
+        const barH = maxVal ? (v / maxVal) * plotH : 0;
+        const bx = x0 + ci * groupW + barGap + si * barW;
+        const by = y0 + plotH - barH;
+        ctx.fillRect(bx, by, barW, Math.max(0, barH));
+      });
+    });
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.font = this.pt(opts.catAxisLabelFontSize || 7).toFixed(1) + 'px Arial';
+    ctx.fillStyle = '#' + (opts.catAxisLabelColor || '888888');
+    labels.forEach((lab, ci) => {
+      ctx.fillText(String(lab), x0 + ci * groupW + groupW / 2, y0 + plotH + this.px(0.14));
+    });
+
+    if(opts.showLegend){
+      const swatchGap = this.px(0.9);
+      let lx = x0 + w / 2 - (series.length * swatchGap) / 2;
+      const ly = y0 + plotH + axisLabelH + this.px(0.04);
+      ctx.textAlign = 'left';
+      series.forEach((s, si) => {
+        ctx.fillStyle = '#' + ((opts.chartColors && opts.chartColors[si]) || '2C5AA0');
+        ctx.fillRect(lx, ly, this.px(0.12), this.px(0.12));
+        ctx.fillStyle = '#333333';
+        ctx.font = this.pt(opts.legendFontSize || 7).toFixed(1) + 'px Arial';
+        ctx.fillText(s.name, lx + this.px(0.16), ly + this.px(0.11));
+        lx += swatchGap;
+      });
+    }
+    ctx.textAlign = 'left';
+  }
+}
+
+class CanvasPdfPptx{
+  constructor(){
+    this.slides = [];
+    this.ShapeType = {rect: 'rect', roundRect: 'roundRect', ellipse: 'ellipse', line: 'line'};
+    this.ChartType = {bar: 'bar'};
+    this._layout = {width: 13.333, height: 7.5};
+  }
+  defineLayout(opts){ this._layout = {width: opts.width, height: opts.height}; }
+  set layout(_v){ /* no-op — o tamanho já vem de defineLayout, chamado sempre antes */ }
+  set author(v){ this._author = v; }
+  set company(v){ this._company = v; }
+  set title(v){ this._title = v; }
+  addSlide(){
+    const slide = new CanvasPdfSlide(this._layout.width, this._layout.height, PDF_CANVAS_DPI);
+    this.slides.push(slide);
+    return slide;
+  }
+  // Converte cada slide (canvas) numa página de imagem do PDF final, na mesma proporção 16:9 usada no
+  // .pptx, e dispara o download — mesmo "contrato" externo de pptx.writeFile({fileName}).
+  async salvarComoPdf(fileName){
+    const jsPDFCtor = window.jspdf && window.jspdf.jsPDF;
+    if(!jsPDFCtor) throw new Error('A biblioteca de geração de PDF não carregou — verifique sua conexão com a internet e tente novamente (ou dê um Ctrl+Shift+R e tente de novo).');
+    const doc = new jsPDFCtor({orientation: 'landscape', unit: 'in', format: [this._layout.width, this._layout.height]});
+    this.slides.forEach((slide, i) => {
+      if(i > 0) doc.addPage([this._layout.width, this._layout.height], 'landscape');
+      const imgData = slide.canvas.toDataURL('image/jpeg', 0.92);
+      doc.addImage(imgData, 'JPEG', 0, 0, this._layout.width, this._layout.height);
+    });
+    if(this._title) doc.setProperties({title: this._title, author: this._author || '', creator: this._company || ''});
+    doc.save(fileName);
+  }
+}
+
 // As 15 metas cobertas pelo report, agrupadas nas 5 áreas — mesma ordem/agrupamento pedido em
 // 27/08/2026 (Slide 1 e Ranking Individual). Propositalmente NÃO inclui as metas de área "Geral" (NPS,
 // Margem Bruta/Ticket Médio), que ficaram fora do pedido original.
@@ -6136,6 +6454,27 @@ function fmtMetaValorReport(v, unidade){
   return v.toLocaleString('pt-BR', {maximumFractionDigits: 1});
 }
 
+// Pedido em 30/08/2026: no Report Mensal (gerarReportPptx — Slide 1, abertura por cliente e ranking
+// individual), o budget de "Contas Finalizadas" usado pra comparar com o real precisa ser proporcional
+// ao dia do mês quando o mês escolhido pro report é o mês CORRENTE (ainda em andamento) — senão o KPI
+// fica sinalizado em vermelho o mês inteiro, até o último dia, mesmo estando no ritmo certo. Ex.: budget
+// cheio do mês = 100, hoje é dia 15 de um mês de 31 dias -> budget comparável vira 100 × 15/31 ≈ 48,4.
+// Quando o mês do report já é um mês FECHADO (anterior ao corrente), ou ainda nem começou (futuro), usa
+// o budget cheio normalmente — só o mês em andamento precisa da régua linear. Escopo: só o slug
+// 'contas-finalizadas' (único citado pelo usuário) e só dentro do Report Mensal — não mexe no budget
+// "oficial" mostrado na tela de Gestão de Metas nem no gerador do Planning (que usa outro caminho de
+// dados, getClienteBudgetComFallback, propositalmente não tocado aqui).
+function linearizarBudgetContasFinalizadasReport(budgetCheio, slug, mesN){
+  if(slug !== 'contas-finalizadas') return budgetCheio;
+  if(budgetCheio === null || budgetCheio === undefined || budgetCheio === '') return budgetCheio;
+  const hoje = new Date();
+  const mesAtual = hoje.getMonth() + 1;
+  if(mesN !== mesAtual || hoje.getFullYear() !== CURRENT_YEAR) return budgetCheio; // mês fechado ou futuro: budget cheio
+  const diasNoMes = new Date(hoje.getFullYear(), mesAtual, 0).getDate();
+  const diaAtual = hoje.getDate();
+  return Number(budgetCheio) * (diaAtual / diasNoMes);
+}
+
 // Real + Budget de uma meta num mês específico, com filtro opcional por cliente/pessoa — encapsula a
 // escolha entre getMetaBudgetOverrideByMonth (metas com budget nativo por cliente/tela própria) e
 // goal.budgets (as demais), do mesmo jeito que GoalDetailPage/GoalClienteMesTable já fazem.
@@ -6149,7 +6488,7 @@ function getKpiRealBudgetNoMes(data, slug, mesN, clienteNomesFilter, pessoaId){
     : (goal.budgets[CURRENT_YEAR] || {});
   return {
     real: realByMonth ? realByMonth[mesN] : null,
-    budget: budgetByMonth ? budgetByMonth[mesN] : null,
+    budget: linearizarBudgetContasFinalizadasReport(budgetByMonth ? budgetByMonth[mesN] : null, slug, mesN),
     unidade: goal.unidadeMedida,
     titulo: goal.titulo,
   };
@@ -6192,7 +6531,7 @@ function buildReportClienteBreakdown(data, mesN, areaKpiSlugs){
         const flatBudgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(slug, data, null) : (goal.budgets[CURRENT_YEAR] || {});
         budget = flatBudgetByMonth ? flatBudgetByMonth[mesN] : null;
       }
-      valores[slug] = {real, budget, unidade: goal ? goal.unidadeMedida : 'Absoluto'};
+      valores[slug] = {real, budget: linearizarBudgetContasFinalizadasReport(budget, slug, mesN), unidade: goal ? goal.unidadeMedida : 'Absoluto'};
     });
     return {cliente: c.nome, valores};
   });
@@ -6464,7 +6803,19 @@ function addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel){
 
 // Ponto de entrada: monta o .pptx inteiro (11 slides: 1 visão geral + 5 abertura por cliente/evolução
 // mensal + 5 ranking individual, um de cada por área) e dispara o download no navegador do usuário.
-async function gerarReportPptx(data, mesN){
+// Cria o objeto "pptx" (PptxGenJS de verdade, ou o CanvasPdfPptx "de mentira" — ver bloco acima) de
+// acordo com o formato escolhido pelo usuário (pedido em 30/08/2026: seletor PPTX/PDF ao lado do mês,
+// tanto no Report Mensal quanto no Planning). Usado por gerarReportPptx e gerarPlanningPptx.
+function criarPptxDestino(formato, titulo){
+  if(formato === 'pdf'){
+    const pptx = new CanvasPdfPptx();
+    pptx.defineLayout({name: 'RIVIO_16X9', width: 13.333, height: 7.5});
+    pptx.layout = 'RIVIO_16X9';
+    pptx.author = 'Painel Auditoria — Rivio';
+    pptx.company = 'Rivio';
+    pptx.title = titulo;
+    return pptx;
+  }
   const PptxCtor = window.PptxGenJS;
   if(!PptxCtor) throw new Error('A biblioteca de geração de PPTX não carregou — verifique sua conexão com a internet e tente novamente (ou dê um Ctrl+Shift+R e tente de novo).');
   const pptx = new PptxCtor();
@@ -6472,7 +6823,32 @@ async function gerarReportPptx(data, mesN){
   pptx.layout = 'RIVIO_16X9';
   pptx.author = 'Painel Auditoria — Rivio';
   pptx.company = 'Rivio';
-  pptx.title = 'Report Mensal — Auditoria';
+  pptx.title = titulo;
+  return pptx;
+}
+
+// Grava o arquivo final no formato escolhido — mesmo "contrato" externo (dispara o download no
+// navegador) nos dois casos, só troca a extensão e o mecanismo por trás.
+async function finalizarExportacao(pptx, fileNameSemExtensao, formato){
+  if(formato === 'pdf'){
+    await pptx.salvarComoPdf(fileNameSemExtensao + '.pdf');
+  } else {
+    await pptx.writeFile({fileName: fileNameSemExtensao + '.pptx'});
+  }
+}
+
+async function gerarReportPptx(data, mesN, formato){
+  if(formato === 'pdf'){
+    // As únicas imagens usadas no Report/Planning são as 2 logos (preta/branca) — pré-carrega as duas
+    // ANTES de montar os slides, porque addImage do CanvasPdfSlide precisa ser síncrono (desenha direto
+    // no canvas), diferente do addImage do PptxGenJS (que só referencia os dados, sem decodificar nada
+    // na hora).
+    await Promise.all([
+      preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64),
+      preloadPdfImage('image/png;base64,' + RIVIO_LOGO_BRANCO_B64),
+    ]);
+  }
+  const pptx = criarPptxDestino(formato, 'Report Mensal — Auditoria');
 
   const mesNome = mesPlanningNome(mesN);
   const mesLabel = mesNome + '/' + CURRENT_YEAR;
@@ -6483,8 +6859,7 @@ async function gerarReportPptx(data, mesN){
   REPORT_AREAS.forEach(area => addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel));
   REPORT_AREAS.forEach(area => addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel));
 
-  const fileName = 'Report Auditoria - ' + mesNome + ' ' + CURRENT_YEAR + '.pptx';
-  await pptx.writeFile({fileName});
+  await finalizarExportacao(pptx, 'Report Auditoria - ' + mesNome + ' ' + CURRENT_YEAR, formato);
 }
 
 
@@ -7108,15 +7483,14 @@ function addPlanningProdutoSlide(pptx, data, mesN, mesLabel){
   });
 }
 
-async function gerarPlanningPptx(data, mesN){
-  const PptxCtor = window.PptxGenJS;
-  if(!PptxCtor) throw new Error('A biblioteca de geração de PPTX não carregou — verifique sua conexão com a internet e tente novamente (ou dê um Ctrl+Shift+R e tente de novo).');
-  const pptx = new PptxCtor();
-  pptx.defineLayout({name: 'RIVIO_16X9', width: 13.333, height: 7.5});
-  pptx.layout = 'RIVIO_16X9';
-  pptx.author = 'Painel Auditoria — Rivio';
-  pptx.company = 'Rivio';
-  pptx.title = 'Plano de Trabalho do Mês — Rivio';
+async function gerarPlanningPptx(data, mesN, formato){
+  if(formato === 'pdf'){
+    await Promise.all([
+      preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64),
+      preloadPdfImage('image/png;base64,' + RIVIO_LOGO_BRANCO_B64),
+    ]);
+  }
+  const pptx = criarPptxDestino(formato, 'Plano de Trabalho do Mês — Rivio');
 
   const mesNome = mesPlanningNome(mesN);
   const mesLabel = mesNome + '/' + CURRENT_YEAR;
@@ -7155,8 +7529,7 @@ async function gerarPlanningPptx(data, mesN){
 
   addPlanningProdutoSlide(pptx, data, mesN, mesLabel);
 
-  const fileName = 'Planning - ' + mesNome + ' ' + CURRENT_YEAR + '.pptx';
-  await pptx.writeFile({fileName});
+  await finalizarExportacao(pptx, 'Planning - ' + mesNome + ' ' + CURRENT_YEAR, formato);
 }
 
 
@@ -7172,30 +7545,34 @@ function TrackingIndexPage({data}){
   const [erro, setErro] = useState('');
   const [gerandoPlanning, setGerandoPlanning] = useState(false);
   const [erroPlanning, setErroPlanning] = useState('');
+  // Pedido em 30/08/2026: além do mês, escolher o formato de exportação — PPTX (como sempre foi) ou PDF
+  // (cada slide "fotografado" e virando uma página de imagem dentro do PDF — ver CanvasPdfPptx). Um único
+  // seletor vale pros dois botões (Gerar Report e Gerar Planning).
+  const [formatoExport, setFormatoExport] = useState('pptx');
 
   const handleGerar = async () => {
     setGerando(true);
     setErro('');
     try{
-      await gerarReportPptx(data, mesRelatorio);
+      await gerarReportPptx(data, mesRelatorio, formatoExport);
     }catch(e){
-      console.error('Erro ao gerar Report PPTX', e);
+      console.error('Erro ao gerar Report', e);
       setErro((e && e.message) || 'Não foi possível gerar o report. Tente novamente.');
     }finally{
       setGerando(false);
     }
   };
 
-  // Segundo gerador (pedido em 29/08/2026): monta o "Plano de Trabalho do Mês" em .pptx a partir do
-  // mesmo mês escolhido no dropdown acima — reaproveita mesRelatorio, mas mantém seu próprio estado de
-  // carregamento/erro para não interferir com o botão "Gerar Report".
+  // Segundo gerador (pedido em 29/08/2026): monta o "Plano de Trabalho do Mês" a partir do mesmo mês
+  // escolhido no dropdown acima — reaproveita mesRelatorio e formatoExport, mas mantém seu próprio estado
+  // de carregamento/erro para não interferir com o botão "Gerar Report".
   const handleGerarPlanning = async () => {
     setGerandoPlanning(true);
     setErroPlanning('');
     try{
-      await gerarPlanningPptx(data, mesRelatorio);
+      await gerarPlanningPptx(data, mesRelatorio, formatoExport);
     }catch(e){
-      console.error('Erro ao gerar Planning PPTX', e);
+      console.error('Erro ao gerar Planning', e);
       setErroPlanning((e && e.message) || 'Não foi possível gerar o planning. Tente novamente.');
     }finally{
       setGerandoPlanning(false);
@@ -7216,9 +7593,8 @@ function TrackingIndexPage({data}){
         <div className="report-hero-title">Report Mensal</div>
         <div className="report-hero-sub">
           Escolha um indicador no menu lateral para ver o acompanhamento detalhado dele, ou gere aqui o
-          Report Mensal ou o Planning do mês, ambos consolidados em .pptx — com os principais KPIs e a
-          estrutura de trabalho de todas as áreas, prontos para apresentar, no padrão visual das
-          apresentações Rivio.
+          Report Mensal ou o Planning do mês, em .pptx ou .pdf — com os principais KPIs e a estrutura de
+          trabalho de todas as áreas, prontos para apresentar, no padrão visual das apresentações Rivio.
         </div>
       </div>
 
@@ -7244,6 +7620,13 @@ function TrackingIndexPage({data}){
             <label>Mês da análise</label>
             <select className="select" value={mesRelatorio} onChange={e => setMesRelatorio(Number(e.target.value))}>
               {MESES_PLANNING.map(m => <option value={m.n} key={m.n}>{m.nome} · {CURRENT_YEAR}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <label>Formato de exportação</label>
+            <select className="select" value={formatoExport} onChange={e => setFormatoExport(e.target.value)}>
+              <option value="pptx">PowerPoint (.pptx)</option>
+              <option value="pdf">PDF (.pdf)</option>
             </select>
           </div>
           <button type="button" className="btn btn-primary report-generate-btn" disabled={gerando} onClick={handleGerar}>
