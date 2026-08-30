@@ -844,7 +844,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-29.22';
+const APP_BUILD_ID = '2026-08-29.23';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3839,19 +3839,19 @@ function runMigrations(parsed){
       // inserir as funções padrão se o usuário apagar alguma delas de propósito depois.
       //
       // ACHADO AO VIVO (29/08/2026): usuário reportou checkbox de "Cobertura Produto" que "pisca e volta"
-      // (marca por um instante e desmarca sozinho) — mas SÓ nas funções do catálogo padrão (PRODUTO_
-      // FUNCOES_SEED); uma função que ele mesmo cadastrou pela UI ficava marcada normalmente. Causa: essa
-      // semeadura usava uid() (id ALEATÓRIO) toda vez que rodava. Ela só devia rodar uma vez (guardada por
-      // produtoFuncoesSeeded), mas nada garante isso 100% nesse ambiente — este handler roda a cada
-      // snapshot do Firestore, inclusive o primeiro, que pode vir do cache local (persistentLocalCache)
-      // ANTES do dado real do servidor chegar; se esse primeiro snapshot (do cache, desatualizado) ainda
-      // não tinha o flag marcado, a semeadura rodava de novo com um lote INTEIRO de ids novos, tornando
-      // órfão qualquer check já salvo sob os ids antigos assim que o snapshot seguinte (com esse novo
-      // lote local) chegasse — o check que o usuário acabara de marcar deixava de bater com o id que a
-      // tela passa a mostrar. Corrigido em duas frentes: (1) id determinístico (slugifyId, baseado em
-      // categoria+descrição) — mesmo se essa semeadura rodar mais de uma vez, gera sempre os MESMOS ids;
-      // (2) checagem por CONTEÚDO (ids já existentes), não só pelo flag — mesmo numa execução redundante,
-      // não duplica linha nem troca o id de uma função já presente.
+      // nas funções do catálogo padrão — corrigido com id determinístico (slugifyId) + checagem por
+      // conteúdo (ver abaixo). Depois disso, apareceu um SEGUNDO sintoma: excluir ou editar uma função do
+      // catálogo padrão "voltava sozinha" pra versão original. Causa: este bloco calcula a semeadura AQUI
+      // só pra exibição LOCAL imediata (pra quem abre o app pela 1ª vez já ver o catálogo, antes mesmo da
+      // escrita confirmar) — mas ele não é mais responsável por PERSISTIR isso. Antes, esse resultado
+      // entrava no mesmo "patch" genérico de migração, gravado com uma escrita CEGA (persistPatch, sem
+      // reler o servidor no momento exato da escrita); se essa escrita saísse computada a partir de um
+      // snapshot antigo — por exemplo, de antes de o usuário excluir ou editar uma função — ela
+      // sobrescrevia produtoFuncoes inteiro com a versão de antes da ação, desfazendo-a. A persistência
+      // real e seed agora é feita por ensureProdutoFuncoesSeededOnce (ver acima, perto de persistPatch),
+      // que lê o servidor bem no momento da escrita e nunca mexe em produtoFuncoes se já estiver semeado
+      // — as chaves produtoFuncoes/produtoFuncoesSeeded são explicitamente excluídas do patch de migração
+      // logo abaixo (ver onSnapshot), então elas não são gravadas às cegas nunca mais.
       if(!parsed.produtoFuncoesSeeded){
         const existentes = new Set((parsed.produtoFuncoes||[]).map(f => f.id));
         const faltando = PRODUTO_FUNCOES_SEED
@@ -3861,7 +3861,8 @@ function runMigrations(parsed){
           parsed.produtoFuncoes = [...(parsed.produtoFuncoes||[]), ...faltando];
         }
         parsed.produtoFuncoesSeeded = true;
-        changed = true;
+        // (Não marca `changed=true` aqui de propósito — ver comentário acima. A persistência desses 2
+        // campos é feita à parte, com leitura fresca no momento da escrita, por ensureProdutoFuncoesSeededOnce.)
       }
       return {data: parsed, changed};
 }
@@ -3915,6 +3916,56 @@ async function ensureFirestoreSeeded(){
     return seed;
   }
   return null;
+}
+
+// Semeia produtoFuncoes/produtoFuncoesSeeded (catálogo padrão de Cobertura Produto) de forma SEGURA —
+// ver achado ao vivo em 29/08/2026 acima (comentário perto de runMigrations) sobre o bug do checkbox
+// "pisca e volta". Depois de corrigir isso com id determinístico, apareceu um segundo sintoma: excluir
+// ou editar uma função do catálogo padrão "voltava sozinha" pra versão original. Causa: essa semeadura
+// vivia dentro de runMigrations, que roda a CADA snapshot do Firestore (não só uma vez) e persistia via
+// persistPatch — uma escrita CEGA (sem reler o servidor no momento exato da escrita), usando um "patch"
+// calculado em cima de um snapshot que podia já estar desatualizado quando a escrita de fato saía (ex.:
+// o usuário tinha acabado de editar ou excluir uma função havia poucos instantes). Se essa escrita cega
+// saísse DEPOIS da edição/exclusão do usuário, ela sobrescrevia o campo produtoFuncoes inteiro com a
+// versão antiga (de antes da edição/exclusão) — desfazendo a ação do usuário.
+// Esta função, ao contrário, roda UMA VEZ por sessão desta aba (guardada por
+// produtoFuncoesSeedAttemptedGlobal) e faz leitura-cálculo-escrita-confirmação num único ciclo curto,
+// sempre a partir do estado MAIS FRESCO do servidor lido bem no momento da escrita — nunca a partir de
+// um snapshot antigo guardado em memória. Além disso, se o servidor já tiver produtoFuncoesSeeded=true
+// (achado logo na leitura fresca), ela NÃO MEXE em produtoFuncoes de jeito nenhum — respeitando pra
+// sempre qualquer edição ou exclusão que o usuário já tenha feito no catálogo padrão.
+let produtoFuncoesSeedAttemptedGlobal = false;
+async function ensureProdutoFuncoesSeededOnce(){
+  if(produtoFuncoesSeedAttemptedGlobal) return;
+  produtoFuncoesSeedAttemptedGlobal = true;
+  try{
+    const fb = await waitForFirebase();
+    const ref = await getAppDataDocRef();
+    const snap = await fb.getDoc(ref);
+    const current = snap.exists() ? snap.data() : {};
+    // Já foi semeado de verdade alguma vez (mesmo que em outra sessão/dia) — não mexe em produtoFuncoes
+    // nunca mais, pra não reverter exclusões/edições feitas pelo usuário desde então.
+    if(current.produtoFuncoesSeeded) return;
+    const existentes = new Set((current.produtoFuncoes || []).map(f => f.id));
+    const faltando = PRODUTO_FUNCOES_SEED
+      .map(f => ({id: slugifyId('pf', f.categoria + '|' + f.descricao), ...f}))
+      .filter(f => !existentes.has(f.id));
+    const patch = {
+      produtoFuncoes: faltando.length ? [...(current.produtoFuncoes || []), ...faltando] : (current.produtoFuncoes || []),
+      produtoFuncoesSeeded: true,
+    };
+    await fb.updateDoc(ref, patch);
+    const verifySnap = await fb.getDoc(ref);
+    const verifyData = verifySnap.exists() ? verifySnap.data() : {};
+    const ok = verifyData.produtoFuncoesSeeded === true && deepEqual(verifyData.produtoFuncoes, patch.produtoFuncoes);
+    if(!ok){
+      console.error('Semeadura de funções de produto não confirmada pelo servidor — tentará de novo na próxima sessão.');
+      produtoFuncoesSeedAttemptedGlobal = false;
+    }
+  }catch(e){
+    console.error('Erro ao semear funções de produto', e);
+    produtoFuncoesSeedAttemptedGlobal = false;
+  }
 }
 
 async function persistPatch(patch){
@@ -10846,6 +10897,10 @@ function App(){
     (async () => {
       await ensureFirestoreSeeded();
       if(cancelled) return;
+      // Semeadura seura do catálogo de Cobertura Produto — à parte do bundle genérico de migração
+      // abaixo, de propósito (ver ensureProdutoFuncoesSeededOnce e o comentário em runMigrations sobre
+      // o achado ao vivo de 29/08/2026: excluir/editar uma função do catálogo padrão "voltava sozinha").
+      ensureProdutoFuncoesSeededOnce();
       const fb = await waitForFirebase();
       const ref = await getAppDataDocRef();
       unsub = fb.onSnapshot(ref, snap => {
@@ -10859,27 +10914,17 @@ function App(){
           // Escreve só as chaves de topo que a migração de fato alterou (mesma lógica de diff do
           // mutate()) — nunca o objeto inteiro — para não arriscar sobrescrever, com dados potencialmente
           // desatualizados, campos que o usuário possa estar editando ao mesmo tempo em outra parte do app.
+          // produtoFuncoes/produtoFuncoesSeeded ficam de FORA de propósito — sua persistência é feita à
+          // parte por ensureProdutoFuncoesSeededOnce, com leitura fresca do servidor no momento exato da
+          // escrita (ver comentário acima); incluir esses 2 campos aqui reintroduziria a escrita CEGA
+          // (baseada num snapshot que pode já estar desatualizado) que causava o bug de excluir/editar
+          // uma função do catálogo padrão e ela "voltar sozinha".
           const patch = {};
-          Object.keys(migrated).forEach(k => { if(migrated[k] !== raw[k]) patch[k] = migrated[k]; });
-          if(Object.keys(patch).length){
-            // Confirma lendo de volta antes de considerar a migração "feita nesta aba" — sem isso,
-            // `migratedOnceGlobal` travava true mesmo quando a escrita não confirmava de verdade no
-            // servidor, e a migração nunca mais tentava de novo nesta aba (só no próximo reload
-            // completo, que reseta essa variável). Ver achado ao vivo de 29/08/2026 acima.
-            persistPatch(patch).then(async (ok) => {
-              let verified = ok;
-              if(ok){
-                try{
-                  const fb2 = await waitForFirebase();
-                  const ref2 = await getAppDataDocRef();
-                  const verifySnap = await fb2.getDoc(ref2);
-                  const verifyData = verifySnap.exists() ? verifySnap.data() : {};
-                  verified = Object.keys(patch).every(k => deepEqual(verifyData[k], patch[k]));
-                }catch(e){ verified = false; }
-              }
-              if(!verified) migratedOnceGlobal = false;
-            });
-          }
+          Object.keys(migrated).forEach(k => {
+            if(k === 'produtoFuncoes' || k === 'produtoFuncoesSeeded') return;
+            if(migrated[k] !== raw[k]) patch[k] = migrated[k];
+          });
+          if(Object.keys(patch).length) persistPatch(patch);
         }
       }, err => {
         console.error('Firestore sync error', err);
