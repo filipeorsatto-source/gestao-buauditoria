@@ -738,6 +738,12 @@
   }
   .cobertura-check:hover{border-color:var(--accent);}
   .cobertura-check.checked{background:var(--positive);border-color:var(--positive);color:#fff;}
+  .cobertura-cat-head{display:flex;align-items:center;gap:10px;}
+  .cobertura-cat-toggle{
+    display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;
+    border:1.5px solid rgba(255,255,255,0.45);font-size:13px;line-height:1;flex:none;
+  }
+  .cobertura-cat-pct{margin-left:auto;font-family:var(--font-mono);font-weight:600;font-size:10.5px;text-transform:none;letter-spacing:0.02em;color:rgba(255,255,255,0.85);}
 
   /* DEMANDAS */
   .demandas-filters-card{padding:16px 18px 18px;margin-bottom:16px;}
@@ -844,7 +850,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-29.23';
+const APP_BUILD_ID = '2026-08-30.24';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -8284,6 +8290,24 @@ function ProdutoFuncoesPage({data, actions}){
 
   const isChecked = (funcaoId, clienteId) => !!(checks[funcaoId] && checks[funcaoId][clienteId]);
 
+  // Pedido em 30/08/2026: cada categoria vira uma linha "recolhível" (drill down opcional pras funções)
+  // com o "%" de cobertura da categoria (checks / (funções da categoria × clientes)) mostrado à direita
+  // do nome. Por padrão todas as categorias começam expandidas (comportamento igual ao anterior).
+  const [colapsadas, setColapsadas] = useState({});
+  const toggleCategoria = (categoria) => setColapsadas(prev => ({...prev, [categoria]: !prev[categoria]}));
+
+  const statsPorCategoria = useMemo(() => {
+    const map = {};
+    categorias.forEach(categoria => {
+      const funcoesCategoria = funcoes.filter(f => f.categoria === categoria);
+      const total = funcoesCategoria.length * clientesCols.length;
+      let checados = 0;
+      funcoesCategoria.forEach(f => clientesCols.forEach(c => { if(isChecked(f.id, c.id)) checados++; }));
+      map[categoria] = { total, checados, pct: total ? (checados / total * 100) : null };
+    });
+    return map;
+  }, [categorias, funcoes, clientesCols, checks]);
+
   // KPIs "atuais" — calculados ao vivo a partir da grade de checks, refletem o estado presente (não um
   // fechamento de mês, que fica nas tabelas manuais de Realizado/Budget abaixo).
   const totalFields = funcoes.length * clientesCols.length;
@@ -8354,12 +8378,23 @@ function ProdutoFuncoesPage({data, actions}){
                 </tr>
               </thead>
               <tbody>
-                {categorias.map(categoria => (
+                {categorias.map(categoria => {
+                  const isCollapsed = !!colapsadas[categoria];
+                  const stats = statsPorCategoria[categoria] || {pct: null};
+                  return (
                   <React.Fragment key={categoria}>
-                    <tr className="cobertura-base-row">
-                      <td colSpan={clientesCols.length + 2}>{categoria}</td>
+                    <tr className="cobertura-base-row" style={{cursor:'pointer'}} onClick={()=>toggleCategoria(categoria)} title={isCollapsed ? 'Clique para expandir' : 'Clique para recolher'}>
+                      <td colSpan={clientesCols.length + 2}>
+                        <div className="cobertura-cat-head">
+                          <span className="cobertura-cat-toggle">{isCollapsed ? '+' : '−'}</span>
+                          <span>{categoria}</span>
+                          <span className="cobertura-cat-pct">
+                            {stats.pct !== null ? fmtNumber(stats.pct.toFixed(0)) + '% cobertas' : 'Sem clientes'}
+                          </span>
+                        </div>
+                      </td>
                     </tr>
-                    {funcoes.filter(f => f.categoria === categoria).map(f => (
+                    {!isCollapsed && funcoes.filter(f => f.categoria === categoria).map(f => (
                       <tr className="cobertura-item-row" key={f.id}>
                         <td>{f.descricao}</td>
                         {clientesCols.map(c => (
@@ -8382,7 +8417,8 @@ function ProdutoFuncoesPage({data, actions}){
                       </tr>
                     ))}
                   </React.Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
