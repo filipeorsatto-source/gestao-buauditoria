@@ -844,7 +844,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-29.21';
+const APP_BUILD_ID = '2026-08-29.22';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3019,6 +3019,21 @@ function initials(name){
   return (parts[0][0]+parts[parts.length-1][0]).toUpperCase();
 }
 function uid(){ return 'id_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4); }
+
+// Id DETERMINÍSTICO a partir de um texto (categoria+descrição) — usado pra semear catálogos fixos (ex.:
+// PRODUTO_FUNCOES_SEED) com o MESMO id sempre que essa mesma entrada for processada, ao contrário de
+// uid() (aleatório). Ver comentário em runMigrations/produtoFuncoesSeeded (achado ao vivo em 29/08/2026)
+// pro motivo: se o flag que marca "já semeei" nunca fica confirmado como persistido no servidor (uma
+// aba fecha antes da escrita confirmar, um snapshot antigo do cache local do Firestore é processado
+// antes do dado real chegar, etc.), a semeadura roda de novo — com uid() aleatório isso gera um NOVO
+// lote de ids a cada execução, órfãos dos checks/edições já salvos sob os ids antigos (o check "pisca e
+// volta" pro usuário, porque o id que ele marcou na tela não é mais o id que aparece depois do próximo
+// snapshot). Com id determinístico, rodar a semeadura de novo por engano produz os MESMOS ids de sempre
+// — os checks continuam batendo, e o filtro "já existe esse id" abaixo evita duplicar a linha.
+function slugifyId(prefix, text){
+  const norm = String(text||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/(^-+|-+$)/g,'');
+  return prefix + '_' + norm;
+}
 function fmtNumber(v){
   const n = Number(v)||0;
   return n.toLocaleString('pt-BR', {maximumFractionDigits: 2});
@@ -3822,8 +3837,29 @@ function runMigrations(parsed){
       // migrate: semeia a lista inicial de funções do produto (Cobertura Produto) na primeira vez que a
       // base é migrada. Usa um flag dedicado (produtoFuncoesSeeded), não "lista vazia", pra não voltar a
       // inserir as funções padrão se o usuário apagar alguma delas de propósito depois.
+      //
+      // ACHADO AO VIVO (29/08/2026): usuário reportou checkbox de "Cobertura Produto" que "pisca e volta"
+      // (marca por um instante e desmarca sozinho) — mas SÓ nas funções do catálogo padrão (PRODUTO_
+      // FUNCOES_SEED); uma função que ele mesmo cadastrou pela UI ficava marcada normalmente. Causa: essa
+      // semeadura usava uid() (id ALEATÓRIO) toda vez que rodava. Ela só devia rodar uma vez (guardada por
+      // produtoFuncoesSeeded), mas nada garante isso 100% nesse ambiente — este handler roda a cada
+      // snapshot do Firestore, inclusive o primeiro, que pode vir do cache local (persistentLocalCache)
+      // ANTES do dado real do servidor chegar; se esse primeiro snapshot (do cache, desatualizado) ainda
+      // não tinha o flag marcado, a semeadura rodava de novo com um lote INTEIRO de ids novos, tornando
+      // órfão qualquer check já salvo sob os ids antigos assim que o snapshot seguinte (com esse novo
+      // lote local) chegasse — o check que o usuário acabara de marcar deixava de bater com o id que a
+      // tela passa a mostrar. Corrigido em duas frentes: (1) id determinístico (slugifyId, baseado em
+      // categoria+descrição) — mesmo se essa semeadura rodar mais de uma vez, gera sempre os MESMOS ids;
+      // (2) checagem por CONTEÚDO (ids já existentes), não só pelo flag — mesmo numa execução redundante,
+      // não duplica linha nem troca o id de uma função já presente.
       if(!parsed.produtoFuncoesSeeded){
-        parsed.produtoFuncoes = [...(parsed.produtoFuncoes||[]), ...PRODUTO_FUNCOES_SEED.map(f => ({id: uid(), ...f}))];
+        const existentes = new Set((parsed.produtoFuncoes||[]).map(f => f.id));
+        const faltando = PRODUTO_FUNCOES_SEED
+          .map(f => ({id: slugifyId('pf', f.categoria + '|' + f.descricao), ...f}))
+          .filter(f => !existentes.has(f.id));
+        if(faltando.length){
+          parsed.produtoFuncoes = [...(parsed.produtoFuncoes||[]), ...faltando];
+        }
         parsed.produtoFuncoesSeeded = true;
         changed = true;
       }
@@ -10825,7 +10861,25 @@ function App(){
           // desatualizados, campos que o usuário possa estar editando ao mesmo tempo em outra parte do app.
           const patch = {};
           Object.keys(migrated).forEach(k => { if(migrated[k] !== raw[k]) patch[k] = migrated[k]; });
-          if(Object.keys(patch).length) persistPatch(patch);
+          if(Object.keys(patch).length){
+            // Confirma lendo de volta antes de considerar a migração "feita nesta aba" — sem isso,
+            // `migratedOnceGlobal` travava true mesmo quando a escrita não confirmava de verdade no
+            // servidor, e a migração nunca mais tentava de novo nesta aba (só no próximo reload
+            // completo, que reseta essa variável). Ver achado ao vivo de 29/08/2026 acima.
+            persistPatch(patch).then(async (ok) => {
+              let verified = ok;
+              if(ok){
+                try{
+                  const fb2 = await waitForFirebase();
+                  const ref2 = await getAppDataDocRef();
+                  const verifySnap = await fb2.getDoc(ref2);
+                  const verifyData = verifySnap.exists() ? verifySnap.data() : {};
+                  verified = Object.keys(patch).every(k => deepEqual(verifyData[k], patch[k]));
+                }catch(e){ verified = false; }
+              }
+              if(!verified) migratedOnceGlobal = false;
+            });
+          }
         }
       }, err => {
         console.error('Firestore sync error', err);
