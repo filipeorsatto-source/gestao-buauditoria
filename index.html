@@ -738,6 +738,11 @@
   }
   .cobertura-check:hover{border-color:var(--accent);}
   .cobertura-check.checked{background:var(--positive);border-color:var(--positive);color:#fff;}
+  .cobertura-check.refinado{background:#F2CB8A;border-color:#F2CB8A;color:#5B4400;}
+  .cobertura-check.na{background:var(--surface-2);border-color:var(--line);color:var(--ink-soft);font-size:9.5px;font-weight:700;font-family:var(--font-mono);}
+  .cobertura-legend{display:flex;flex-wrap:wrap;gap:16px;margin-bottom:12px;font-size:11.5px;color:var(--ink-soft);}
+  .cobertura-legend-item{display:inline-flex;align-items:center;gap:6px;}
+  .cobertura-legend-item .cobertura-check{width:20px;height:20px;cursor:default;}
   .cobertura-cat-head{display:flex;align-items:center;gap:10px;}
   .cobertura-cat-toggle{
     display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:5px;
@@ -850,7 +855,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-30.24';
+const APP_BUILD_ID = '2026-08-30.25';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3039,6 +3044,30 @@ function uid(){ return 'id_' + Math.random().toString(36).slice(2,10) + Date.now
 function slugifyId(prefix, text){
   const norm = String(text||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/(^-+|-+$)/g,'');
   return prefix + '_' + norm;
+}
+// Pedido em 30/08/2026: o "check" da grade de Cobertura Produto (funções x clientes) deixa de ser
+// binário e passa a ter 4 estados possíveis, ciclados por clique (branco -> verde -> amarelo -> N/A ->
+// branco). Valores legados gravados como boolean `true` (do check binário antigo) são interpretados como
+// 'ativo' (verde) — mesmo peso que tinham antes — sem precisar de uma migração de dados.
+const PRODUTO_FUNCAO_CHECK_STATES = [null, 'ativo', 'refinado', 'na'];
+const PRODUTO_FUNCAO_CHECK_LABELS = { ativo: 'Ativo — conta 1 na cobertura', refinado: 'Refinado, ainda não ativo — conta 0,5 na cobertura', na: 'Não se aplica — não entra na conta (nem no numerador, nem no denominador)' };
+function normalizeProdutoFuncaoCheckState(v){
+  if(v === true) return 'ativo'; // dado legado do check binário antigo
+  if(v === 'ativo' || v === 'refinado' || v === 'na') return v;
+  return null;
+}
+function nextProdutoFuncaoCheckState(current){
+  const idx = PRODUTO_FUNCAO_CHECK_STATES.indexOf(normalizeProdutoFuncaoCheckState(current));
+  return PRODUTO_FUNCAO_CHECK_STATES[(idx + 1) % PRODUTO_FUNCAO_CHECK_STATES.length];
+}
+// Peso do estado na cobertura: 'na' não entra nem no numerador nem no denominador (retorna null pro
+// denominador não contar essa célula); 'ativo' vale 1; 'refinado' vale 0,5; branco vale 0 (mas ainda
+// entra no denominador).
+function produtoFuncaoCheckWeight(state){
+  if(state === 'na') return null;
+  if(state === 'ativo') return 1;
+  if(state === 'refinado') return 0.5;
+  return 0;
 }
 function fmtNumber(v){
   const n = Number(v)||0;
@@ -8288,32 +8317,41 @@ function ProdutoFuncoesPage({data, actions}){
     return ordered;
   }, [funcoes]);
 
-  const isChecked = (funcaoId, clienteId) => !!(checks[funcaoId] && checks[funcaoId][clienteId]);
+  const getCheckState = (funcaoId, clienteId) => normalizeProdutoFuncaoCheckState(checks[funcaoId] && checks[funcaoId][clienteId]);
 
   // Pedido em 30/08/2026: cada categoria vira uma linha "recolhível" (drill down opcional pras funções)
-  // com o "%" de cobertura da categoria (checks / (funções da categoria × clientes)) mostrado à direita
-  // do nome. Por padrão todas as categorias começam expandidas (comportamento igual ao anterior).
+  // com o "%" de cobertura da categoria mostrado à direita do nome. Por padrão todas as categorias
+  // começam expandidas (comportamento igual ao anterior).
   const [colapsadas, setColapsadas] = useState({});
   const toggleCategoria = (categoria) => setColapsadas(prev => ({...prev, [categoria]: !prev[categoria]}));
+
+  // Cálculo da cobertura considerando os 4 estados do check (pedido em 30/08/2026): 'ativo' conta 1,
+  // 'refinado' conta 0,5, branco conta 0 (mas entra no denominador), e 'na' não entra nem no numerador
+  // nem no denominador — por isso o total de campos não é mais um simples "funções × clientes" fixo, e
+  // sim contado célula a célula.
+  const somaCobertura = (listaFuncoes) => {
+    let total = 0;
+    let checados = 0;
+    listaFuncoes.forEach(f => clientesCols.forEach(c => {
+      const peso = produtoFuncaoCheckWeight(getCheckState(f.id, c.id));
+      if(peso === null) return; // 'na' — não conta em nada
+      total++;
+      checados += peso;
+    }));
+    return { total, checados, pct: total ? (checados / total * 100) : null };
+  };
 
   const statsPorCategoria = useMemo(() => {
     const map = {};
     categorias.forEach(categoria => {
-      const funcoesCategoria = funcoes.filter(f => f.categoria === categoria);
-      const total = funcoesCategoria.length * clientesCols.length;
-      let checados = 0;
-      funcoesCategoria.forEach(f => clientesCols.forEach(c => { if(isChecked(f.id, c.id)) checados++; }));
-      map[categoria] = { total, checados, pct: total ? (checados / total * 100) : null };
+      map[categoria] = somaCobertura(funcoes.filter(f => f.categoria === categoria));
     });
     return map;
   }, [categorias, funcoes, clientesCols, checks]);
 
   // KPIs "atuais" — calculados ao vivo a partir da grade de checks, refletem o estado presente (não um
   // fechamento de mês, que fica nas tabelas manuais de Realizado/Budget abaixo).
-  const totalFields = funcoes.length * clientesCols.length;
-  let totalChecks = 0;
-  funcoes.forEach(f => clientesCols.forEach(c => { if(isChecked(f.id, c.id)) totalChecks++; }));
-  const coberturaAtual = totalFields ? (totalChecks / totalFields * 100) : null;
+  const { total: totalFields, checados: totalChecks, pct: coberturaAtual } = useMemo(() => somaCobertura(funcoes), [funcoes, clientesCols, checks]);
   const funcoesMapeadasAtual = funcoes.length;
 
   const realizadoYearData = (data.produtoFuncoesRealizado && data.produtoFuncoesRealizado[CURRENT_YEAR]) || {};
@@ -8331,7 +8369,7 @@ function ProdutoFuncoesPage({data, actions}){
           ) : (
             <div className="kpi-hero-value" style={{fontSize:20, color:'#9BA0B8'}}>Sem funções cadastradas</div>
           )}
-          <div className="kpi-hero-formula">Checks / (Funções cadastradas × Clientes) — {totalChecks} de {totalFields}</div>
+          <div className="kpi-hero-formula">Pontuação (Ativo=1, Refinado=0,5, N/A não conta) / campos aplicáveis — {fmtNumber(totalChecks.toFixed(1))} de {totalFields}</div>
         </div>
         <div className="kpi-hero" style={{flex:'1 1 260px', margin:0}}>
           <div className="kpi-hero-label">Funções Mapeadas (atual)</div>
@@ -8360,6 +8398,15 @@ function ProdutoFuncoesPage({data, actions}){
         </div>
         <button className="btn btn-primary btn-sm" onClick={()=>setModal('new')}><IconPlus width="14" height="14"/>Nova função</button>
       </div>
+
+      {funcoes.length > 0 && (
+        <div className="cobertura-legend">
+          <span className="cobertura-legend-item"><span className="cobertura-check checked" style={{pointerEvents:'none'}}><IconCheck width="14" height="14"/></span>Ativo (conta 1)</span>
+          <span className="cobertura-legend-item"><span className="cobertura-check refinado" style={{pointerEvents:'none'}}><IconCheck width="14" height="14"/></span>Refinado, ainda não ativo (conta 0,5)</span>
+          <span className="cobertura-legend-item"><span className="cobertura-check na" style={{pointerEvents:'none'}}>NA</span>Não se aplica (não conta)</span>
+          <span className="cobertura-legend-item"><span className="cobertura-check" style={{pointerEvents:'none'}}><IconCheck width="14" height="14"/></span>Em branco — não desenvolvido/refinado (conta 0)</span>
+        </div>
+      )}
 
       {funcoes.length === 0 ? (
         <EmptyState icon={IconLayers} title="Nenhuma função cadastrada"
@@ -8397,17 +8444,20 @@ function ProdutoFuncoesPage({data, actions}){
                     {!isCollapsed && funcoes.filter(f => f.categoria === categoria).map(f => (
                       <tr className="cobertura-item-row" key={f.id}>
                         <td>{f.descricao}</td>
-                        {clientesCols.map(c => (
+                        {clientesCols.map(c => {
+                          const state = getCheckState(f.id, c.id);
+                          return (
                           <td key={c.id}>
                             <span
-                              className={"cobertura-check" + (isChecked(f.id, c.id) ? ' checked' : '')}
-                              onClick={() => actions.toggleProdutoFuncaoCheck(f.id, c.id)}
-                              title={isChecked(f.id, c.id) ? 'Check' : 'Não Check'}
+                              className={"cobertura-check" + (state === 'ativo' ? ' checked' : '') + (state === 'refinado' ? ' refinado' : '') + (state === 'na' ? ' na' : '')}
+                              onClick={() => actions.cycleProdutoFuncaoCheck(f.id, c.id)}
+                              title={(state ? PRODUTO_FUNCAO_CHECK_LABELS[state] : 'Em branco — ainda não desenvolvido nem refinado, conta 0') + ' — clique para avançar'}
                             >
-                              <IconCheck width="14" height="14"/>
+                              {state === 'na' ? 'NA' : <IconCheck width="14" height="14"/>}
                             </span>
                           </td>
-                        ))}
+                          );
+                        })}
                         <td>
                           <div className="row-actions">
                             <button className="btn-icon" onClick={()=>setModal(f)}><IconEdit width="13" height="13"/></button>
@@ -11483,11 +11533,15 @@ function App(){
         'Função de produto excluída'
       );
     },
-    toggleProdutoFuncaoCheck: (funcaoId, clienteId) => {
+    // Pedido em 30/08/2026: o check da grade de Cobertura Produto vira um ciclo de 4 estados por clique
+    // (branco -> ativo (verde) -> refinado (amarelo) -> N/A -> branco de novo) — ver
+    // nextProdutoFuncaoCheckState/normalizeProdutoFuncaoCheckState.
+    cycleProdutoFuncaoCheck: (funcaoId, clienteId) => {
       const aplicar = (base) => {
         const produtoFuncoesChecks = {...(base||{})};
         const rowData = {...(produtoFuncoesChecks[funcaoId]||{})};
-        if(rowData[clienteId]){ delete rowData[clienteId]; } else { rowData[clienteId] = true; }
+        const proximo = nextProdutoFuncaoCheckState(rowData[clienteId]);
+        if(proximo === null){ delete rowData[clienteId]; } else { rowData[clienteId] = proximo; }
         produtoFuncoesChecks[funcaoId] = rowData;
         return produtoFuncoesChecks;
       };
