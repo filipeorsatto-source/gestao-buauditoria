@@ -193,6 +193,10 @@
   .topbar-eyebrow{font-family:var(--font-mono);font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:3px;}
   .content{flex:1;padding:28px 32px 60px;max-width:1320px;width:100%;margin:0 auto;}
   .content-demandas{max-width:none;margin:0;}
+  /* Pedido em 29/08/2026: Organograma e Papéis e Responsabilidades ganham a largura toda disponível
+     (sem o max-width/centralização padrão) e uma folga menor até a barra lateral, pra caber mais
+     conteúdo do organograma sem precisar de scroll lateral. */
+  .content-wide{max-width:none;margin:0;padding-left:20px;padding-right:20px;}
   .kpi-name-hint{border-bottom:1px dotted var(--ink-soft);cursor:help;}
 
   .section-block{margin-bottom:34px;}
@@ -205,7 +209,7 @@
     padding:9px 15px;border-radius:var(--radius-sm);
     font-size:13px;font-weight:600;cursor:pointer;border:1px solid transparent;
     transition:transform 0.08s, box-shadow 0.14s, background 0.14s;
-    white-space:nowrap;
+    white-space:nowrap;text-decoration:none;
   }
   .btn:active{transform:translateY(1px);}
   .btn-primary{background:var(--accent);color:#fff;box-shadow:var(--shadow-sm);}
@@ -840,7 +844,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-29.19';
+const APP_BUILD_ID = '2026-08-29.21';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2777,7 +2781,36 @@ function avgCsat(list){
 // customMap — só marcado com isManual:true para a UI saber quando liberar edição dos campos "base"
 // (assunto, status, urgência, cliente, responsável, data de abertura, CSAT, tempo 1ª resposta) e o
 // botão de excluir, que só fazem sentido para um ticket que não vem de uma sincronização externa.
+// Cache de 1 posição (memoização por igualdade de referência dos 3 argumentos) — ver
+// buildDemandasMerged logo abaixo para o motivo (achado ao vivo em 29/08/2026: travada ao abrir
+// Gestão de Metas).
+let _buildDemandasMergedCache = null;
+
 function buildDemandasMerged(customMap, baseRows, manualRows){
+  // ACHADO AO VIVO (29/08/2026): "Gestão de Metas" travava por um instante ao abrir a aba. Causa: essa
+  // função faz um .map() sobre TODOS os tickets de demandas (pode ser milhares, vindos da sincronização
+  // do Movidesk), com parsing de datas e vários cálculos por linha — nada absurdo isoladamente, mas
+  // getMetaRealizadoByMonth (usada pelas metas baseadas em Demandas: % Entregas Prazo, CSAT, Média dias
+  // em aberto, SLA 1ª Resposta) chama buildDemandasMerged de novo do zero em CADA uma das ~4 tabelas de
+  // Gestão de Metas (Resumo %, Realizado, Budget, e o card completo de cada meta) — diferente de outras
+  // páginas do app, que já memoizam o resultado com useMemo. Pra ~6 metas baseadas em Demandas × ~4
+  // chamadas cada, isso repetia o mesmo merge caro 20+ vezes, de forma síncrona, só pra abrir a aba.
+  // Em vez de caçar e envolver cada chamada em useMemo (arriscado de esquecer alguma), memoizamos aqui
+  // dentro: como os 3 argumentos são sempre as MESMAS referências de objeto dentro do mesmo ciclo de
+  // render (só mudam de fato quando o Firestore emite um snapshot novo), um cache de 1 posição por
+  // igualdade de referência já elimina o recálculo redundante sem mudar nenhum call site.
+  if(_buildDemandasMergedCache
+    && _buildDemandasMergedCache.customMap === customMap
+    && _buildDemandasMergedCache.baseRows === baseRows
+    && _buildDemandasMergedCache.manualRows === manualRows){
+    return _buildDemandasMergedCache.result;
+  }
+  const result = buildDemandasMergedUncached(customMap, baseRows, manualRows);
+  _buildDemandasMergedCache = {customMap, baseRows, manualRows, result};
+  return result;
+}
+
+function buildDemandasMergedUncached(customMap, baseRows, manualRows){
   const custom = customMap || {};
   const now = new Date();
   const synced = (baseRows && baseRows.length) ? baseRows : DEMANDAS_SEED;
@@ -4001,6 +4034,7 @@ const IconLink = (p) => <Icon {...p} d={<><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 
 const IconInbox = (p) => <Icon {...p} d={<><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/></>} />;
 const IconClock = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>} />;
 const IconClipboard = (p) => <Icon {...p} d={<><rect x="4" y="4" width="16" height="18" rx="2"/><path d="M9 4V2h6v2"/><path d="M9 11h6M9 15h6M9 19h4"/></>} />;
+const IconDownload = (p) => <Icon {...p} d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></>} />;
 
 /* ---------------------------------------------------------------
    GENERIC UI: Toasts
@@ -4375,11 +4409,16 @@ function OrgNode({person, childrenByManager, onEditPerson, onDeletePerson}){
     const map = {};
     const order = [];
     children.forEach(c => {
-      const key = c.area || 'Sem área';
+      // Pedido em 29/08/2026: pessoas em liderança (lideranca:true) sempre viram sua própria coluna,
+      // lado a lado — mesmo compartilhando a mesma área/cargo com outra liderança (ex.: Henrique e
+      // Isabel, ambos "Deployment Lead", diretos do General Manager). Sem isso, elas caíam no mesmo
+      // grupo por área e empilhavam verticalmente numa coluna só (orgchart-people-nested), escondendo
+      // que são ramos paralelos e independentes do organograma, cada um com seu próprio time abaixo.
+      const key = c.lideranca ? ('__lead__' + c.id) : (c.area || 'Sem área');
       if(!map[key]){ map[key] = []; order.push(key); }
       map[key].push(c);
     });
-    return order.map(area => ({area, people: map[area]}));
+    return order.map(key => ({area: map[key][0].area || 'Sem área', people: map[key]}));
   }, [children]);
 
   return (
@@ -4775,6 +4814,12 @@ function TarefasTable({data, actions}){
 }
 
 
+// Link do PDF de referência de Papéis e Responsabilidades (Google Drive, pedido em 29/08/2026).
+// Usamos o formato de download direto do Drive (uc?export=download&id=...) em vez do link de
+// visualização (/file/d/.../view) pra abrir/baixar o PDF direto, sem passar pela tela de preview do Drive.
+const ROLES_PDF_DRIVE_ID = '10kuEhRJt-A4TTahwzya8tdwRnNNZt6UG';
+const ROLES_PDF_DRIVE_URL = 'https://drive.google.com/uc?export=download&id=' + ROLES_PDF_DRIVE_ID;
+
 function RolesPage({data, actions}){
   return (
     <div>
@@ -4783,6 +4828,9 @@ function RolesPage({data, actions}){
           <div className="section-block-title">Papéis e Responsabilidades</div>
           <div className="section-block-desc">Funções do time por cliente.</div>
         </div>
+        <a className="btn btn-ghost btn-sm" href={ROLES_PDF_DRIVE_URL} target="_blank" rel="noopener noreferrer">
+          <IconDownload width="14" height="14"/>Baixar PDF de referência
+        </a>
       </div>
       <TarefasTable data={data} actions={actions}/>
     </div>
@@ -6398,10 +6446,14 @@ function getClienteBudgetComFallback(data, slug, clienteId, clienteNome, mesN){
   return budget;
 }
 
-// Ticket "em aberto" pro Planning = qualquer status que não seja terminal (Resolvido/Cancelado/Fechado)
-// — mesmo critério já usado em todo o resto do app (ver defaultStatusSet em DemandasPage).
+// Ticket "em aberto" pro Planning = qualquer status EFETIVO que não seja terminal (Resolvido/Cancelado/
+// Fechado) — mesmo critério já usado em todo o resto do app (ver defaultStatusSet em DemandasPage).
+// Importante: usa m.statusEfetivo, não m.status — um ticket com "Concluído Em" preenchido manualmente
+// (via duplo clique, quando fica em aberto no Movidesk aguardando o cliente) já é tratado como Resolvido
+// pelo statusEfetivo (ver buildDemandasMerged), então cai fora do Planning mesmo com status bruto em
+// aberto (ajuste pedido em 29/08/2026 — antes usava m.status e continuava contando esses tickets).
 function demandaEmAbertoPlanning(m){
-  return !DEMANDA_STATUS_TERMINAL.includes(m.status);
+  return !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo);
 }
 
 const PLANNING_CLASSIF_DEV = ['Desenvolvimento Bug','Desenvolvimento Personalização','Desenvolvimento Produto'];
@@ -6577,6 +6629,21 @@ function addPlanningListTable(pptx, slide, x, y, w, h, headers, rows, colWs, opt
 
 // Slides 2 a 8 — um por cliente: Meta Contas Finalizadas no topo + 3 colunas (Desenvolvimento, Auditoria,
 // Atendimento).
+// Ajuste pedido em 29/08/2026 (4ª rodada): com a coluna Prioridade encolhida pra 0,84cm (~0,33"), o valor
+// "Despriorizado" (13 caracteres) não cabe nem quebrando em 2 linhas — o LibreOffice/PowerPoint acaba
+// quebrando letra a letra (sem espaço pra quebrar por palavra), o que fica visualmente quebrado. Como
+// P0/P1/P2 já são curtos o bastante pra essa largura, só abreviamos o valor longo especificamente nessa
+// coluna estreita das tabelas de demanda por cliente — o valor "cru" (usado em filtros, outras telas etc)
+// continua intacto em todo o resto do app.
+function prioridadeAbrevPlanning(p){
+  // Testado visualmente (render LibreOffice) nessa coluna de ~0,33" com fonte 7: até "DP" (2 letras)
+  // ainda quebrava em 2 linhas — letras maiúsculas são mais largas que os dígitos de "P0"/"P1"/"P2",
+  // que cabem numa linha só. Só um único caractere garante não quebrar; "D" fica como código enxuto de
+  // "Despriorizado" (mesma ideia de "P0/P1/P2", só que sem prioridade nenhuma).
+  if (p === 'Despriorizado') return 'D';
+  return p || '—';
+}
+
 function addPlanningClienteSlide(pptx, clienteNome, data, mesN, mesLabel){
   const slide = pptx.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
@@ -6612,9 +6679,12 @@ function addPlanningClienteSlide(pptx, clienteNome, data, mesN, mesLabel){
   // ainda não cabiam por completo — encolhemos mais a coluna RESP. (a maior parte só mostra "—" mesmo,
   // já que responsavelDesenvolvimentoId raramente está preenchido nas demandas de Planning) e baixamos a
   // fonte pra 7, liberando ainda mais espaço pra coluna Demanda (que continua com largura flexível).
+  // Ajuste pedido em 29/08/2026 (4ª rodada): Prioridade ainda menor (0,84cm≈0,33") e RESP. um pouco maior
+  // (2,33cm≈0,92") — a altura de linha dinâmica (ver addPlanningListTable) já cobre com segurança
+  // qualquer quebra extra de linha que isso cause em "Despriorizado".
   addPlanningListTable(pptx, slide, devX+0.16, colY+0.5, devW-0.32, colH-0.66, ['DEMANDA','','RESP.'],
-    devRows.map(m => [m.assunto || '(sem assunto)', m.prioridade || '—', pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) || '—']),
-    [null, 0.75, 0.5], {fontSize:7});
+    devRows.map(m => [m.assunto || '(sem assunto)', prioridadeAbrevPlanning(m.prioridade), pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) || '—']),
+    [null, 0.33, 0.92], {fontSize:7});
 
   // ---- Auditoria ----
   // Pedido em 29/08/2026 (2ª rodada): a tabela manual (ESCOPO/OBJETIVO/META/RESP.) saiu — ficava sempre
@@ -6649,8 +6719,8 @@ function addPlanningClienteSlide(pptx, clienteNome, data, mesN, mesLabel){
     {value: fmtMetaValorReport(diasReal, 'Absoluto'), label:'REAL'}, {value:'5,0', label:'META MÊS'});
   const atdRows = planningDoCliente.filter(m => m.classificacao === 'Atendimento Personalização');
   addPlanningListTable(pptx, slide, atdX+0.16, colY+1.56, atdW-0.32, colH-1.72, ['DEMANDA','','RESP.'],
-    atdRows.map(m => [m.assunto || '(sem assunto)', m.prioridade || '—', m.responsavel || '—']),
-    [null, 0.65, 0.45], {fontSize:7});
+    atdRows.map(m => [m.assunto || '(sem assunto)', prioridadeAbrevPlanning(m.prioridade), m.responsavel || '—']),
+    [null, 0.33, 0.92], {fontSize:7});
 }
 
 // Slide 9 — Geral Deployment: 3 tabelas lado a lado (Contas Finalizadas / Relacionamento / Ticket
@@ -6660,6 +6730,9 @@ function addPlanningDeploymentGeralSlide(pptx, data, mesN, mesLabel){
   slide.background = {color: RIVIO_PPTX.branco};
   addPlanningHeader(pptx, slide, 'Visão geral · deployment', 'Geral · Deployment');
 
+  // Pedido em 29/08/2026: adicionar uma coluna REAL à esquerda da META (convenção do resto do Planning —
+  // real = fechamento do mês anterior). Pra caber, encolhemos CLIENTE (agora flexível/menor) e META.
+  const mesAnt = mesAnteriorPlanning(mesN);
   const clientesTodos = DEMANDAS_CLIENTES_ORDEM.filter(c => c.toLowerCase() !== 'interno');
   const totalW = 12.53, gap = 0.2, colW = (totalW - gap*2)/3;
   const startX = 0.4, startY = 1.9, colH = 5.2;
@@ -6675,10 +6748,11 @@ function addPlanningDeploymentGeralSlide(pptx, data, mesN, mesLabel){
     const rows = clientesTodos.map(cliente => {
       const clienteId = getClienteIdByNomePlanning(data, cliente);
       const resp = getClienteResponsavelPlanning(data, cliente, 'Deployment');
+      const real = mesAnt ? getMetaRealizadoPorClienteMes(spec.slug, data, clienteId, cliente, mesAnt, null) : null;
       const meta = getClienteBudgetComFallback(data, spec.slug, clienteId, cliente, mesN);
-      return [cliente, resp || '—', fmtMetaValorReport(meta, spec.unidade)];
+      return [cliente, resp || '—', fmtMetaValorReport(real, spec.unidade), fmtMetaValorReport(meta, spec.unidade)];
     });
-    addPlanningListTable(pptx, slide, x+0.16, startY+0.5, colW-0.32, colH-0.66, ['CLIENTE','RESPONSÁVEL','META'], rows, [null, 1.1, 1.0]);
+    addPlanningListTable(pptx, slide, x+0.16, startY+0.5, colW-0.32, colH-0.66, ['CLIENTE','RESPONSÁVEL','REAL','META'], rows, [null, 1.1, 0.7, 0.7]);
   });
 }
 
@@ -6712,8 +6786,8 @@ function addPlanningDevSlide(pptx, devsPair, data, mesN, mesLabel){
   });
 }
 
-// Slide 12 — Geral Auditoria: 4 tabelas (Efetividade Regras / Cobertura Regras / Subfaturamento / %
-// Contas Automático), grade 2x2, todas com todos os clientes e coluna PLUS = META × 1,2 arredondado
+// Slide 12 — Geral Auditoria: 4 tabelas (Efetividade Regras / Cobertura Regras / Subfaturamento /
+// Contas Automáticos), grade 2x2, todas com todos os clientes e coluna PLUS = META × 1,2 arredondado
 // para cima.
 function addPlanningAuditoriaGeralSlide(pptx, data, mesN, mesLabel){
   const slide = pptx.addSlide();
@@ -6723,10 +6797,13 @@ function addPlanningAuditoriaGeralSlide(pptx, data, mesN, mesLabel){
   const clientesTodos = DEMANDAS_CLIENTES_ORDEM.filter(c => c.toLowerCase() !== 'interno');
   const mesAnt = mesAnteriorPlanning(mesN);
   const specs = [
-    {titulo:'Efetividade Regras', slug:'efetividade-regras'},
-    {titulo:'Cobertura Regras', slug:'penetracao-regras'},
-    {titulo:'Subfaturamento', slug:'subfaturamento'},
-    {titulo:'% Contas Automático', slug:'contas-automatico'},
+    {titulo:'Efetividade Regras', slug:'efetividade-regras', unidade:'%'},
+    {titulo:'Cobertura Regras', slug:'penetracao-regras', unidade:'%'},
+    {titulo:'Subfaturamento', slug:'subfaturamento', unidade:'%'},
+    // Ajuste pedido em 29/08/2026: apesar do nome antigo "% Contas Automático" usado no resto do app,
+    // esse KPI guarda valores ABSOLUTOS (quantidade de contas), não percentual — o título e a formatação
+    // aqui no Planning refletem isso (sem "%"), diferente das outras 3 tabelas desta tela.
+    {titulo:'Contas Automáticos', slug:'contas-automatico', unidade:'Absoluto'},
   ];
   const gap = 0.24, colW = (12.53-gap)/2, rowGap = 0.22, rowH = (5.2-rowGap)/2;
   const startX = 0.4, startY = 1.9;
@@ -6746,7 +6823,8 @@ function addPlanningAuditoriaGeralSlide(pptx, data, mesN, mesLabel){
       const atual = mesAnt ? getMetaRealizadoPorClienteMes(spec.slug, data, clienteId, cliente, mesAnt, null) : null;
       const meta = getClienteBudgetComFallback(data, spec.slug, clienteId, cliente, mesN);
       const plus = (meta === null || meta === undefined) ? null : Math.ceil(Number(meta) * 1.2);
-      return [cliente, respPrimeiroNome || '—', fmtMetaValorReport(atual, '%'), fmtMetaValorReport(meta, '%'), plus === null ? '—' : (plus + '%')];
+      const plusTxt = plus === null ? '—' : (spec.unidade === '%' ? (plus + '%') : String(plus));
+      return [cliente, respPrimeiroNome || '—', fmtMetaValorReport(atual, spec.unidade), fmtMetaValorReport(meta, spec.unidade), plusTxt];
     });
     addPlanningListTable(pptx, slide, x+0.16, y+0.38, colW-0.32, rowH-0.52, ['CLIENTE','RESP.','ATUAL','META','PLUS'], rows,
       [null, 0.75, 0.7, 0.7, 0.7]);
@@ -6763,7 +6841,13 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
   const mesAnt = mesAnteriorPlanning(mesN);
   const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
   const base = merged.filter(m => demandaEmAbertoPlanning(m) && m.classificacao && PLANNING_CLASSIF_ATENDIMENTO.includes(m.classificacao));
-  const responsaveis = Array.from(new Set(base.map(m => m.responsavel).filter(Boolean))).sort((a,b) => a.localeCompare(b,'pt-BR'));
+  // Pedido em 29/08/2026: só entram nomes de pessoas de fato cadastradas no organograma com
+  // area==='Atendimento' — antes qualquer texto distinto encontrado no campo "Responsável" dos tickets
+  // virava uma linha (incluindo nomes com erro de digitação ou de gente que já saiu do time).
+  const nomesAtendimentoOrganograma = new Set((data.pessoas || []).filter(p => p.area === 'Atendimento').map(p => p.nome));
+  const responsaveis = Array.from(new Set(base.map(m => m.responsavel).filter(Boolean)))
+    .filter(nome => nomesAtendimentoOrganograma.has(nome))
+    .sort((a,b) => a.localeCompare(b,'pt-BR'));
 
   const gap = 0.2, colW = (12.53 - gap*2)/3, startX = 0.4, startY = 1.9, colH = 5.2;
 
@@ -11619,7 +11703,7 @@ function App(){
             <button className="topbar-signout-btn" onClick={handleSignOut}>Sair</button>
           </div>
         </div>
-        <div className={"content" + (route.section === 'demandas' ? ' content-demandas' : '')}>
+        <div className={"content" + (route.section === 'demandas' ? ' content-demandas' : '') + ((route.section === 'overview' || route.section === 'roles') ? ' content-wide' : '')}>
           {route.section === 'overview' && <OverviewPage data={data} actions={actions}/>}
           {route.section === 'roles' && <RolesPage data={data} actions={actions}/>}
           {route.section === 'goals' && <GoalsPage data={data} actions={actions}/>}
