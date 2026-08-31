@@ -862,7 +862,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-30.27';
+const APP_BUILD_ID = '2026-08-31.28';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -5173,9 +5173,13 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   if(slug === 'dias-ticket-aberto'){
     // Tickets com Prioridade "Despriorizado" ficam de fora dessa meta — normalmente estão em aberto há
     // muito tempo de propósito (fila de baixa prioridade), o que distorceria a média pra cima sem
-    // refletir um problema real de atendimento.
+    // refletir um problema real de atendimento. Pedido em 31/08/2026: também só entram tickets
+    // classificados como Atendimento (Atendimento Bug, Atendimento Regra, etc. — qualquer classificação
+    // que comece com "Atendimento") e que ainda NÃO tenham um responsável de Desenvolvimento alocado —
+    // uma vez que o ticket vai pro time de Dev, ele deixa de refletir o tempo de resposta do Atendimento.
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
-      .filter(m => m.prioridade !== 'Despriorizado');
+      .filter(m => m.prioridade !== 'Despriorizado')
+      .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId);
     const scoped = merged.filter(m => pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
     const out = {};
     MONTHS.forEach(m => {
@@ -5376,8 +5380,11 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     return avgCsat(subset.map(x => x.csat));
   }
   if(slug === 'dias-ticket-aberto'){
+    // Mesmo critério de escopo do agregado acima (ver getMetaRealizadoByMonth): exclui Despriorizados e
+    // só considera tickets de Atendimento sem responsável de Desenvolvimento alocado (pedido 31/08/2026).
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
-      .filter(m => m.prioridade !== 'Despriorizado');
+      .filter(m => m.prioridade !== 'Despriorizado')
+      .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId);
     const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
       .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, mesN))
