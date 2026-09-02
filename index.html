@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-02.31';
+const APP_BUILD_ID = '2026-09-02.32';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -11949,6 +11949,17 @@ function DemandasPage({data, actions}){
 function DemandasClienteTable({cliente, rows, devTeam, actions, onRequestDeleteManual}){
   const [expanded, setExpanded] = useState(false);
   const mediaDiasAberto = useMemo(() => avgOf(rows.map(r => r.diasEmAberto)), [rows]);
+  // Alerta (bolinha vermelha) pedido em 02/09/2026: acende ao lado da média sempre que o cliente tiver
+  // pelo menos 1 ticket de Atendimento (classificação começando com "Atendimento"), sem Responsável de
+  // Desenvolvimento alocado, que NÃO esteja Despriorizado, e com mais de 5 dias em aberto — mesmo critério
+  // já usado na meta "Média dias em aberto" (ver slug 'dias-ticket-aberto' em getMetaRealizadoByMonth),
+  // só que aqui olhando ticket a ticket em vez da média do grupo.
+  const temTicketCriticoEmAberto = useMemo(() => rows.some(r =>
+    r.classificacao && r.classificacao.startsWith('Atendimento')
+    && !r.responsavelDesenvolvimentoId
+    && r.prioridade !== 'Despriorizado'
+    && r.diasEmAberto !== null && r.diasEmAberto > 5
+  ), [rows]);
 
   return (
     <div className="card demandas-client-card" style={expanded ? {width:'fit-content', minWidth:'100%'} : undefined}>
@@ -11963,6 +11974,12 @@ function DemandasClienteTable({cliente, rows, devTeam, actions, onRequestDeleteM
         <span className="group-card-count" style={{marginLeft:'auto'}}>{rows.length} ticket{rows.length===1?'':'s'}</span>
         <span className="group-card-count" style={{marginLeft:0}} title="Média de dias em aberto dos tickets exibidos neste cliente">
           Média {mediaDiasAberto === null ? '—' : mediaDiasAberto.toFixed(1) + 'd'} em aberto
+          {temTicketCriticoEmAberto && (
+            <span
+              title="Há pelo menos 1 ticket de Atendimento sem Desenvolvedor alocado, não despriorizado, com mais de 5 dias em aberto"
+              style={{display:'inline-block', width:8, height:8, borderRadius:'50%', background:'var(--negative)', marginLeft:6, verticalAlign:'middle'}}
+            />
+          )}
         </span>
       </div>
 
