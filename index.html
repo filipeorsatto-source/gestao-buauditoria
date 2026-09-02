@@ -24,6 +24,10 @@
      final tem o texto "achatado" em imagem (não é selecionável/editável), mas fica fiel ao layout, sem
      depender de nenhum serviço externo de conversão. jsPDF está disponível no cdnjs normalmente. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<!-- Geração do "Report Staff" em Word (pedido em 02/09/2026, aba "Acompanhamento de Metas") — expõe
+     window.docx com Document/Paragraph/Table/ImageRun/Packer etc. Igual ao caso do pptxgenjs acima, vem
+     do jsdelivr (build UMD do pacote npm "docx"), não do cdnjs. -->
+<script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js';
   import {
@@ -873,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-02.29';
+const APP_BUILD_ID = '2026-09-02.31';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -6377,15 +6381,31 @@ class CanvasPdfSlide{
   // categoria + legenda, sem pretender ser pixel-a-pixel idêntico.
   addChart(chartType, chartData, opts){
     const ctx = this.ctx;
-    const x0 = this.px(opts.x), y0 = this.px(opts.y), w = this.px(opts.w), h = this.px(opts.h);
+    const fontFamily = opts.fontFamily || 'Arial';
+    const x0 = this.px(opts.x), y0raw = this.px(opts.y), w = this.px(opts.w), h = this.px(opts.h);
     const legendH = opts.showLegend ? this.px(0.22) : 0;
     const axisLabelH = this.px(0.2);
-    const plotH = h - legendH - axisLabelH;
+    // Espaço reservado no topo pro rótulo de dado da barra mais alta não ficar cortado (pedido em
+    // 02/09/2026, junto com a fonte Funnel Display nos gráficos do Report Staff).
+    const topPad = opts.dataLabels ? this.px(0.18) : 0;
+    const y0 = y0raw + topPad;
+    const plotH = h - legendH - axisLabelH - topPad;
     const series = chartData || [];
     const labels = (series[0] && series[0].labels) || [];
     const nCats = Math.max(1, labels.length);
     const allVals = series.flatMap(s => (s.values || []).filter(v => v !== null && v !== undefined));
     const maxVal = Math.max(1, ...allVals, 0);
+    // Eixo Y "dinâmico" (pedido em 02/09/2026): em vez de sempre começar em 0, o mínimo do eixo sobe pra
+    // perto do menor valor da série — deixa mais evidente a diferença entre colunas quando os valores já
+    // são todos grandes e próximos entre si (ex.: Contas Finalizadas variando entre 150k e 210k por mês).
+    let axisMin = 0, axisMax = maxVal;
+    if(opts.dynamicYAxis && allVals.length){
+      const minVal = Math.min(...allVals);
+      const range = Math.max(1, maxVal - minVal);
+      axisMin = Math.max(0, minVal - range * 0.25);
+      axisMax = maxVal + range * 0.08;
+    }
+    const axisRange = Math.max(1e-9, axisMax - axisMin);
     const groupW = w / nCats;
     const barGap = groupW * 0.14;
     const barW = Math.max(1, (groupW - barGap * 2) / Math.max(1, series.length));
@@ -6399,37 +6419,59 @@ class CanvasPdfSlide{
       }
     }
 
+    // Desenha todas as barras primeiro e só depois os rótulos de dado (numa 2ª passada), pra um rótulo de
+    // uma série não ficar "por baixo" de uma barra mais alta de outra série desenhada em seguida.
+    const dataLabels = [];
     series.forEach((s, si) => {
-      ctx.fillStyle = '#' + ((opts.chartColors && opts.chartColors[si]) || '2C5AA0');
+      const cor = (opts.chartColors && opts.chartColors[si]) || '2C5AA0';
+      ctx.fillStyle = '#' + cor;
       (s.values || []).forEach((v, ci) => {
         if(v === null || v === undefined) return;
-        const barH = maxVal ? (v / maxVal) * plotH : 0;
+        const barH = ((v - axisMin) / axisRange) * plotH;
         const bx = x0 + ci * groupW + barGap + si * barW;
         const by = y0 + plotH - barH;
         ctx.fillRect(bx, by, barW, Math.max(0, barH));
+        if(opts.dataLabels){
+          const fmt = opts.dataLabelFormatter || ((val) => Math.round(val).toLocaleString('pt-BR'));
+          dataLabels.push({x: bx + barW / 2, y: by, text: fmt(v)});
+        }
       });
     });
 
+    if(opts.dataLabels && dataLabels.length){
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      ctx.font = this.pt(opts.dataLabelFontSize || 6.5).toFixed(1) + 'px "' + fontFamily + '", Arial, sans-serif';
+      ctx.fillStyle = '#' + (opts.dataLabelColor || '555555');
+      dataLabels.forEach(dl => ctx.fillText(dl.text, dl.x, Math.max(this.px(0.09), dl.y - this.px(0.05))));
+    }
+
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
-    ctx.font = this.pt(opts.catAxisLabelFontSize || 7).toFixed(1) + 'px Arial';
+    ctx.font = this.pt(opts.catAxisLabelFontSize || 7).toFixed(1) + 'px "' + fontFamily + '", Arial, sans-serif';
     ctx.fillStyle = '#' + (opts.catAxisLabelColor || '888888');
     labels.forEach((lab, ci) => {
       ctx.fillText(String(lab), x0 + ci * groupW + groupW / 2, y0 + plotH + this.px(0.14));
     });
 
     if(opts.showLegend){
-      const swatchGap = this.px(0.9);
-      let lx = x0 + w / 2 - (series.length * swatchGap) / 2;
+      // Largura de cada item calculada a partir do texto real (em vez de um espaçamento fixo), pra
+      // legendas com nomes mais longos (ex.: "Desenvolvimento") não se sobreporem — pedido em 02/09/2026.
+      const legendFont = this.pt(opts.legendFontSize || 7).toFixed(1) + 'px "' + fontFamily + '", Arial, sans-serif';
+      ctx.font = legendFont;
+      const swatchSize = this.px(0.11), swatchTextGap = this.px(0.06), itemGap = this.px(0.16);
+      const itemWidths = series.map(s => swatchSize + swatchTextGap + ctx.measureText(s.name).width);
+      const totalW = itemWidths.reduce((a, b) => a + b, 0) + itemGap * Math.max(0, series.length - 1);
+      let lx = x0 + Math.max(0, (w - totalW) / 2);
       const ly = y0 + plotH + axisLabelH + this.px(0.04);
       ctx.textAlign = 'left';
       series.forEach((s, si) => {
         ctx.fillStyle = '#' + ((opts.chartColors && opts.chartColors[si]) || '2C5AA0');
-        ctx.fillRect(lx, ly, this.px(0.12), this.px(0.12));
+        ctx.fillRect(lx, ly, swatchSize, swatchSize);
         ctx.fillStyle = '#333333';
-        ctx.font = this.pt(opts.legendFontSize || 7).toFixed(1) + 'px Arial';
-        ctx.fillText(s.name, lx + this.px(0.16), ly + this.px(0.11));
-        lx += swatchGap;
+        ctx.font = legendFont;
+        ctx.fillText(s.name, lx + swatchSize + swatchTextGap, ly + swatchSize * 0.95);
+        lx += itemWidths[si] + itemGap;
       });
     }
     ctx.textAlign = 'left';
@@ -7674,6 +7716,738 @@ async function gerarPlanningPptx(data, mesN, formato){
 }
 
 
+/* ---------------------------------------------------------------
+   REPORT STAFF (Word) — relatório semanal para o founder (pedido em 02/09/2026)
+   -----------------------------------------------------------------
+   Diferente do Report Mensal/Planning (PPTX/PDF), este é um .docx gerado com a lib "docx" (ver <script>
+   no <head> — expõe window.docx). Reaproveita ao máximo os cálculos já existentes no resto do app
+   (buildReportAreaSummary, getMetaRealizadoByMonth, getMetaRealizadoPorClienteMes, etc.) — só a camada de
+   "desenho" (docx) é nova. Dois seletores independentes alimentam o relatório: o "Mês da análise" (já
+   existente nesta tela, reaproveitado) decide todos os NÚMEROS (KPIs, P&L, cobertura); um novo seletor
+   "Semana" (as colunas da aba "Report") decide de qual coluna vêm os TEXTOS qualitativos (Overview e a
+   descrição de cada cliente) — são naturezas de dado diferentes (mensal x semanal), por isso não
+   compartilham um único seletor.
+--------------------------------------------------------------- */
+const STAFF_DOCX = {
+  azul: '0575E6',
+  azulClaro: '7EB8FF',
+  tinta: '151515',
+  tintaSoft: '757575',
+  verde: '1DA75A',
+  vermelho: 'E5342A',
+  cinza: '9BA0AE',
+  linhaClara: 'E3E3E6',
+  cinzaClaro: 'F5F6F8',
+  branco: 'FFFFFF',
+  // Mesmo grafite escuro usado na capa do Planning/apresentações institucionais Rivio (RIVIO_PPTX.grafiteEscuro)
+  // — pedido em 02/09/2026 para a capa do Report Staff seguir o mesmo padrão visual de fundo escuro.
+  escuro: '0B0D11',
+  // Cinza de zebra (linhas intercaladas) e cinza escuro da linha "Total" — pedido em 02/09/2026 (revisão
+  // de layout v3, replicando os ajustes de formatação feitos manualmente no Word).
+  zebra: 'F2F2F2',
+  totalBg: '7F7F7F',
+};
+
+// Cor de fundo de uma linha de corpo de tabela em zebra (linhas intercaladas) — usada no P&L e nas 2
+// tabelas de Cobertura. idx é o índice da linha de dado (0-based, sem contar o cabeçalho).
+function staffZebraFill(idx){
+  return (idx % 2 === 0) ? STAFF_DOCX.zebra : undefined;
+}
+
+// Página A4 em twips (usada tanto na capa quanto na seção de conteúdo do .docx).
+const STAFF_PAGE_W_TWIP = 11906; // 210mm
+const STAFF_PAGE_H_TWIP = 16838; // 297mm
+
+// Capa (Folha 1): fundo escuro cheio de página + logo branca da Rivio, no mesmo padrão de capa já usado
+// no Planning/apresentações institucionais (ver addPlanningCoverSlide). Como o docx não tem uma opção
+// nativa de "cor de fundo da página", o truque é uma Table de 1 célula ocupando a página inteira (margens
+// zeradas + altura de linha travada em "exact" = altura da página) com shading escuro.
+function buildStaffCoverSection(mesLabel, coluna){
+  const { Paragraph, TextRun, Table, TableRow, TableCell, ImageRun, AlignmentType, VerticalAlign, WidthType, BorderStyle, ShadingType, HeightRule } = window.docx;
+  const noBorder = {style: BorderStyle.NONE, size: 0, color: STAFF_DOCX.escuro};
+  const noBorders = {top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideHorizontal: noBorder, insideVertical: noBorder};
+  const cell = new TableCell({
+    width: {size: 100, type: WidthType.PERCENTAGE},
+    shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.escuro},
+    borders: noBorders,
+    verticalAlign: VerticalAlign.CENTER,
+    margins: {top: 200, bottom: 200, left: 900, right: 900},
+    children: [
+      new Paragraph({spacing: {after: 480}, children: [new ImageRun({data: 'data:image/png;base64,' + RIVIO_LOGO_BRANCO_B64, transformation: {width: 150, height: 35}})]}),
+      new Paragraph({spacing: {after: 80}, children: [new TextRun({text: 'BU AUDITORIA', bold: true, size: 19, color: STAFF_DOCX.azulClaro})]}),
+      // Pedido em 02/09/2026 (v3): título em uma linha só ("Weekly Report") em vez de "Report"/"Staff"
+      // empilhados em 2 parágrafos.
+      new Paragraph({spacing: {after: 400}, children: [new TextRun({text: 'Weekly Report', bold: true, size: 92, color: STAFF_DOCX.branco})]}),
+      new Paragraph({border: {top: {style: BorderStyle.SINGLE, size: 4, color: '2A2E36', space: 14}}, spacing: {before: 0, after: 0}, children: [new TextRun({text: mesLabel + (coluna ? (' · Semana de ' + fmtDataColunaReport(coluna.dataIso)) : ''), size: 24, color: '9AA3AD'})]}),
+    ],
+  });
+  // O Word exige um parágrafo depois de uma tabela (não pode terminar a seção direto na tabela) — se essa
+  // tabela ocupar a altura EXATA da página, esse parágrafo obrigatório "sobra" pra uma 2ª página, gerando
+  // uma folha em branco depois da capa. A folga de 40 twips não foi suficiente no Word de verdade (só no
+  // LibreOffice usado pra validar aqui) — aumentada uma folga maior + esse parágrafo final marcado sem
+  // "snapToGrid" E sombreado no mesmo escuro da capa (pedido em 02/09/2026): assim, mesmo se ele acabar
+  // "vazando" pra uma 2ª página em algum Word específico, essa página aparece escura (não branca) — sem
+  // o efeito de "página em branco" reportado.
+  const alturaLinhaCapa = STAFF_PAGE_H_TWIP - 300;
+  return {
+    properties: {page: {size: {width: STAFF_PAGE_W_TWIP, height: STAFF_PAGE_H_TWIP}, margin: {top: 0, bottom: 0, left: 0, right: 0}}},
+    children: [
+      new Table({
+        width: {size: 100, type: WidthType.PERCENTAGE},
+        borders: noBorders,
+        rows: [new TableRow({height: {value: alturaLinhaCapa, rule: HeightRule.EXACT}, children: [cell]})],
+      }),
+      new Paragraph({
+        spacing: {before: 0, after: 0, line: 20},
+        shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.escuro},
+        children: [new TextRun({text: '', size: 2, snapToGrid: false})],
+      }),
+    ],
+  };
+}
+
+// Cabeçalho corrido (logo Rivio) nas páginas de conteúdo (tudo exceto a capa) — pedido em 02/09/2026.
+function buildStaffHeader(){
+  const { Header, Paragraph, ImageRun, AlignmentType } = window.docx;
+  return new Header({
+    children: [new Paragraph({alignment: AlignmentType.RIGHT, children: [new ImageRun({data: 'data:image/png;base64,' + RIVIO_LOGO_PRETO_B64, transformation: {width: 78, height: 18}})]})],
+  });
+}
+
+// Desenha um gráfico de barras isolado num <canvas> fora de qualquer slide de PPTX/PDF, reaproveitando o
+// método addChart de CanvasPdfSlide (ver "EXPORTAÇÃO EM PDF" acima) como um mini motor de desenho — nunca
+// chega a gerar um PDF/PPTX de verdade a partir disso, só usa o canvas resultante como imagem PNG.
+function renderStaffChartDataUrl(widthIn, heightIn, chartData, opts){
+  const pptxLike = new CanvasPdfPptx();
+  pptxLike.defineLayout({width: widthIn, height: heightIn});
+  pptxLike._dpi = 220;
+  const slide = pptxLike.addSlide();
+  slide.background = {color: STAFF_DOCX.branco};
+  slide.addChart(pptxLike.ChartType.bar, chartData, Object.assign({
+    x: 0.08, y: 0.08, w: widthIn - 0.16, h: heightIn - 0.16,
+    showLegend: chartData.length > 1, chartColors: [STAFF_DOCX.azul, STAFF_DOCX.vermelho, STAFF_DOCX.cinza],
+    valGridLine: {color: 'E3E3E6'}, catAxisLabelFontSize: 8, catAxisLabelColor: '757575', legendFontSize: 8,
+    // Pedido em 02/09/2026: gráficos do Report Staff também na fonte Funnel Display, e com rótulo de
+    // dado (valor de cada série) em cima das barras.
+    fontFamily: 'Funnel Display', dataLabels: true, dataLabelFontSize: 6.5, dataLabelColor: '3A3A3A',
+  }, opts || {}));
+  return slide.canvas.toDataURL('image/png');
+}
+
+// Série mês a mês (por cliente + total) de um campo de data.financeiro que segue o formato
+// { [ano]: { [nomeCliente]: { [mesN]: valor } } } — usado por Contas Finalizadas, Contas Automático e
+// Subfaturamento (que o usuário pediu para reaproveitar como o gráfico de "Inclusão" — ver comentário em
+// buildStaffOverviewBlocks). Sempre os 12 meses do ano (Jan–Dez), preenchido ou não (pedido 02/09/2026).
+function buildStaffMonthlySeriesFinanceiro(data, key){
+  const clientesCols = data.clientes.filter(c => c.nome.toLowerCase() !== 'interno');
+  const yearData = (data.financeiro && data.financeiro[key] && data.financeiro[key][CURRENT_YEAR]) || {};
+  // Pedido em 02/09/2026: sempre plotar os 12 meses (Jan–Dez) no eixo, mesmo os que ainda não têm dado
+  // preenchido (antes só entravam os meses com pelo menos um cliente preenchido).
+  const meses = MONTHS;
+  const porCliente = {};
+  clientesCols.forEach(c => {
+    porCliente[c.nome] = meses.map(m => {
+      const v = (yearData[c.nome] || {})[m.n];
+      return (v === undefined || v === null || v === '') ? null : Number(v);
+    });
+  });
+  const totalPorMes = meses.map((m, idx) => {
+    let soma = null;
+    clientesCols.forEach(c => { const v = porCliente[c.nome][idx]; if(v !== null) soma = (soma || 0) + v; });
+    return soma;
+  });
+  return {clientesCols, meses, porCliente, totalPorMes};
+}
+
+// Estatística de Cobertura Produto por categoria (mesma fórmula ao vivo de ProdutoFuncoesPage/
+// somaCobertura — Ativo=1, Refinado=0,5, N/A não conta nem no numerador nem no denominador), extraída
+// como função standalone para poder ser usada aqui, fora do componente de tela.
+function computeCoberturaProdutoStatsPorCategoria(data){
+  const clientesCols = data.clientes.filter(c => c.nome.toLowerCase() !== 'interno');
+  const funcoes = data.produtoFuncoes || [];
+  const checks = data.produtoFuncoesChecks || {};
+  const getCheckState = (funcaoId, clienteId) => normalizeProdutoFuncaoCheckState(checks[funcaoId] && checks[funcaoId][clienteId]);
+  const soma = (lista) => {
+    let total = 0, checados = 0;
+    lista.forEach(f => clientesCols.forEach(c => {
+      const peso = produtoFuncaoCheckWeight(getCheckState(f.id, c.id));
+      if(peso === null) return;
+      total++; checados += peso;
+    }));
+    return {total, checados, pct: total ? (checados / total * 100) : null};
+  };
+  const categorias = Array.from(new Set(funcoes.map(f => f.categoria)));
+  const porCategoria = categorias.map(categoria => ({categoria, ...soma(funcoes.filter(f => f.categoria === categoria))}));
+  return {porCategoria, totalGeral: soma(funcoes)};
+}
+
+// Estatística de Cobertura de Dados por base (Contas, Alertas, Inclusão/Exclusão, etc.), para o mês
+// escolhido no relatório — mesma fórmula ao vivo de CoberturaDadosPage/monthPct, só que aberta por base
+// em vez de um único percentual agregado.
+function computeCoberturaDadosStatsPorBase(data, mesN){
+  const clientesCols = data.clientes.filter(c => c.nome.toLowerCase() !== 'interno');
+  const monthData = ((data.coberturaDados && data.coberturaDados[CURRENT_YEAR]) || {})[mesN] || null;
+  const totalCamposPorBase = COBERTURA_ITENS.length * clientesCols.length;
+  const porBase = COBERTURA_BASES.map(base => {
+    let checked = 0;
+    if(monthData){
+      clientesCols.forEach(c => COBERTURA_ITENS.forEach(item => {
+        const rowKey = coberturaRowKey(base.key, item);
+        if(monthData[rowKey] && monthData[rowKey][c.id]) checked++;
+      }));
+    }
+    return {base: base.nome, checked, total: totalCamposPorBase, pct: totalCamposPorBase ? (checked / totalCamposPorBase * 100) : null};
+  });
+  const totalChecked = porBase.reduce((a, b) => a + b.checked, 0);
+  const totalCampos = porBase.reduce((a, b) => a + b.total, 0);
+  return {porBase, totalPct: (monthData && totalCampos) ? (totalChecked / totalCampos * 100) : null, temDados: !!monthData};
+}
+
+// De-para de classificação pedido pelo usuário para os gráficos de Saúde Operacional: "Desenvolvimento"
+// (tudo que começa com "Desenvolvimento", exceto "Desenvolvimento Produto" e "Desenvolvimento Bug"),
+// "Bugs" ("Atendimento Bug" e "Desenvolvimento Bug"), "Outros" (o resto — inclui Auditoria e
+// Desenvolvimento Produto, que não foram citados em nenhum dos 2 outros baldes).
+function classificacaoBucketSaudeOperacional(classificacao){
+  if(classificacao === 'Atendimento Bug' || classificacao === 'Desenvolvimento Bug') return 'Bugs';
+  if(classificacao && classificacao.startsWith('Desenvolvimento') && classificacao !== 'Desenvolvimento Produto' && classificacao !== 'Desenvolvimento Bug') return 'Desenvolvimento';
+  return 'Outros';
+}
+const STAFF_SAUDE_OP_BUCKETS = ['Desenvolvimento', 'Bugs', 'Outros'];
+
+// Contagem de tickets abertos (por mês de ABERTURA) e resolvidos (por mês de CONCLUSÃO, via
+// mesConclusao — mesmo campo/critério já usado pelo CSAT em outras telas) por balde de classificação.
+function buildStaffTicketsPorMes(data){
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+  const abertos = {}, resolvidos = {};
+  STAFF_SAUDE_OP_BUCKETS.forEach(b => {
+    abertos[b] = {}; resolvidos[b] = {};
+    MONTHS.forEach(m => { abertos[b][m.n] = 0; resolvidos[b][m.n] = 0; });
+  });
+  merged.forEach(t => {
+    const bucket = classificacaoBucketSaudeOperacional(t.classificacao);
+    MONTHS.forEach(m => { if(mesAnoAbertura(t.abertoEm, m.n)) abertos[bucket][m.n]++; });
+    if(t.mesConclusao) resolvidos[bucket][t.mesConclusao] = (resolvidos[bucket][t.mesConclusao] || 0) + 1;
+  });
+  return {abertos, resolvidos};
+}
+
+// Cards "YTD" do topo da Folha 3 (Financials) — acumulado de Janeiro até o mês escolhido no relatório
+// (só meses já fechados/sincronizados na aba Finance, ver filledMonths em MargemBrutaPage).
+//  - Receita Bruta Acumulada = soma de "Total revenues" (mesmo campo usado como topo do P&L)
+//  - Custos Acumulados = soma de |Folha (Payroll)| + |Impostos (Taxes on revenues)| + |COGS| (pedido em
+//    02/09/2026, v2 — antes só somava COGS+Payroll)
+//  - Saldo = Receita Bruta Acumulada - Custos Acumulados (pode ser positivo ou negativo — por isso não é
+//    mais chamado de "Saldo Negativado", pedido em 02/09/2026, v2)
+//  - Ticket Médio = média mensal de (Receita do mês / TICKET_MEDIO_CLIENTES)
+//  - % Margem = soma do Gross Profit / soma da Receita Bruta, no acumulado
+function buildStaffYtdCards(data, mesN){
+  const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
+  const mesesAcumulados = MONTHS.filter(m => m.n <= mesN && pnlYear[m.n]);
+  let receitaBruta = 0, custos = 0, grossProfit = 0, somaTicketMedio = 0;
+  mesesAcumulados.forEach(m => {
+    const d = pnlYear[m.n];
+    receitaBruta += Number(d.receitaTotal) || 0;
+    custos += Math.abs(Number(d.payroll) || 0) + Math.abs(Number(d.taxasReceita) || 0) + Math.abs(Number(d.cogs) || 0);
+    grossProfit += Number(d.grossProfit) || 0;
+    somaTicketMedio += (Number(d.receitaTotal) || 0) / TICKET_MEDIO_CLIENTES;
+  });
+  const temDados = mesesAcumulados.length > 0;
+  return {
+    temDados,
+    receitaBrutaAcumulada: temDados ? receitaBruta : null,
+    custosAcumulados: temDados ? custos : null,
+    saldo: temDados ? (receitaBruta - custos) : null,
+    ticketMedio: temDados ? (somaTicketMedio / mesesAcumulados.length) : null,
+    percMargem: (temDados && receitaBruta) ? (grossProfit / receitaBruta * 100) : null,
+  };
+}
+
+// P&L do mês escolhido (uma única coluna, não os 12 meses da tela Margem Bruta), com uma coluna extra de
+// Análise Vertical (% de cada linha sobre a Receita Bruta do mesmo mês) — mesma estrutura de linhas de
+// MargemBrutaPage (Total revenues + clientes, Taxes, COGS, Payroll, Gross profit, G&A, S&M, EBITDA).
+function buildStaffPnlVerticalRows(data, mesN){
+  const pnlYear = (data.financeiro && data.financeiro.pnl && data.financeiro.pnl[CURRENT_YEAR]) || {};
+  const mesData = pnlYear[mesN] || null;
+  if(!mesData) return {mesData: null, rows: []};
+  const receitaBase = Number(mesData.receitaTotal) || 0;
+  const vertical = (v) => (v === undefined || v === null || !receitaBase) ? null : (Number(v) / receitaBase * 100);
+  const subLinhasOrder = mesData.subLinhasOrder || {};
+  const clientNames = (subLinhasOrder.receitaTotal && subLinhasOrder.receitaTotal.length) ? subLinhasOrder.receitaTotal : FINANCE_CLIENT_ROWS_FALLBACK;
+  const rows = [];
+  const pushMain = (key, label, type) => {
+    const val = mesData[key];
+    rows.push({label, type, val, vert: vertical(val)});
+    if(key === 'receitaTotal'){
+      clientNames.forEach(nome => {
+        const v = mesData.receitaPorCliente ? mesData.receitaPorCliente[nome] : null;
+        rows.push({label: nome, type: 'sub', val: v, vert: vertical(v)});
+      });
+    } else if(subLinhasOrder[key] && subLinhasOrder[key].length){
+      subLinhasOrder[key].forEach(label2 => {
+        const v = mesData.subLinhas && mesData.subLinhas[key] ? mesData.subLinhas[key][label2] : null;
+        rows.push({label: label2, type: 'sub', val: v, vert: vertical(v)});
+      });
+    }
+  };
+  pushMain('receitaTotal', 'Total revenues', 'total');
+  pushMain('taxasReceita', '(-) Taxes on revenues', 'main');
+  pushMain('cogs', '(-) COGS', 'main');
+  pushMain('payroll', '(-) Payroll', 'main');
+  pushMain('grossProfit', '(=) Gross profit', 'total');
+  pushMain('gea', '(-) G&A', 'main');
+  pushMain('sem', '(-) S&M', 'main');
+  pushMain('ebitda', '(=) EBITDA / burn', 'total');
+  return {mesData, rows};
+}
+
+// Tabela de Demandas de um cliente para a Folha 6 — Tipo = "Planning" (campo já existente na tela
+// Demandas) e ainda em aberto (status efetivo fora da lista de status terminais).
+function buildStaffClientPlanningRows(data, clienteNome){
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+  return merged.filter(m => m.cliente === clienteNome && m.tipo === 'Planning' && !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo));
+}
+
+// Glossário de OKRs da Folha 4 — reaproveita a mesma lista/agrupamento por área usada no Slide 1 do
+// Report Mensal (REPORT_AREAS) e a descrição de cada indicador já cadastrada em INDICADORES.
+function buildStaffOkrGlossario(){
+  return REPORT_AREAS.map(area => ({
+    nome: area.nome,
+    kpis: area.kpis.map(slug => {
+      const ind = INDICADORES.find(i => i.slug === slug);
+      return {titulo: ind ? ind.titulo : slug, descricao: ind ? ind.descricao : 'Descrição não cadastrada.'};
+    }),
+  }));
+}
+
+// ---- Montagem do .docx (funções abaixo usam o global window.docx, carregado via <script> no <head>) ----
+
+function staffP(text, opts){
+  const { Paragraph, TextRun } = window.docx;
+  const runs = Array.isArray(text) ? text : [{text}];
+  return new Paragraph(Object.assign({
+    children: runs.map(r => new TextRun(Object.assign({text: r.text, size: 20, color: STAFF_DOCX.tinta}, r))),
+    spacing: {after: 160},
+  }, opts || {}));
+}
+
+function staffH1(text, pageBreakBefore){
+  const { Paragraph, TextRun } = window.docx;
+  return new Paragraph({
+    children: [new TextRun({text, bold: true, size: 40, color: STAFF_DOCX.tinta})],
+    spacing: {after: 240, before: pageBreakBefore ? 0 : 120},
+    pageBreakBefore: !!pageBreakBefore,
+    border: {bottom: {style: window.docx.BorderStyle.SINGLE, size: 6, color: STAFF_DOCX.azul, space: 8}},
+  });
+}
+
+function staffH2(text){
+  const { Paragraph, TextRun } = window.docx;
+  return new Paragraph({
+    children: [new TextRun({text, bold: true, size: 26, color: STAFF_DOCX.azul})],
+    spacing: {after: 160, before: 280},
+  });
+}
+
+function staffH3(text, pageBreakBefore, keepNext){
+  const { Paragraph, TextRun } = window.docx;
+  return new Paragraph({
+    children: [new TextRun({text, bold: true, size: 21, color: STAFF_DOCX.tinta})],
+    spacing: {after: 100, before: 160},
+    pageBreakBefore: !!pageBreakBefore,
+    // keepNext (pedido em 02/09/2026, v2): evita que o título de um gráfico fique "órfão" no fim de uma
+    // página, com o gráfico em si passando sozinho pra página seguinte.
+    keepNext: !!keepNext,
+  });
+}
+
+// Card retangular simples (uma "célula" de tabela sem bordas visíveis entre os cards, usada para o grid
+// de KPIs/estatísticas) — value em destaque, label pequeno abaixo, cor do value configurável.
+// Pedido em 02/09/2026: todos os cards com a mesma largura (100/N%, em vez de 100% cada um, que deixava
+// a largura real dependente do conteúdo), centralizados na célula (horizontal E vertical) e sem
+// espaçamento antes/depois dos parágrafos internos.
+function staffStatCardCell(label, value, valueColor, widthPct){
+  const { TableCell, Paragraph, TextRun, AlignmentType, WidthType, ShadingType, BorderStyle, VerticalAlign } = window.docx;
+  const thinBorder = {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara};
+  return new TableCell({
+    width: {size: widthPct || 100, type: WidthType.PERCENTAGE},
+    shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.cinzaClaro},
+    borders: {top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder},
+    verticalAlign: VerticalAlign.CENTER,
+    margins: {top: 140, bottom: 140, left: 100, right: 100},
+    children: [
+      new Paragraph({alignment: AlignmentType.CENTER, spacing: {before: 0, after: 40}, children: [new TextRun({text: value, bold: true, size: 30, color: valueColor || STAFF_DOCX.tinta})]}),
+      new Paragraph({alignment: AlignmentType.CENTER, spacing: {before: 0, after: 0}, children: [new TextRun({text: label.toUpperCase(), size: 15, color: STAFF_DOCX.tintaSoft})]}),
+    ],
+  });
+}
+
+function staffStatCardsRow(cards){
+  const { Table, TableRow, WidthType } = window.docx;
+  const widthPct = 100 / cards.length;
+  return new Table({
+    width: {size: 100, type: WidthType.PERCENTAGE},
+    rows: [new TableRow({children: cards.map(c => staffStatCardCell(c.label, c.value, c.color, widthPct))})],
+  });
+}
+
+// Layout de 2 colunas lado a lado (usado nos blocos gráfico+tabela da Folha 2), como uma tabela "de
+// diagramação" sem bordas visíveis — cada célula recebe uma lista de parágrafos/tabelas já prontos.
+function staffTwoColumns(leftChildren, rightChildren){
+  const { Table, TableRow, TableCell, WidthType, BorderStyle } = window.docx;
+  const noBorder = {style: BorderStyle.NONE, size: 0, color: 'FFFFFF'};
+  const noBorders = {top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideHorizontal: noBorder, insideVertical: noBorder};
+  return new Table({
+    width: {size: 100, type: WidthType.PERCENTAGE},
+    borders: noBorders,
+    rows: [new TableRow({children: [
+      new TableCell({width: {size: 50, type: WidthType.PERCENTAGE}, borders: noBorders, margins: {right: 160}, children: leftChildren}),
+      new TableCell({width: {size: 50, type: WidthType.PERCENTAGE}, borders: noBorders, margins: {left: 160}, children: rightChildren}),
+    ]})],
+  });
+}
+
+function staffChartImageParagraph(dataUrl, widthPx, heightPx){
+  const { Paragraph, ImageRun, AlignmentType } = window.docx;
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: {after: 120},
+    children: [new ImageRun({data: dataUrl, transformation: {width: widthPx, height: heightPx}})],
+  });
+}
+
+// Tabela genérica "Cliente x Mês" (linhas = clientes, colunas = meses) usada nos 3 blocos da Folha 2.
+function staffMonthClientTable(clientesCols, meses, porCliente, fmt){
+  const { Table, TableRow, TableCell, Paragraph, TextRun, WidthType, BorderStyle, ShadingType, AlignmentType } = window.docx;
+  const thinBorder = {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara};
+  const borders = {top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder, insideHorizontal: thinBorder, insideVertical: thinBorder};
+  const headerCell = (text) => new TableCell({
+    shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.tinta},
+    children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text, bold: true, size: 15, color: 'FFFFFF'})]})],
+  });
+  // Cores alternadas por linha de cliente (zebra) — pedido em 02/09/2026.
+  const valCell = (text, fill) => new TableCell({shading: fill ? {type: ShadingType.CLEAR, fill} : undefined, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text, size: 15})]})]});
+  const labelCell = (text, fill) => new TableCell({shading: fill ? {type: ShadingType.CLEAR, fill} : undefined, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text, size: 15, bold: true})]})]});
+  const rows = [new TableRow({children: [headerCell('Cliente'), ...meses.map(m => headerCell(m.label))], tableHeader: true})];
+  clientesCols.forEach((c, idx) => {
+    const fill = staffZebraFill(idx);
+    rows.push(new TableRow({children: [labelCell(c.nome, fill), ...meses.map((m, mi) => {
+      const v = porCliente[c.nome][mi];
+      return valCell(v === null ? '—' : fmt(v), fill);
+    })]}));
+  });
+  return new Table({width: {size: 100, type: WidthType.PERCENTAGE}, borders, rows});
+}
+
+// Um bloco "Gráfico mês a mês X" + tabela por cliente — pedido em 02/09/2026: gráfico em cima, tabela
+// embaixo (empilhado, não mais 2 colunas lado a lado), usando a largura cheia da página.
+function buildStaffOverviewBlockChildren(data, titulo, financeiroKey, fmt){
+  const { Paragraph, TextRun } = window.docx;
+  const { clientesCols, meses, porCliente, totalPorMes } = buildStaffMonthlySeriesFinanceiro(data, financeiroKey);
+  // Pedido em 02/09/2026 (2ª rodada): reduzido ainda mais (gráfico e título mais compactos, sem espaço
+  // sobrando embaixo da tabela) — as 2 últimas linhas da última tabela da Overview estavam ficando de
+  // fora da página.
+  const chartUrl = renderStaffChartDataUrl(6.4, 1.15, [{name: 'Total', labels: meses.map(m => m.label), values: totalPorMes}], {chartColors: [STAFF_DOCX.azul], showLegend: false, dataLabelFormatter: fmt, dynamicYAxis: true});
+  return [
+    new Paragraph({spacing: {before: 60, after: 40}, children: [new TextRun({text: titulo, bold: true, size: 18, color: STAFF_DOCX.tinta})]}),
+    staffChartImageParagraph(chartUrl, 610, 109),
+    staffMonthClientTable(clientesCols, meses, porCliente, fmt),
+    new Paragraph({spacing: {after: 90}, children: []}),
+  ];
+}
+
+async function gerarReportStaffDocx(data, mesN, colId){
+  const { Document, Paragraph, TextRun, Packer, AlignmentType, ImageRun, LevelFormat, Header, Footer, PageNumber, convertMillimetersToTwip } = window.docx;
+  const mesLabel = mesPlanningNome(mesN) + '/' + CURRENT_YEAR;
+  const coluna = (data.reportColunas || []).find(c => c.id === colId) || null;
+  const notas = data.reportNotas || {};
+  const notaDaColuna = coluna ? (notas[coluna.id] || {}) : {};
+  const textoDe = (rowKey, fallback) => {
+    const n = notaDaColuna[rowKey];
+    return (n && n.texto && n.texto.trim()) ? n.texto.trim() : fallback;
+  };
+  const clientesCols = data.clientes.filter(c => c.nome.toLowerCase() !== 'interno');
+
+  // ---- Folha 1: Capa (fundo escuro, seção própria — ver buildStaffCoverSection) ----
+  const coverSection = buildStaffCoverSection(mesLabel, coluna);
+
+  const children = [];
+
+  // ---- Folha 2: Overview ----
+  // Pedido em 02/09/2026 (revisão de layout, v3): removida a página de Sumário — o relatório agora vai
+  // direto da capa pro "I. Overview", formato mais enxuto de "Weekly Report". Por já ser o 1º conteúdo da
+  // 2ª seção (que sempre começa em página nova), não precisa de pageBreakBefore aqui.
+  children.push(staffH1('I. Overview', false));
+  children.push(staffP(textoDe('overview', coluna ? 'Nenhuma nota registrada para esta semana na aba "Report".' : 'Nenhuma semana selecionada — vá em "Report" para registrar uma nota de Overview.')));
+  const blocoContasFinalizadas = buildStaffOverviewBlockChildren(data, 'Contas Finalizadas — mês a mês', 'contasFinalizadas', (v) => Math.round(v).toLocaleString('pt-BR'));
+  const blocoContasAutomatico = buildStaffOverviewBlockChildren(data, 'Contas Automático — mês a mês', 'contasAutomatico', (v) => Math.round(v).toLocaleString('pt-BR'));
+  // Pedido do usuário (02/09/2026): o gráfico de "Inclusão" usa os dados já existentes de Subfaturamento
+  // (não existe hoje nenhum dado de "inclusão" separado) — o de "Exclusão" foi descartado por não ter
+  // fonte de dados no app.
+  const blocoInclusao = buildStaffOverviewBlockChildren(data, 'Inclusão (dados de Subfaturamento) — mês a mês', 'subfaturamento', (v) => fmtPercent(v, 1));
+  children.push(...blocoContasFinalizadas, ...blocoContasAutomatico, ...blocoInclusao);
+
+  // ---- Folha 3: Financials ----
+  children.push(staffH1('II. Financials', true));
+  const ytd = buildStaffYtdCards(data, mesN);
+  children.push(staffH3('Margem Bruta YTD · Jan–' + (MONTHS.find(m => m.n === mesN) || {}).label + '/' + CURRENT_YEAR));
+  children.push(staffStatCardsRow([
+    {label: 'Receita Bruta Acumulada', value: ytd.receitaBrutaAcumulada === null ? '—' : (fmtCurrency(ytd.receitaBrutaAcumulada) || '—')},
+    {label: 'Custos Acumulados', value: ytd.custosAcumulados === null ? '—' : (fmtCurrency(ytd.custosAcumulados) || '—')},
+    {label: 'Saldo', value: ytd.saldo === null ? '—' : (fmtCurrency(ytd.saldo) || '—'), color: (ytd.saldo !== null && ytd.saldo < 0) ? STAFF_DOCX.vermelho : STAFF_DOCX.tinta},
+    {label: 'Ticket Médio', value: ytd.ticketMedio === null ? '—' : (fmtCurrency(Math.round(ytd.ticketMedio)) || '—')},
+    {label: '% Margem', value: ytd.percMargem === null ? '—' : fmtPercent(ytd.percMargem, 1), color: (ytd.percMargem !== null && ytd.percMargem < 0) ? STAFF_DOCX.vermelho : STAFF_DOCX.verde},
+  ]));
+  // Espaço entre os cards YTD e o título do P&L (pedido em 02/09/2026).
+  children.push(new Paragraph({spacing: {before: 200, after: 0}, children: []}));
+  children.push(staffH3('P&L · ' + mesLabel + ' (com Análise Vertical sobre a Receita Bruta)'));
+  const pnlInfo = buildStaffPnlVerticalRows(data, mesN);
+  if(!pnlInfo.mesData){
+    children.push(staffP('Sem dados de P&L sincronizados para ' + mesLabel + '.'));
+  } else {
+    const { Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType, VerticalAlign, HeightRule } = window.docx;
+    const thinBorder = {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara};
+    const borders = {top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder, insideHorizontal: thinBorder, insideVertical: thinBorder};
+    const headerRow = new TableRow({children: ['Conta', 'Valor', 'Análise Vertical'].map(t => new TableCell({
+      shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.tinta},
+      verticalAlign: VerticalAlign.CENTER,
+      children: [staffP(t, {alignment: AlignmentType.CENTER, spacing: {before: 0, after: 0}, children: [new TextRun({text: t, bold: true, size: 17, color: 'FFFFFF'})]})],
+    })), tableHeader: true});
+    // Linhas em zebra (intercaladas), exceto as linhas totalizadoras (Total revenues/Gross profit/EBITDA)
+    // que ganham fundo cinza escuro + texto branco pra se destacarem mais (pedido em 02/09/2026). Negrito
+    // aplicado em TODAS as colunas (não só na coluna de conta) pras linhas de conta (tudo que não é
+    // sub-linha de cliente). Altura mínima de 0,8cm nas linhas de conteúdo (não no cabeçalho) + texto
+    // centralizado verticalmente, também pedido em 02/09/2026. Fonte aumentada (v3, 02/09/2026): linhas de
+    // conta 15→18 (9pt), sub-linhas 14→16 (8pt), cabeçalho 15→17 (8,5pt).
+    const bodyRows = pnlInfo.rows.map((r, idx) => {
+      const isTotal = r.type === 'total';
+      const isBold = r.type !== 'sub';
+      const fill = isTotal ? STAFF_DOCX.totalBg : staffZebraFill(idx);
+      const shading = fill ? {type: ShadingType.CLEAR, fill} : undefined;
+      const corTexto = isTotal ? 'FFFFFF' : (r.type === 'sub' ? STAFF_DOCX.tintaSoft : STAFF_DOCX.tinta);
+      const corVert = isTotal ? 'FFFFFF' : STAFF_DOCX.tintaSoft;
+      const cellOpts = {shading, verticalAlign: VerticalAlign.CENTER};
+      const fontSize = r.type === 'sub' ? 16 : 18;
+      return new TableRow({
+        // Altura pedida pelo usuário em CENTÍMETROS: 0,8cm = 454 twips (1cm = 566,929 twips).
+        height: {value: 454, rule: HeightRule.ATLEAST},
+        children: [
+          new TableCell({...cellOpts, children: [staffP(r.label, {alignment: AlignmentType.CENTER, spacing: {before: 0, after: 0}, children: [new TextRun({text: r.label, bold: isBold, size: fontSize, color: corTexto})], indent: r.type === 'sub' ? {left: 200} : undefined})]}),
+          new TableCell({...cellOpts, children: [staffP('', {alignment: AlignmentType.CENTER, spacing: {before: 0, after: 0}, children: [new TextRun({text: r.val === undefined || r.val === null ? '—' : (fmtCurrency(r.val) || '—'), size: fontSize, bold: isBold, color: corTexto})]})]}),
+          new TableCell({...cellOpts, children: [staffP('', {alignment: AlignmentType.CENTER, spacing: {before: 0, after: 0}, children: [new TextRun({text: r.vert === null ? '—' : fmtPercent(r.vert, 1), size: fontSize, bold: isBold, color: corVert})]})]}),
+        ],
+      });
+    });
+    children.push(new Table({width: {size: 100, type: WidthType.PERCENTAGE}, borders, rows: [headerRow, ...bodyRows]}));
+  }
+
+  // ---- Folha 4: OKRs One Pager ----
+  // Pedido em 02/09/2026: cards e glossário mais compactos, pra tudo (cards + glossário) caber na mesma
+  // página — fontes e margens reduzidas em ambos.
+  children.push(staffH1('III. OKRs One Pager', true));
+  children.push(staffP('Realizado x Meta · comparativo por indicador · ' + mesLabel, {spacing: {before: 0, after: 260}}));
+  const areaSummary = buildReportAreaSummary(data, mesN);
+  areaSummary.forEach(area => {
+    const { Table, TableRow, TableCell, Paragraph, TextRun, WidthType, BorderStyle, ShadingType } = window.docx;
+    const noBorder = {style: BorderStyle.NONE, size: 0, color: 'FFFFFF'};
+    children.push(new Paragraph({spacing: {after: 60, before: 100}, children: [new TextRun({text: area.nome.toUpperCase() + ' · ' + area.kpis.length + ' indicador' + (area.kpis.length === 1 ? '' : 'es'), bold: true, size: 17, color: STAFF_DOCX.tinta})]}));
+    const kpiCells = area.kpis.map(kpi => {
+      const cor = kpiStatusColorReport(kpi.real, kpi.budget, kpi.slug);
+      return new TableCell({
+        width: {size: 100 / area.kpis.length, type: WidthType.PERCENTAGE},
+        shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.cinzaClaro},
+        borders: {top: {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara}, bottom: {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara}, left: {style: BorderStyle.SINGLE, size: 24, color: STAFF_DOCX.azul}, right: {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara}},
+        margins: {top: 90, bottom: 90, left: 140, right: 100},
+        children: [
+          new Paragraph({spacing: {before: 0, after: 30}, children: [new TextRun({text: kpi.titulo, size: 14, color: STAFF_DOCX.tintaSoft})]}),
+          new Paragraph({spacing: {before: 0, after: 30}, children: [new TextRun({text: fmtMetaValorReport(kpi.real, kpi.unidade), bold: true, size: 26, color: cor})]}),
+          new Paragraph({spacing: {before: 0, after: 0}, children: [new TextRun({text: 'Budget: ' + fmtMetaValorReportArredondado(kpi.budget, kpi.unidade), size: 13, color: STAFF_DOCX.tintaSoft})]}),
+        ],
+      });
+    });
+    children.push(new Table({width: {size: 100, type: WidthType.PERCENTAGE}, borders: {top: noBorder, bottom: noBorder, left: noBorder, right: noBorder, insideHorizontal: noBorder, insideVertical: noBorder}, rows: [new TableRow({children: kpiCells})]}));
+  });
+  // Espaço extra entre os cards de OKR e o título do Glossário (pedido em 02/09/2026).
+  children.push(new Paragraph({spacing: {before: 100, after: 0}, children: []}));
+  children.push(new Paragraph({spacing: {before: 220, after: 100}, border: {bottom: {style: window.docx.BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara, space: 4}}, children: [new TextRun({text: 'Glossário de OKRs', bold: true, size: 21, color: STAFF_DOCX.azul})]}));
+  // Pedido em 02/09/2026 (v3): glossário em 2 colunas (em vez de uma lista corrida só), pra caber mais
+  // compacto — 1ª metade das áreas na coluna da esquerda, 2ª metade na da direita. Fonte do corpo do
+  // glossário aumentada pra 9pt (pedido em 02/09/2026, nova rodada).
+  const okrGlossarioAreas = buildStaffOkrGlossario();
+  const areaParagraphs = (area) => [
+    new Paragraph({spacing: {before: 100, after: 30}, children: [new TextRun({text: area.nome, bold: true, size: 19, color: STAFF_DOCX.tinta})]}),
+    ...area.kpis.map(kpi => new Paragraph({spacing: {before: 0, after: 50}, children: [
+      new TextRun({text: kpi.titulo + ': ', bold: true, size: 18, color: STAFF_DOCX.tinta}),
+      new TextRun({text: kpi.descricao, size: 18, color: STAFF_DOCX.tintaSoft}),
+    ]})),
+  ];
+  const meioGlossario = Math.ceil(okrGlossarioAreas.length / 2);
+  const glossarioEsquerda = okrGlossarioAreas.slice(0, meioGlossario).flatMap(areaParagraphs);
+  const glossarioDireita = okrGlossarioAreas.slice(meioGlossario).flatMap(areaParagraphs);
+  children.push(staffTwoColumns(glossarioEsquerda, glossarioDireita));
+
+  // ---- Folha 5: Saúde Operacional ----
+  children.push(staffH1('IV. Saúde Operacional', true));
+  const { abertos, resolvidos } = buildStaffTicketsPorMes(data);
+  const mesesTodos = MONTHS;
+  // Pedido em 02/09/2026: a quebra por balde (Desenvolvimento/Bugs/Outros) fica só na tabela — no gráfico,
+  // uma série só (total do mês), na cor azul claro da paleta.
+  const totalPorMesBuckets = (obj) => mesesTodos.map(m => STAFF_SAUDE_OP_BUCKETS.reduce((soma, b) => soma + (obj[b][m.n] || 0), 0));
+  // Pedido em 02/09/2026 (v3): as 3 visões de ticket/SLA (Tickets abertos, Tickets resolvidos, SLA de 1ª
+  // Resposta) precisam caber juntas na 1ª página desta seção, com o restante (Média dias em aberto, Tempo
+  // de Processamento, Cobertura de Dados, Cobertura Produto) cabendo na 2ª página. Os gráficos foram
+  // reduzidos de 2,3in/2,1in para 1,7in/1,6in de altura pra abrir espaço suficiente.
+  const chartAbertos = renderStaffChartDataUrl(6.4, 1.7, [{name: 'Tickets', labels: mesesTodos.map(m => m.label), values: totalPorMesBuckets(abertos)}], {chartColors: [STAFF_DOCX.azulClaro], showLegend: false});
+  children.push(staffH3('Tickets abertos no Movidesk — por mês de abertura', false, true));
+  children.push(staffChartImageParagraph(chartAbertos, 610, 163));
+  children.push(staffMonthClientTable(
+    STAFF_SAUDE_OP_BUCKETS.map(b => ({nome: b})), mesesTodos,
+    Object.fromEntries(STAFF_SAUDE_OP_BUCKETS.map(b => [b, mesesTodos.map(m => abertos[b][m.n])])),
+    (v) => String(v),
+  ));
+  const chartResolvidos = renderStaffChartDataUrl(6.4, 1.7, [{name: 'Tickets', labels: mesesTodos.map(m => m.label), values: totalPorMesBuckets(resolvidos)}], {chartColors: [STAFF_DOCX.azulClaro], showLegend: false});
+  children.push(staffH3('Tickets resolvidos no Movidesk — por mês de conclusão', false, true));
+  children.push(staffChartImageParagraph(chartResolvidos, 610, 163));
+  children.push(staffMonthClientTable(
+    STAFF_SAUDE_OP_BUCKETS.map(b => ({nome: b})), mesesTodos,
+    Object.fromEntries(STAFF_SAUDE_OP_BUCKETS.map(b => [b, mesesTodos.map(m => resolvidos[b][m.n])])),
+    (v) => String(v),
+  ));
+  const slaPorMes = getMetaRealizadoByMonth('sla-primeira-resposta', data);
+  const diasAbertoPorMes = getMetaRealizadoByMonth('dias-ticket-aberto', data);
+  const tempoProcPorMes = getMetaRealizadoByMonth('tempo-processamento', data);
+  const singleSeriesChart = (obj, cor) => renderStaffChartDataUrl(6.4, 1.6, [{name: 'Valor', labels: mesesTodos.map(m => m.label), values: mesesTodos.map(m => obj[m.n])}], {chartColors: [cor], showLegend: false});
+  // keepNext em cada título garante que ele nunca fique "órfão" no fim de uma página, com o gráfico
+  // sozinho na página seguinte (independe de onde a quebra de página acima cair).
+  children.push(staffH3('SLA de 1ª Resposta — evolução mensal do tempo médio (minutos)', false, true));
+  children.push(staffChartImageParagraph(singleSeriesChart(slaPorMes, STAFF_DOCX.azul), 610, 154));
+
+  // 2ª página da seção: Média dias em aberto, Tempo de Processamento, Cobertura de Dados e Cobertura
+  // Produto — quebra de página forçada antes de "Média dias em aberto" garante que tudo isso comece
+  // numa página nova (pedido em 02/09/2026).
+  children.push(staffH3('Média dias em aberto — tickets Movidesk', true, true));
+  children.push(staffChartImageParagraph(singleSeriesChart(diasAbertoPorMes, STAFF_DOCX.azul), 610, 154));
+  children.push(staffH3('Tempo de Processamento — evolução do tempo médio', false, true));
+  children.push(staffChartImageParagraph(singleSeriesChart(tempoProcPorMes, STAFF_DOCX.azul), 610, 154));
+
+  children.push(staffH3('Cobertura de Dados por base — ' + mesLabel));
+  const covDados = computeCoberturaDadosStatsPorBase(data, mesN);
+  {
+    const { Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType, VerticalAlign, HeightRule } = window.docx;
+    const thinBorder = {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara};
+    const borders = {top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder, insideHorizontal: thinBorder, insideVertical: thinBorder};
+    // Altura mínima de 0,4cm nas linhas de conteúdo (cabeçalho fica com a altura padrão) — pedido em
+    // 02/09/2026 (correção: valor pedido era em centímetros, não polegadas — 0,4cm = 227 twips).
+    const rowH = {height: {value: 227, rule: HeightRule.ATLEAST}};
+    const rows = [new TableRow({children: ['Base', '% Cobertura'].map(t => new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.tinta}, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: t, bold: true, size: 15, color: 'FFFFFF'})]})]})), tableHeader: true})];
+    covDados.porBase.forEach((b, idx) => {
+      const fill = staffZebraFill(idx);
+      const shading = fill ? {type: ShadingType.CLEAR, fill} : undefined;
+      rows.push(new TableRow({...rowH, children: [
+        new TableCell({shading, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: b.base, size: 15})]})]}),
+        new TableCell({shading, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: b.pct === null ? '—' : fmtPercent(b.pct, 1), size: 15})]})]}),
+      ]}));
+    });
+    // Linha "Total" em destaque (cinza escuro + texto branco) — pedido em 02/09/2026 (v3).
+    rows.push(new TableRow({...rowH, children: [
+      new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.totalBg}, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: 'Total', bold: true, size: 15, color: 'FFFFFF'})]})]}),
+      new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.totalBg}, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: covDados.totalPct === null ? '—' : fmtPercent(covDados.totalPct, 1), bold: true, size: 15, color: 'FFFFFF'})]})]}),
+    ]}));
+    children.push(new Table({width: {size: 100, type: WidthType.PERCENTAGE}, borders, rows}));
+  }
+
+  children.push(staffH3('Cobertura Produto por categoria'));
+  const covProduto = computeCoberturaProdutoStatsPorCategoria(data);
+  {
+    const { Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType, VerticalAlign, HeightRule } = window.docx;
+    const thinBorder = {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara};
+    const borders = {top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder, insideHorizontal: thinBorder, insideVertical: thinBorder};
+    const rowH = {height: {value: 227, rule: HeightRule.ATLEAST}};
+    const rows = [new TableRow({children: ['Categoria', '% Cobertura'].map(t => new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.tinta}, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: t, bold: true, size: 15, color: 'FFFFFF'})]})]})), tableHeader: true})];
+    covProduto.porCategoria.forEach((cat, idx) => {
+      const fill = staffZebraFill(idx);
+      const shading = fill ? {type: ShadingType.CLEAR, fill} : undefined;
+      rows.push(new TableRow({...rowH, children: [
+        new TableCell({shading, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: cat.categoria, size: 15})]})]}),
+        new TableCell({shading, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: cat.pct === null ? '—' : fmtPercent(cat.pct, 1), size: 15})]})]}),
+      ]}));
+    });
+    // Linha "Total" em destaque (cinza escuro + texto branco) — pedido em 02/09/2026 (v3).
+    rows.push(new TableRow({...rowH, children: [
+      new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.totalBg}, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: 'Total', bold: true, size: 15, color: 'FFFFFF'})]})]}),
+      new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.totalBg}, verticalAlign: VerticalAlign.CENTER, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: covProduto.totalGeral.pct === null ? '—' : fmtPercent(covProduto.totalGeral.pct, 1), bold: true, size: 15, color: 'FFFFFF'})]})]}),
+    ]}));
+    children.push(new Table({width: {size: 100, type: WidthType.PERCENTAGE}, borders, rows}));
+  }
+
+  // ---- Folha 6: Clientes ----
+  children.push(staffH1('V. Clientes', true));
+  clientesCols.forEach((c, idx) => {
+    const clienteId = c.id;
+    const nome = c.nome;
+    if(idx > 0) children.push(new Paragraph({pageBreakBefore: true, children: []}));
+    children.push(staffH2(nome));
+    const realFin = ((data.financeiro && data.financeiro.contasFinalizadas && data.financeiro.contasFinalizadas[CURRENT_YEAR] || {})[nome] || {})[mesN];
+    const budgetFinCheio = ((data.financeiro && data.financeiro.contasFinalizadasBudget && data.financeiro.contasFinalizadasBudget[CURRENT_YEAR] || {})[nome] || {})[mesN];
+    const budgetFin = linearizarBudgetContasFinalizadasReport(budgetFinCheio, 'contas-finalizadas', mesN);
+    const efetividade = getMetaRealizadoPorClienteMes('efetividade-regras', data, clienteId, nome, mesN, null);
+    const penetracao = getMetaRealizadoPorClienteMes('penetracao-regras', data, clienteId, nome, mesN, null);
+    const diasAberto = getMetaRealizadoPorClienteMes('dias-ticket-aberto', data, clienteId, nome, mesN, null);
+    children.push(staffStatCardsRow([
+      {label: 'Contas Finalizadas Real', value: (realFin === undefined || realFin === null) ? '—' : Math.round(realFin).toLocaleString('pt-BR')},
+      {label: 'Contas Finalizadas Budget', value: (budgetFin === undefined || budgetFin === null) ? '—' : Math.round(budgetFin).toLocaleString('pt-BR')},
+      {label: 'Efetividade Regras', value: efetividade === null ? '—' : fmtPercent(efetividade, 1)},
+      {label: 'Penetração Regras', value: penetracao === null ? '—' : fmtPercent(penetracao, 1)},
+      {label: 'Média dias em aberto', value: diasAberto === null ? '—' : fmtNumber(diasAberto)},
+    ]));
+    // Espaço entre os cards e o texto do cliente, e entre o texto e "Tickets em aberto" (pedido em
+    // 02/09/2026).
+    children.push(staffP(textoDe(clienteId, coluna ? ('Nenhuma nota registrada para ' + nome + ' nesta semana na aba "Report".') : 'Nenhuma semana selecionada — vá em "Report" para registrar a descrição deste cliente.'), {spacing: {before: 200, after: 200}}));
+
+    children.push(staffH3('Tickets em aberto — Planning'));
+    const rowsPlanning = buildStaffClientPlanningRows(data, nome);
+    if(!rowsPlanning.length){
+      children.push(staffP('Nenhum ticket de Planning em aberto para ' + nome + '.'));
+    } else {
+      const { Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType } = window.docx;
+      const thinBorder = {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara};
+      const borders = {top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder, insideHorizontal: thinBorder, insideVertical: thinBorder};
+      const headerRow = new TableRow({children: ['Assunto', 'Responsável', 'Prazo', 'Status'].map(t => new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.tinta}, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: t, bold: true, size: 15, color: 'FFFFFF'})]})]})), tableHeader: true});
+      const bodyRows = rowsPlanning.map(r => new TableRow({children: [
+        new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.assunto || '(sem assunto)', size: 14})]})]}),
+        new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.responsavel || '—', size: 14})]})]}),
+        new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.prazo ? fmtDataColunaReport(r.prazo) : '—', size: 14})]})]}),
+        new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.status || '—', size: 14})]})]}),
+      ]}));
+      children.push(new Table({width: {size: 100, type: WidthType.PERCENTAGE}, borders, rows: [headerRow, ...bodyRows]}));
+    }
+  });
+
+  // Pedido em 02/09/2026: fonte "Funnel Display" em todo o documento — aplicada uma única vez aqui, como
+  // estilo padrão (em vez de repetir "font" em cada um dos ~40 TextRun espalhados pelas funções acima).
+  // Um TextRun que já define "font" explicitamente continua tendo prioridade sobre este padrão.
+  const doc = new Document({
+    styles: {default: {document: {run: {font: 'Funnel Display', size: 20, color: STAFF_DOCX.tinta}}}},
+    sections: [
+      coverSection,
+      {
+        properties: {page: {size: {width: convertMillimetersToTwip(210), height: convertMillimetersToTwip(297)}, margin: {top: 1000, bottom: 850, left: 850, right: 850}}},
+        headers: {default: buildStaffHeader()},
+        footers: {default: new Footer({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [
+          new TextRun({text: 'Rivio · Report Staff · ' + mesLabel + ' · pág. ', size: 14, color: STAFF_DOCX.tintaSoft}),
+          new TextRun({children: [PageNumber.CURRENT], size: 14, color: STAFF_DOCX.tintaSoft}),
+        ]})]})},
+        children,
+      },
+    ],
+  });
+  const blob = await Packer.toBlob(doc);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'Report Staff - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.docx';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 // Tela exibida em "Acompanhamento de Metas" quando nenhum indicador está selecionado no menu lateral —
 // antes era só uma mensagem vazia; agora funciona como geradora do Report Mensal em PPTX (pedido em
 // 27/08/2026), reaproveitando os mesmos dados/cálculos já usados no resto do app.
@@ -7735,6 +8509,26 @@ function TrackingIndexPage({data}){
       setErroOnePager((e && e.message) || 'Não foi possível gerar o one-pager. Tente novamente.');
     }finally{
       setGerandoOnePager(false);
+    }
+  };
+
+  const [gerandoStaff, setGerandoStaff] = useState(false);
+  const [erroStaff, setErroStaff] = useState('');
+  const reportColunas = data.reportColunas || [];
+  const [semanaStaff, setSemanaStaff] = useState('');
+  // Pedido em 02/09/2026: 4º gerador — "Report Staff" em Word (.docx), com Overview/Financials/OKRs/
+  // Saúde Operacional/Clientes. Os NÚMEROS usam o mesmo mês do seletor "Mês da análise" acima; os TEXTOS
+  // (Overview e descrição de cada cliente) vêm da coluna escolhida aqui, dentro da aba "Report".
+  const handleGerarStaff = async () => {
+    setGerandoStaff(true);
+    setErroStaff('');
+    try{
+      await gerarReportStaffDocx(data, mesRelatorio, semanaStaff || null);
+    }catch(e){
+      console.error('Erro ao gerar Report Staff', e);
+      setErroStaff((e && e.message) || 'Não foi possível gerar o report staff. Tente novamente.');
+    }finally{
+      setGerandoStaff(false);
     }
   };
 
@@ -7803,6 +8597,22 @@ function TrackingIndexPage({data}){
           </button>
           <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Visão geral por área (mesmo conteúdo do 1º slide do Report), em uma única imagem .png, em formato retrato — pronta para colar num documento.</div>
           {erroOnePager && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePager}</div>}
+
+          <div style={{marginTop:18, paddingTop:16, borderTop:'1px solid var(--line)'}}>
+            <div className="field">
+              <label>Semana (aba "Report")</label>
+              <select className="select" value={semanaStaff} onChange={e => setSemanaStaff(e.target.value)}>
+                <option value="">Sem semana (relatório só com números)</option>
+                {reportColunas.map(col => <option value={col.id} key={col.id}>Semana de {fmtDataColunaReport(col.dataIso)}</option>)}
+              </select>
+              <div className="hint">Define de qual coluna da aba "Report" vêm o texto de Overview e a descrição de cada cliente. Os números continuam vindo do "Mês da análise" acima.</div>
+            </div>
+            <button type="button" className="btn btn-ghost report-generate-btn" disabled={gerandoStaff} onClick={handleGerarStaff}>
+              {gerandoStaff ? 'Gerando report staff…' : 'Gerar Report Staff'}
+            </button>
+            <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Relatório completo em Word (.docx) para o founder — Overview, Financials, OKRs, Saúde Operacional e uma seção por cliente.</div>
+            {erroStaff && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroStaff}</div>}
+          </div>
         </div>
       </div>
     </div>
