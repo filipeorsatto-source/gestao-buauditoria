@@ -290,6 +290,17 @@
   table.tbl tr:hover td{background:var(--surface-2);}
   .row-actions{display:flex;gap:6px;justify-content:flex-end;}
 
+  /* REPORT — histórico de notas por cliente x data (pedido 02/09/2026) */
+  table.report-tbl th:first-child, table.report-tbl td:first-child{white-space:nowrap;}
+  .report-col-head{display:flex;align-items:center;gap:8px;justify-content:space-between;}
+  .report-col-head .btn-icon{opacity:0;transition:opacity 0.15s;}
+  table.report-tbl th:hover .btn-icon{opacity:1;}
+  .report-row-label{font-weight:600;font-size:13px;}
+  .report-row-overview .report-row-label{color:var(--accent);}
+  .report-nota-btn{white-space:nowrap;}
+  .report-nota-btn-ok{background:var(--positive-soft);color:var(--positive);border-color:transparent;display:inline-flex;align-items:center;gap:5px;}
+  .report-nota-btn-ok:hover{background:var(--positive);color:#fff;}
+
   .link-title{font-weight:600;font-size:13px;}
   .link-desc{color:var(--ink-soft);font-size:12.3px;margin-top:1px;}
   .link-url{
@@ -862,7 +873,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-08-31.28';
+const APP_BUILD_ID = '2026-09-02.29';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3638,6 +3649,8 @@ function buildDefaultData(){
     produtoFuncoesBudget: {},
     demandasCustom: {},
     demandasManuais: [],
+    reportColunas: [],
+    reportNotas: {},
     metas: INDICADORES.map(ind => ({
       id: 'ind_' + ind.slug,
       slug: ind.slug,
@@ -3774,6 +3787,15 @@ function runMigrations(parsed){
       // migrate: ensure demandasCustom field exists (campos editáveis por nº de ticket)
       if(!parsed.demandasCustom){
         parsed.demandasCustom = {};
+        changed = true;
+      }
+      // migrate: ensure reportColunas/reportNotas fields exist (aba "Report" adicionada em 02/09/2026)
+      if(!parsed.reportColunas){
+        parsed.reportColunas = [];
+        changed = true;
+      }
+      if(!parsed.reportNotas){
+        parsed.reportNotas = {};
         changed = true;
       }
       // migrate: associa cada meta ao slug do indicador correspondente, para conectar o Realizado automático
@@ -4443,6 +4465,16 @@ function Sidebar({route, setRoute}){
         >
           <IconClipboard className="nav-icon"/>
           <span>Demandas</span>
+        </div>
+      </div>
+
+      <div className="nav-group">
+        <div
+          className={"nav-item" + (route.section === 'report' ? ' active' : '')}
+          onClick={() => setRoute({section: 'report'})}
+        >
+          <IconInbox className="nav-icon"/>
+          <span>Report</span>
         </div>
       </div>
 
@@ -11413,6 +11445,170 @@ function DemandaRow({row, devTeam, actions, onRequestDeleteManual}){
 }
 
 /* ---------------------------------------------------------------
+   REPORT — histórico de notas por cliente x data (pedido 02/09/2026)
+--------------------------------------------------------------- */
+function fmtDataColunaReport(dataIso){
+  if(!dataIso) return '—';
+  const d = new Date(dataIso + 'T00:00:00');
+  if(isNaN(d.getTime())) return '—';
+  const dd = String(d.getDate()).padStart(2,'0');
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  return dd + '/' + mm + '/' + d.getFullYear();
+}
+
+function ReportColunaModal({onSave, onClose}){
+  const todayIso = new Date().toISOString().slice(0,10);
+  const [dataIso, setDataIso] = useState(todayIso);
+  return (
+    <Modal title="Adicionar coluna" onClose={onClose} width="360px" footer={
+      <>
+        <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+        <button className="btn btn-primary" disabled={!dataIso} style={!dataIso ? {opacity:0.5, cursor:'not-allowed'} : undefined}
+          onClick={() => dataIso && onSave(dataIso)}>
+          Adicionar
+        </button>
+      </>
+    }>
+      <div className="field">
+        <label>Data (vira o título da coluna)</label>
+        <input className="input" type="date" value={dataIso} onChange={e=>setDataIso(e.target.value)} autoFocus/>
+      </div>
+    </Modal>
+  );
+}
+
+function ReportNotaModal({initial, colunaTitulo, linhaLabel, onSave, onClose}){
+  const [texto, setTexto] = useState(initial ? initial.texto : '');
+  const canSave = texto.trim().length > 0;
+  return (
+    <Modal title={(initial ? 'Editar nota' : 'Adicionar nota') + ' — ' + linhaLabel + ' · ' + colunaTitulo} onClose={onClose} width="480px" footer={
+      <>
+        <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+        <button className="btn btn-primary" disabled={!canSave} style={!canSave ? {opacity:0.5, cursor:'not-allowed'} : undefined}
+          onClick={() => canSave && onSave(texto.trim())}>
+          Salvar Nota
+        </button>
+      </>
+    }>
+      <div className="field">
+        <label>Nota</label>
+        <textarea className="input" value={texto} onChange={e=>setTexto(e.target.value)}
+          placeholder="Escreva um ou dois parágrafos sobre o que está acontecendo..." style={{minHeight:120}} autoFocus/>
+      </div>
+      {initial && (
+        <div className="hint">Última edição por {initial.atualizadoPor} em {fmtDataAbertura(initial.atualizadoEm)}.</div>
+      )}
+    </Modal>
+  );
+}
+
+function ReportPage({data, actions}){
+  // Mesma exclusão do cliente "Interno" usada nas outras listagens de cliente da ferramenta (ex.:
+  // TarefasTable) — não é um cliente de verdade, então não faz sentido ter uma linha de report pra ele.
+  const linhas = useMemo(() => ([
+    {key:'overview', label:'Overview'},
+    ...data.clientes.filter(c => c.nome.toLowerCase() !== 'interno').map(c => ({key:c.id, label:c.nome})),
+  ]), [data.clientes]);
+
+  const colunas = data.reportColunas || [];
+  const notas = data.reportNotas || {};
+
+  const [modalColuna, setModalColuna] = useState(false);
+  const [modalNota, setModalNota] = useState(null); // {colId, rowKey} | null
+  const [confirmDelColuna, setConfirmDelColuna] = useState(null); // coluna obj | null
+
+  const notaAtual = modalNota ? ((notas[modalNota.colId] || {})[modalNota.rowKey] || null) : null;
+  const colunaDoModalNota = modalNota ? colunas.find(c => c.id === modalNota.colId) : null;
+  const linhaDoModalNota = modalNota ? linhas.find(l => l.key === modalNota.rowKey) : null;
+
+  return (
+    <div className="card">
+      <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+        <div>
+          <div className="section-block-title">Report</div>
+          <div className="section-block-desc">Histórico de registros por cliente — cada coluna é uma data; clique em "Adicionar Nota" para registrar o que está acontecendo.</div>
+        </div>
+        {colunas.length > 0 && (
+          <button className="btn btn-primary btn-sm" onClick={()=>setModalColuna(true)}><IconPlus width="14" height="14"/>Adicionar coluna</button>
+        )}
+      </div>
+
+      {colunas.length === 0 ? (
+        <EmptyState icon={IconClipboard} title="Nenhuma coluna criada ainda"
+          sub="Adicione uma coluna de data para começar a registrar notas por cliente."
+          action={<button className="btn btn-primary btn-sm" onClick={()=>setModalColuna(true)}><IconPlus width="14" height="14"/>Adicionar coluna</button>}
+        />
+      ) : (
+        <div className="table-wrap">
+          <table className="tbl report-tbl">
+            <thead>
+              <tr>
+                <th>Cliente</th>
+                {colunas.map(col => (
+                  <th key={col.id}>
+                    <div className="report-col-head">
+                      <span>{fmtDataColunaReport(col.dataIso)}</span>
+                      <button className="btn-icon danger" title="Remover coluna" onClick={()=>setConfirmDelColuna(col)}>
+                        <IconX width="12" height="12"/>
+                      </button>
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {linhas.map(linha => (
+                <tr key={linha.key} className={linha.key === 'overview' ? 'report-row-overview' : undefined}>
+                  <td><span className="report-row-label">{linha.label}</span></td>
+                  {colunas.map(col => {
+                    const nota = (notas[col.id] || {})[linha.key];
+                    return (
+                      <td key={col.id}>
+                        <button
+                          className={"btn btn-sm report-nota-btn" + (nota ? ' report-nota-btn-ok' : ' btn-ghost')}
+                          onClick={()=>setModalNota({colId: col.id, rowKey: linha.key})}
+                        >
+                          {nota ? <><IconCheck width="12" height="12"/>Nota adicionada</> : 'Adicionar Nota'}
+                        </button>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {modalColuna && (
+        <ReportColunaModal
+          onClose={()=>setModalColuna(false)}
+          onSave={(dataIso)=>{ actions.addReportColuna(dataIso); setModalColuna(false); }}
+        />
+      )}
+
+      {modalNota && (
+        <ReportNotaModal
+          initial={notaAtual}
+          colunaTitulo={colunaDoModalNota ? fmtDataColunaReport(colunaDoModalNota.dataIso) : ''}
+          linhaLabel={linhaDoModalNota ? linhaDoModalNota.label : ''}
+          onClose={()=>setModalNota(null)}
+          onSave={(texto)=>{ actions.saveReportNota(modalNota.colId, modalNota.rowKey, texto); setModalNota(null); }}
+        />
+      )}
+
+      <ConfirmDialog
+        open={!!confirmDelColuna}
+        title="Remover coluna"
+        text={confirmDelColuna ? `Tem certeza que deseja remover a coluna "${fmtDataColunaReport(confirmDelColuna.dataIso)}"? Todas as notas registradas nela serão perdidas.` : ''}
+        onCancel={()=>setConfirmDelColuna(null)}
+        onConfirm={()=>{ actions.deleteReportColuna(confirmDelColuna.id); setConfirmDelColuna(null); }}
+      />
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
    APP ROOT
 --------------------------------------------------------------- */
 const SECTION_META = {
@@ -11422,6 +11618,7 @@ const SECTION_META = {
   tracking: {title:'Acompanhamento de Metas', eyebrow:'Realizado vs. budget'},
   rotinas: {title:'Rotinas', eyebrow:'Agenda semanal do time'},
   demandas: {title:'Demandas', eyebrow:'Tickets Movidesk por cliente'},
+  report: {title:'Report', eyebrow:'Histórico de registros por cliente'},
 };
 
 const ALLOWED_EMAIL_DOMAIN = '@rivio.com.br';
@@ -12353,6 +12550,46 @@ function App(){
         `Base de Efetividade Regras atualizada (${Object.keys(porClienteId).length} cliente${Object.keys(porClienteId).length===1?'':'s'})`
       );
     },
+    // Aba "Report" (histórico de registros por cliente x data), adicionada em 02/09/2026.
+    // Cria uma nova coluna de data — o "+" no cabeçalho da tabela. `dataIso` vem do <input type="date">
+    // (formato YYYY-MM-DD); a coluna aparece com esse valor formatado como título.
+    addReportColuna: (dataIso) => {
+      const aplicar = (base) => [...(base||[]), {id: uid(), dataIso}];
+      return mutateTopLevelFieldGranular('reportColunas', d => ({...d, reportColunas: aplicar(d.reportColunas)}), aplicar, 'Coluna adicionada');
+    },
+
+    // Remove uma coluna inteira (e todas as notas registradas nela) — mexe em dois campos de topo ao
+    // mesmo tempo (reportColunas + reportNotas), por isso usa mutateFieldsGranular em vez da versão de
+    // campo único.
+    deleteReportColuna: (colId) => {
+      const aplicarColunas = (base) => (base||[]).filter(c => c.id !== colId);
+      const aplicarNotas = (base) => {
+        const notas = {...(base||{})};
+        delete notas[colId];
+        return notas;
+      };
+      return mutateFieldsGranular(
+        d => ({...d, reportColunas: aplicarColunas(d.reportColunas), reportNotas: aplicarNotas(d.reportNotas)}),
+        { reportColunas: aplicarColunas, reportNotas: aplicarNotas },
+        'Coluna removida'
+      );
+    },
+
+    // Cria ou edita a nota de uma célula (cruzamento coluna de data x linha — "Overview" ou um cliente).
+    // Reabrir uma nota já salva (botão verde) e salvar de novo passa por aqui de novo, sobrescrevendo o
+    // texto e atualizando quem editou por último.
+    saveReportNota: (colId, rowKey, texto) => {
+      const who = (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido';
+      const nowIso = new Date().toISOString();
+      const aplicar = (base) => {
+        const notas = {...(base||{})};
+        const doColuna = {...(notas[colId]||{})};
+        doColuna[rowKey] = {texto, atualizadoPor: who, atualizadoEm: nowIso};
+        notas[colId] = doColuna;
+        return notas;
+      };
+      return mutateTopLevelFieldGranular('reportNotas', d => ({...d, reportNotas: aplicar(d.reportNotas)}), aplicar, 'Nota salva');
+    },
   }), [mutateTopLevelFieldGranular, mutateFieldsGranular, mutateDemandasCustomGranular, authUser]);
 
   if(authUser === undefined){
@@ -12415,6 +12652,7 @@ function App(){
           {route.section === 'tracking' && (route.indicator ? <TrackingPage slug={route.indicator} financeiro={data.financeiro} upsellScore={data.upsellScore} clientes={data.clientes} actions={actions} data={data}/> : <TrackingIndexPage data={data}/>)}
           {route.section === 'rotinas' && <RotinasPage data={data} actions={actions}/>}
           {route.section === 'demandas' && <DemandasPage data={data} actions={actions}/>}
+          {route.section === 'report' && <ReportPage data={data} actions={actions}/>}
         </div>
       </div>
       <ToastStack toasts={toasts}/>
