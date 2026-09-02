@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-02.33';
+const APP_BUILD_ID = '2026-09-02.34';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7903,13 +7903,14 @@ function computeCoberturaDadosStatsPorBase(data, mesN){
   return {porBase, totalPct: (monthData && totalCampos) ? (totalChecked / totalCampos * 100) : null, temDados: !!monthData};
 }
 
-// De-para de classificação pedido pelo usuário para os gráficos de Saúde Operacional: "Desenvolvimento"
-// (tudo que começa com "Desenvolvimento", exceto "Desenvolvimento Produto" e "Desenvolvimento Bug"),
-// "Bugs" ("Atendimento Bug" e "Desenvolvimento Bug"), "Outros" (o resto — inclui Auditoria e
-// Desenvolvimento Produto, que não foram citados em nenhum dos 2 outros baldes).
+// De-para de classificação pedido pelo usuário para os gráficos de Saúde Operacional (corrigido em
+// 02/09/2026, v2 — antes "Desenvolvimento" pegava só "Desenvolvimento Personalização" e jogava
+// "Desenvolvimento Produto" para "Outros", o oposto do que deveria): "Desenvolvimento" = SÓ
+// "Desenvolvimento Produto"; "Bugs" = "Atendimento Bug" e "Desenvolvimento Bug" (mantido como estava);
+// "Outros" = o resto (Auditoria, Desenvolvimento Personalização, Atendimento Dúvida/Personalização/Regra).
 function classificacaoBucketSaudeOperacional(classificacao){
   if(classificacao === 'Atendimento Bug' || classificacao === 'Desenvolvimento Bug') return 'Bugs';
-  if(classificacao && classificacao.startsWith('Desenvolvimento') && classificacao !== 'Desenvolvimento Produto' && classificacao !== 'Desenvolvimento Bug') return 'Desenvolvimento';
+  if(classificacao === 'Desenvolvimento Produto') return 'Desenvolvimento';
   return 'Outros';
 }
 const STAFF_SAUDE_OP_BUCKETS = ['Desenvolvimento', 'Bugs', 'Outros'];
