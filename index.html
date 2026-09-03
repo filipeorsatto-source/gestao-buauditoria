@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-02.34';
+const APP_BUILD_ID = '2026-09-02.35';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2754,6 +2754,15 @@ function mesDoPrazo(prazo){
   return mes >= 1 && mes <= 12 ? mes : '';
 }
 
+// Ano (ex.: 2026) extraído de uma data pura "YYYY-MM-DD..." — usado para restringir métricas de tickets
+// do Movidesk ao ano corrente (pedido em 02/09/2026: "os tickets do Movidesk devem considerar apenas o
+// ano de 2026, isso vale pra todos" — ver uso em mesConclusao logo abaixo).
+function anoDaData(iso){
+  if(!iso) return null;
+  const ano = Number(String(iso).split('-')[0]);
+  return ano || null;
+}
+
 function fmtDataAbertura(iso){
   if(!iso) return '—';
   const d = new Date(iso);
@@ -2911,11 +2920,14 @@ function buildDemandasMergedUncached(customMap, baseRows, manualRows){
       // esse campo (% Entregas Prazo, CSAT por mês, filtro "Mês Planning" etc.).
       mesPlanning: mesDoPrazo(prazo),
       // Mês de conclusão do ticket (data de "Concluído Em", não a data de Prazo) — usado especificamente
-      // pelas metas de CSAT (CSAT Tech/Atendimento/Produto), que devem contar o CSAT no mês em que o
-      // ticket foi de fato concluído/avaliado, não no mês do prazo original (ajuste pedido em 27/08/2026).
-      // mesDoPrazo funciona igual para qualquer string de data "YYYY-MM-DD..." (extrai o 2º campo ao
-      // dividir por "-"), então reaproveitada aqui em vez de duplicar a lógica.
-      mesConclusao: mesDoPrazo(concluidoEm),
+      // pelas metas de CSAT (CSAT Tech/Atendimento/Produto) e pelas tabelas de "Tickets resolvidos" do
+      // Report Staff, que devem contar o ticket no mês em que ele foi de fato concluído/avaliado, não no
+      // mês do prazo original (ajuste pedido em 27/08/2026). mesDoPrazo funciona igual para qualquer
+      // string de data "YYYY-MM-DD..." (extrai o 2º campo ao dividir por "-"), então reaproveitada aqui em
+      // vez de duplicar a lógica. Só preenchido quando o ANO da conclusão é o ano corrente (pedido em
+      // 02/09/2026: tickets do Movidesk só contam para o ano de 2026 em todas as métricas) — um ticket
+      // concluído em outro ano fica de fora de qualquer agregação por mesConclusao.
+      mesConclusao: anoDaData(concluidoEm) === CURRENT_YEAR ? mesDoPrazo(concluidoEm) : '',
       prioridade: c.prioridade || '',
       esforco: (c.esforco === undefined || c.esforco === null || c.esforco === '') ? null : Number(c.esforco),
       atrasado: isDemandaAtrasado(prazo, statusEfetivo, concluidoEm),
@@ -2971,7 +2983,12 @@ const INDICADORES = [
   {slug:'upsell-score', titulo:'Relacionamento', area:'Deployment', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
   {slug:'contas-finalizadas', titulo:'Contas Finalizadas', area:'Deployment', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
   {slug:'subfaturamento', titulo:'Subfaturamento', area:'Auditoria', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
-  {slug:'contas-automatico', titulo:'% Contas Automático', area:'Auditoria', descricao:'Número de contas do cliente finalizadas automaticamente, sem intervenção manual.', unidade:'Absoluto', fonte:'Sincronizado da aba "Contas Automáticas" da planilha Gestão Metas.'},
+  // Renomeado de "% Contas Automático" para "Contas Automático" (pedido em 02/09/2026, v2) — o KPI guarda
+  // valores ABSOLUTOS (quantidade de contas), não percentual, então o "%" no nome era enganoso (mesmo
+  // motivo que já tinha levado o Planning a chamar esse KPI de "Contas Automáticos" — ver
+  // addPlanningAuditoriaGeralSlide). A migração de sincronização de título por slug (ver runMigrations)
+  // propaga esse nome pra qualquer meta já salva com o título antigo.
+  {slug:'contas-automatico', titulo:'Contas Automático', area:'Auditoria', descricao:'Número de contas do cliente finalizadas automaticamente, sem intervenção manual.', unidade:'Absoluto', fonte:'Sincronizado da aba "Contas Automáticas" da planilha Gestão Metas.'},
   {slug:'nps', titulo:'NPS', area:'Geral', descricao:'Satisfação do cliente medida através de pesquisa bimestral.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/18JDaC4rIPpCGS2_3qgXLV0gwXjJNMaL0'},
   {slug:'penetracao-regras', titulo:'Penetração Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'http://central-regras.riviobizdev.com/'},
   {slug:'efetividade-regras', titulo:'Efetividade Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
@@ -7838,7 +7855,10 @@ function renderStaffChartDataUrl(widthIn, heightIn, chartData, opts){
 // { [ano]: { [nomeCliente]: { [mesN]: valor } } } — usado por Contas Finalizadas, Contas Automático e
 // Subfaturamento (que o usuário pediu para reaproveitar como o gráfico de "Inclusão" — ver comentário em
 // buildStaffOverviewBlocks). Sempre os 12 meses do ano (Jan–Dez), preenchido ou não (pedido 02/09/2026).
-function buildStaffMonthlySeriesFinanceiro(data, key){
+// `agg` controla como a linha "Total" do gráfico é calculada entre os hospitais: 'soma' (padrão — Contas
+// Finalizadas e Contas Automático, que são contagens) ou 'media' (Subfaturamento/Inclusão, que é um
+// percentual — pedido em 02/09/2026, v2: a linha do gráfico deve ser a MÉDIA dos hospitais, não a soma).
+function buildStaffMonthlySeriesFinanceiro(data, key, agg){
   const clientesCols = data.clientes.filter(c => c.nome.toLowerCase() !== 'interno');
   const yearData = (data.financeiro && data.financeiro[key] && data.financeiro[key][CURRENT_YEAR]) || {};
   // Pedido em 02/09/2026: sempre plotar os 12 meses (Jan–Dez) no eixo, mesmo os que ainda não têm dado
@@ -7852,9 +7872,11 @@ function buildStaffMonthlySeriesFinanceiro(data, key){
     });
   });
   const totalPorMes = meses.map((m, idx) => {
-    let soma = null;
-    clientesCols.forEach(c => { const v = porCliente[c.nome][idx]; if(v !== null) soma = (soma || 0) + v; });
-    return soma;
+    const valores = [];
+    clientesCols.forEach(c => { const v = porCliente[c.nome][idx]; if(v !== null) valores.push(v); });
+    if(!valores.length) return null;
+    const soma = valores.reduce((a, b) => a + b, 0);
+    return agg === 'media' ? (soma / valores.length) : soma;
   });
   return {clientesCols, meses, porCliente, totalPorMes};
 }
@@ -7927,6 +7949,8 @@ function buildStaffTicketsPorMes(data){
   merged.forEach(t => {
     const bucket = classificacaoBucketSaudeOperacional(t.classificacao);
     MONTHS.forEach(m => { if(mesAnoAbertura(t.abertoEm, m.n)) abertos[bucket][m.n]++; });
+    // t.mesConclusao já só vem preenchido quando a conclusão foi no ano corrente (ver mesConclusao em
+    // buildDemandasMergedUncached) — pedido em 02/09/2026: tickets do Movidesk só contam pro ano de 2026.
     if(t.mesConclusao) resolvidos[bucket][t.mesConclusao] = (resolvidos[bucket][t.mesConclusao] || 0) + 1;
   });
   return {abertos, resolvidos};
@@ -8029,6 +8053,44 @@ function staffP(text, opts){
     children: runs.map(r => new TextRun(Object.assign({text: r.text, size: 20, color: STAFF_DOCX.tinta}, r))),
     spacing: {after: 160},
   }, opts || {}));
+}
+
+// Pedido em 02/09/2026: alguns textos digitados na aba "Report" (Overview/descrição de cliente) estavam
+// saindo com "*" literais no Word — o usuário digita nesses textos livres um markdown-lite informal
+// (**negrito**, ou "* item"/"- item" pra lista), mas o texto ia direto pro docx como TextRun puro, sem
+// interpretar nada disso. staffMarkdownParagraphs quebra o texto em parágrafos (1 por linha), interpreta
+// **negrito** (vira TextRun bold, sem os asteriscos) e transforma uma linha começando com "* " ou "- " em
+// bullet "• " (sem o caractere de marcação original) — mesma formatação-base do staffP (size 20, cor
+// tinta) pra manter a aparência do texto igual à de antes.
+// `edgeSpacing` (opcional) sobrescreve o `before` do 1º parágrafo e o `after` do último — necessário
+// porque agora o texto pode virar vários parágrafos (1 por linha), e o "espaço antes/depois do bloco"
+// pedido em rodadas anteriores só deve entrar nas pontas, não em toda linha.
+function staffMarkdownParagraphs(text, opts, edgeSpacing){
+  const { Paragraph, TextRun } = window.docx;
+  const linhas = String(text == null ? '' : text).split(/\r?\n/);
+  return linhas.map((linhaBruta, idx) => {
+    // "* item" ou "- item" no início da linha (só quando seguido de espaço, pra não confundir com
+    // **negrito** logo no começo da linha) vira um bullet "• ", sem o caractere de marcação original.
+    const bulletMatch = linhaBruta.match(/^\s*[*-]\s+(.*)$/);
+    const linha = bulletMatch ? ('• ' + bulletMatch[1]) : linhaBruta;
+    // Divide a linha em pedaços alternando texto normal (índice par) e **negrito** (índice ímpar, o grupo
+    // capturado) — calcula o bold PELA POSIÇÃO ORIGINAL antes de filtrar vazios, senão filtrar primeiro
+    // desalinharia a paridade par/ímpar dos pedaços restantes.
+    const partes = linha.split(/\*\*(.+?)\*\*/g)
+      .map((p, i) => ({text: p, bold: i % 2 === 1}))
+      .filter(r => r.text !== '');
+    const children = (partes.length ? partes : [{text: '', bold: false}])
+      .map(r => new TextRun({text: r.text, size: 20, color: STAFF_DOCX.tinta, bold: r.bold}));
+    const spacing = Object.assign({after: idx === linhas.length - 1 ? 160 : 40}, (opts && opts.spacing) || {});
+    if(edgeSpacing){
+      if(idx === 0 && edgeSpacing.before !== undefined) spacing.before = edgeSpacing.before;
+      if(idx === linhas.length - 1 && edgeSpacing.after !== undefined) spacing.after = edgeSpacing.after;
+    }
+    return new Paragraph(Object.assign({}, opts || {}, {
+      children: children.length ? children : [new TextRun({text: '', size: 20, color: STAFF_DOCX.tinta})],
+      spacing,
+    }));
+  });
 }
 
 function staffH1(text, pageBreakBefore){
@@ -8141,9 +8203,9 @@ function staffMonthClientTable(clientesCols, meses, porCliente, fmt){
 
 // Um bloco "Gráfico mês a mês X" + tabela por cliente — pedido em 02/09/2026: gráfico em cima, tabela
 // embaixo (empilhado, não mais 2 colunas lado a lado), usando a largura cheia da página.
-function buildStaffOverviewBlockChildren(data, titulo, financeiroKey, fmt){
+function buildStaffOverviewBlockChildren(data, titulo, financeiroKey, fmt, agg){
   const { Paragraph, TextRun } = window.docx;
-  const { clientesCols, meses, porCliente, totalPorMes } = buildStaffMonthlySeriesFinanceiro(data, financeiroKey);
+  const { clientesCols, meses, porCliente, totalPorMes } = buildStaffMonthlySeriesFinanceiro(data, financeiroKey, agg);
   // Pedido em 02/09/2026 (2ª rodada): reduzido ainda mais (gráfico e título mais compactos, sem espaço
   // sobrando embaixo da tabela) — as 2 últimas linhas da última tabela da Overview estavam ficando de
   // fora da página.
@@ -8178,13 +8240,13 @@ async function gerarReportStaffDocx(data, mesN, colId){
   // direto da capa pro "I. Overview", formato mais enxuto de "Weekly Report". Por já ser o 1º conteúdo da
   // 2ª seção (que sempre começa em página nova), não precisa de pageBreakBefore aqui.
   children.push(staffH1('I. Overview', false));
-  children.push(staffP(textoDe('overview', coluna ? 'Nenhuma nota registrada para esta semana na aba "Report".' : 'Nenhuma semana selecionada — vá em "Report" para registrar uma nota de Overview.')));
+  children.push(...staffMarkdownParagraphs(textoDe('overview', coluna ? 'Nenhuma nota registrada para esta semana na aba "Report".' : 'Nenhuma semana selecionada — vá em "Report" para registrar uma nota de Overview.')));
   const blocoContasFinalizadas = buildStaffOverviewBlockChildren(data, 'Contas Finalizadas — mês a mês', 'contasFinalizadas', (v) => Math.round(v).toLocaleString('pt-BR'));
   const blocoContasAutomatico = buildStaffOverviewBlockChildren(data, 'Contas Automático — mês a mês', 'contasAutomatico', (v) => Math.round(v).toLocaleString('pt-BR'));
   // Pedido do usuário (02/09/2026): o gráfico de "Inclusão" usa os dados já existentes de Subfaturamento
   // (não existe hoje nenhum dado de "inclusão" separado) — o de "Exclusão" foi descartado por não ter
   // fonte de dados no app.
-  const blocoInclusao = buildStaffOverviewBlockChildren(data, 'Inclusão (dados de Subfaturamento) — mês a mês', 'subfaturamento', (v) => fmtPercent(v, 1));
+  const blocoInclusao = buildStaffOverviewBlockChildren(data, 'Inclusão (dados de Subfaturamento) — mês a mês', 'subfaturamento', (v) => fmtPercent(v, 1), 'media');
   children.push(...blocoContasFinalizadas, ...blocoContasAutomatico, ...blocoInclusao);
 
   // ---- Folha 3: Financials ----
@@ -8316,7 +8378,10 @@ async function gerarReportStaffDocx(data, mesN, colId){
   const slaPorMes = getMetaRealizadoByMonth('sla-primeira-resposta', data);
   const diasAbertoPorMes = getMetaRealizadoByMonth('dias-ticket-aberto', data);
   const tempoProcPorMes = getMetaRealizadoByMonth('tempo-processamento', data);
-  const singleSeriesChart = (obj, cor) => renderStaffChartDataUrl(6.4, 1.6, [{name: 'Valor', labels: mesesTodos.map(m => m.label), values: mesesTodos.map(m => obj[m.n])}], {chartColors: [cor], showLegend: false});
+  const singleSeriesChart = (obj, cor, extraOpts) => renderStaffChartDataUrl(6.4, 1.6, [{name: 'Valor', labels: mesesTodos.map(m => m.label), values: mesesTodos.map(m => obj[m.n])}], Object.assign({chartColors: [cor], showLegend: false}, extraOpts || {}));
+  // Tempo de Processamento mostra 1 casa decimal no rótulo do gráfico (pedido em 02/09/2026) — diferente
+  // de SLA/Média dias em aberto, que continuam arredondados (minutos/dias inteiros).
+  const fmtUmaCasa = (v) => v.toLocaleString('pt-BR', {minimumFractionDigits: 1, maximumFractionDigits: 1});
   // keepNext em cada título garante que ele nunca fique "órfão" no fim de uma página, com o gráfico
   // sozinho na página seguinte (independe de onde a quebra de página acima cair).
   children.push(staffH3('SLA de 1ª Resposta — evolução mensal do tempo médio (minutos)', false, true));
@@ -8328,7 +8393,7 @@ async function gerarReportStaffDocx(data, mesN, colId){
   children.push(staffH3('Média dias em aberto — tickets Movidesk', true, true));
   children.push(staffChartImageParagraph(singleSeriesChart(diasAbertoPorMes, STAFF_DOCX.azul), 610, 154));
   children.push(staffH3('Tempo de Processamento — evolução do tempo médio', false, true));
-  children.push(staffChartImageParagraph(singleSeriesChart(tempoProcPorMes, STAFF_DOCX.azul), 610, 154));
+  children.push(staffChartImageParagraph(singleSeriesChart(tempoProcPorMes, STAFF_DOCX.azul, {dataLabelFormatter: fmtUmaCasa}), 610, 154));
 
   children.push(staffH3('Cobertura de Dados por base — ' + mesLabel));
   const covDados = computeCoberturaDadosStatsPorBase(data, mesN);
@@ -8401,8 +8466,13 @@ async function gerarReportStaffDocx(data, mesN, colId){
       {label: 'Média dias em aberto', value: diasAberto === null ? '—' : fmtNumber(diasAberto)},
     ]));
     // Espaço entre os cards e o texto do cliente, e entre o texto e "Tickets em aberto" (pedido em
-    // 02/09/2026).
-    children.push(staffP(textoDe(clienteId, coluna ? ('Nenhuma nota registrada para ' + nome + ' nesta semana na aba "Report".') : 'Nenhuma semana selecionada — vá em "Report" para registrar a descrição deste cliente.'), {spacing: {before: 200, after: 200}}));
+    // 02/09/2026) — aplicado só no 1º parágrafo (before) e no último (after) do texto, já que agora ele
+    // pode virar mais de 1 parágrafo (uma linha digitada = um parágrafo, ver staffMarkdownParagraphs).
+    children.push(...staffMarkdownParagraphs(
+      textoDe(clienteId, coluna ? ('Nenhuma nota registrada para ' + nome + ' nesta semana na aba "Report".') : 'Nenhuma semana selecionada — vá em "Report" para registrar a descrição deste cliente.'),
+      null,
+      {before: 200, after: 200}
+    ));
 
     children.push(staffH3('Tickets em aberto — Planning'));
     const rowsPlanning = buildStaffClientPlanningRows(data, nome);
@@ -9428,7 +9498,7 @@ function ContasAutomaticoPage({financeiro, actions, sync}){
     const porCliente = parseClienteMesSheet(values);
     actions.importContasAutomaticoRealizado(porCliente);
   };
-  return <PercentClientGoalPage titulo="% Contas Automático" financeiro={financeiro} dataKey="contasAutomatico" budgetKey="contasAutomaticoBudget"
+  return <PercentClientGoalPage titulo="Contas Automático" financeiro={financeiro} dataKey="contasAutomatico" budgetKey="contasAutomaticoBudget"
     setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}
     sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Contas Automáticas" da planilha Gestão Metas — valores absolutos (quantidade de contas), não percentual.'
     unidade="Absoluto" totalMode="soma"/>;
@@ -13321,7 +13391,7 @@ function App(){
       return mutateFieldsGranular(
         d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), contasAutomaticoSync: aplicarSync()}),
         { financeiro: aplicarFinanceiro, contasAutomaticoSync: aplicarSync },
-        `Base de % Contas Automático atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`
+        `Base de Contas Automático atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`
       );
     },
 
