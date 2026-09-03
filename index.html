@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-02.35';
+const APP_BUILD_ID = '2026-09-03.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2930,6 +2930,11 @@ function buildDemandasMergedUncached(customMap, baseRows, manualRows){
       mesConclusao: anoDaData(concluidoEm) === CURRENT_YEAR ? mesDoPrazo(concluidoEm) : '',
       prioridade: c.prioridade || '',
       esforco: (c.esforco === undefined || c.esforco === null || c.esforco === '') ? null : Number(c.esforco),
+      // Pedido em 03/09/2026: marca que a task está bloqueada por outra e por isso não pode ainda
+      // começar — enquanto marcada, ela fica de fora do cálculo da meta "Média dias ticket em aberto"
+      // (ver getMetaRealizadoByMonth/getMetaRealizadoPorClienteMes, slug 'dias-ticket-aberto'), mas
+      // continua aparecendo normalmente na tabela de Demandas e nas demais contagens/indicadores.
+      blocked: !!c.blocked,
       atrasado: isDemandaAtrasado(prazo, statusEfetivo, concluidoEm),
       concluidaNoPrazo: isDemandaConcluidaNoPrazo(prazo, statusEfetivo, concluidoEm),
       editMeta: c._editMeta || {},
@@ -4267,6 +4272,21 @@ function ConfirmDialog({open, title, text, onCancel, onConfirm}){
 /* ---------------------------------------------------------------
    GENERIC UI: MultiSelect
 --------------------------------------------------------------- */
+// Pedido em 03/09/2026: nos filtros multi-select de campos que podem estar vazios (Responsável,
+// Tipo, Classificação, Prioridade, Responsável Desenvolvimento), o usuário precisa conseguir isolar
+// as linhas em que o campo NÃO foi preenchido — antes só dava pra escolher entre os valores
+// cadastrados, nunca "em branco". Um id sintético reservado representa essa opção nos arrays de
+// `options` desses MultiSelects, e `demandaFiltroMatch` sabe interpretá-lo ao filtrar.
+const DEMANDAS_FILTRO_BLANK_ID = '__blank__';
+const DEMANDAS_FILTRO_BLANK_LABEL = '(Em branco)';
+function withBlankOption(options){
+  return [...options, {id: DEMANDAS_FILTRO_BLANK_ID, label: DEMANDAS_FILTRO_BLANK_LABEL}];
+}
+function demandaFiltroMatch(selected, value){
+  if(!selected || !selected.length) return true;
+  if(value) return selected.includes(value);
+  return selected.includes(DEMANDAS_FILTRO_BLANK_ID);
+}
 function MultiSelect({options, value, onChange, placeholder, colorFn}){
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
@@ -5230,8 +5250,12 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
     // classificados como Atendimento (Atendimento Bug, Atendimento Regra, etc. — qualquer classificação
     // que comece com "Atendimento") e que ainda NÃO tenham um responsável de Desenvolvimento alocado —
     // uma vez que o ticket vai pro time de Dev, ele deixa de refletir o tempo de resposta do Atendimento.
+    // Pedido em 03/09/2026: tickets marcados como "Blocked" (bloqueados por outra task, ainda não podem
+    // nem começar) também ficam de fora — do contrário inflariam a média sem refletir um problema real
+    // de atendimento, já que o relógio está correndo por um motivo alheio à fila.
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
       .filter(m => m.prioridade !== 'Despriorizado')
+      .filter(m => !m.blocked)
       .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId);
     const scoped = merged.filter(m => pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
     const out = {};
@@ -5433,10 +5457,12 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     return avgCsat(subset.map(x => x.csat));
   }
   if(slug === 'dias-ticket-aberto'){
-    // Mesmo critério de escopo do agregado acima (ver getMetaRealizadoByMonth): exclui Despriorizados e
-    // só considera tickets de Atendimento sem responsável de Desenvolvimento alocado (pedido 31/08/2026).
+    // Mesmo critério de escopo do agregado acima (ver getMetaRealizadoByMonth): exclui Despriorizados,
+    // Blocked (pedido 03/09/2026) e só considera tickets de Atendimento sem responsável de
+    // Desenvolvimento alocado (pedido 31/08/2026).
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
       .filter(m => m.prioridade !== 'Despriorizado')
+      .filter(m => !m.blocked)
       .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId);
     const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
@@ -7414,9 +7440,14 @@ function addPlanningClienteSlide(pptx, clienteNome, data, mesN, mesLabel){
   const diasReal = mesAnt ? getMetaRealizadoPorClienteMes('dias-ticket-aberto', data, clienteId, clienteNome, mesAnt, null) : null;
   addPlanningStatPairCard(pptx, slide, atdX+0.16, colY+0.48, atdW-0.32, 0.9, 'Média Dias em Aberto',
     {value: fmtMetaValorReport(diasReal, 'Absoluto'), label:'REAL'}, {value:'5,0', label:'META MÊS'});
-  const atdRows = planningDoCliente.filter(m => m.classificacao === 'Atendimento Personalização');
+  // Pedido em 03/09/2026: a coluna "Atendimento" deve trazer as demandas de Atendimento (qualquer
+  // classificação começando com "Atendimento", não só "Atendimento Personalização") que JÁ TÊM um
+  // desenvolvedor alocado — e a coluna RESP. deve mostrar esse desenvolvedor (responsavelDesenvolvimentoId,
+  // via pessoaNomePlanning, mesmo helper já usado na coluna Desenvolvimento), não o responsável de
+  // atendimento (m.responsavel).
+  const atdRows = planningDoCliente.filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && m.responsavelDesenvolvimentoId);
   addPlanningListTable(pptx, slide, atdX+0.16, colY+1.56, atdW-0.32, colH-1.72, ['DEMANDA','','RESP.'],
-    atdRows.map(m => [m.assunto || '(sem assunto)', prioridadeAbrevPlanning(m.prioridade), m.responsavel || '—']),
+    atdRows.map(m => [m.assunto || '(sem assunto)', prioridadeAbrevPlanning(m.prioridade), pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) || '—']),
     [null, 0.33, 0.92], {fontSize:7});
 }
 
@@ -11757,17 +11788,17 @@ function DemandasPage({data, actions}){
 
   const filtered = useMemo(() => merged.filter(m => {
     if(!statusFilter.has(m.status)) return false;
-    if(respFilter.length && !respFilter.includes(m.responsavel)) return false;
+    if(!demandaFiltroMatch(respFilter, m.responsavel)) return false;
     if(mesFinalizacaoFilter.length){
       if(!m.concluidoEm) return false;
       const mesConclusao = Number(m.concluidoEm.split('-')[1]);
       if(!mesFinalizacaoFilter.map(Number).includes(mesConclusao)) return false;
     }
     if(mesPlanningFilter.length && !mesPlanningFilter.map(String).includes(String(m.mesPlanning))) return false;
-    if(tipoFilter.length && !tipoFilter.includes(m.tipo)) return false;
-    if(classificacaoFilter.length && !classificacaoFilter.includes(m.classificacao)) return false;
-    if(respDevFilter.length && !respDevFilter.includes(m.responsavelDesenvolvimentoId)) return false;
-    if(prioridadeFilter.length && !prioridadeFilter.includes(m.prioridade)) return false;
+    if(!demandaFiltroMatch(tipoFilter, m.tipo)) return false;
+    if(!demandaFiltroMatch(classificacaoFilter, m.classificacao)) return false;
+    if(!demandaFiltroMatch(respDevFilter, m.responsavelDesenvolvimentoId)) return false;
+    if(!demandaFiltroMatch(prioridadeFilter, m.prioridade)) return false;
     return true;
   }), [merged, statusFilter, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter]);
 
@@ -11916,7 +11947,7 @@ function DemandasPage({data, actions}){
         <div className="filters-bar" style={{margin:'0 0 14px'}}>
           <div className="filters-bar-ms">
             <MultiSelect
-              options={responsavelOptions.map(r => ({id:r, label:r}))}
+              options={withBlankOption(responsavelOptions.map(r => ({id:r, label:r})))}
               value={respFilter}
               onChange={setRespFilter}
               placeholder="Todos os responsáveis"
@@ -11945,7 +11976,7 @@ function DemandasPage({data, actions}){
           </div>
           <div className="filters-bar-ms">
             <MultiSelect
-              options={DEMANDA_TIPO_OPTIONS.map(o => ({id:o, label:o}))}
+              options={withBlankOption(DEMANDA_TIPO_OPTIONS.map(o => ({id:o, label:o})))}
               value={tipoFilter}
               onChange={setTipoFilter}
               placeholder="Tipo"
@@ -11953,7 +11984,7 @@ function DemandasPage({data, actions}){
           </div>
           <div className="filters-bar-ms">
             <MultiSelect
-              options={DEMANDA_CLASSIFICACAO_OPTIONS.map(o => ({id:o, label:o}))}
+              options={withBlankOption(DEMANDA_CLASSIFICACAO_OPTIONS.map(o => ({id:o, label:o})))}
               value={classificacaoFilter}
               onChange={setClassificacaoFilter}
               placeholder="Classificação"
@@ -11961,7 +11992,7 @@ function DemandasPage({data, actions}){
           </div>
           <div className="filters-bar-ms">
             <MultiSelect
-              options={DEMANDA_PRIORIDADE_OPTIONS.map(o => ({id:o, label:o}))}
+              options={withBlankOption(DEMANDA_PRIORIDADE_OPTIONS.map(o => ({id:o, label:o})))}
               value={prioridadeFilter}
               onChange={setPrioridadeFilter}
               placeholder="Prioridade"
@@ -11969,7 +12000,7 @@ function DemandasPage({data, actions}){
           </div>
           <div className="filters-bar-ms">
             <MultiSelect
-              options={devTeam.map(p => ({id:p.id, label:p.nome}))}
+              options={withBlankOption(devTeam.map(p => ({id:p.id, label:p.nome})))}
               value={respDevFilter}
               onChange={setRespDevFilter}
               placeholder="Responsável Desenvolvimento"
@@ -12048,6 +12079,7 @@ function DemandasClienteTable({cliente, rows, devTeam, actions, onRequestDeleteM
                 <th>Urgência</th>
                 <th>Prioridade</th>
                 <th>Esforço</th>
+                <th title="Marque quando a task está bloqueada por outra e ainda não pode começar. Enquanto marcada, não conta para a meta 'Média dias ticket em aberto'.">Blocked</th>
                 <th>Prazo</th>
                 <th>Concluído em</th>
                 <th>CSAT</th>
@@ -12227,6 +12259,13 @@ function DemandaRow({row, devTeam, actions, onRequestDeleteManual}){
           step="0.5"
           min="0"
           onBlur={e => actions.updateDemandaCustom(row.numero, {esforco: e.target.value === '' ? null : e.target.value})}
+        />
+      </td>
+      <td style={{textAlign:'center'}} title="Marque quando a task está bloqueada por outra e ainda não pode começar. Enquanto marcada, não conta para a meta 'Média dias ticket em aberto'.">
+        <input
+          type="checkbox"
+          checked={!!row.blocked}
+          onChange={e => actions.updateDemandaCustom(row.numero, {blocked: e.target.checked})}
         />
       </td>
       <td className="demanda-prazo-cell">
