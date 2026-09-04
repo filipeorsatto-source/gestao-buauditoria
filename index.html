@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-04.3';
+const APP_BUILD_ID = '2026-09-04.4';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -4585,13 +4585,22 @@ function Sidebar({route, setRoute}){
 /* ---------------------------------------------------------------
    OVERVIEW — Org Chart
 --------------------------------------------------------------- */
+// Pedido em 04/09/2026: label de Atendimento (Especialista/N1/Projeto), um campo à parte da "Função"
+// (texto livre) — só se aplica a pessoas da área Atendimento, e é o que passa a alimentar os cálculos
+// de "Geral · Atendimento" no Planning, "Ranking Individual · Atendimento" no Report Mensal, e as telas
+// "Média dias em aberto"/"CSAT Atendimento" no app (ver ATENDIMENTO_LABEL_OPTIONS e demais usos). Só uma
+// opção por pessoa (marcar uma desmarca as outras) — confirmado com o usuário em 04/09/2026.
+const ATENDIMENTO_LABEL_OPTIONS = ['Especialista', 'N1', 'Projeto'];
+
 function PersonModal({initial, allPessoas, onSave, onClose}){
   const [nome, setNome] = useState(initial ? initial.nome : '');
   const [funcao, setFuncao] = useState(initial ? initial.funcao : '');
   const [area, setArea] = useState(initial ? initial.area : '');
   const [reportsToId, setReportsToId] = useState(initial ? (initial.reportsToId || '') : '');
   const [lideranca, setLideranca] = useState(initial ? !!initial.lideranca : false);
+  const [atendimentoLabel, setAtendimentoLabel] = useState(initial ? (initial.atendimentoLabel || '') : '');
   const canSave = nome.trim().length > 0 && area.trim().length > 0;
+  const isAtendimento = normalizeClientName(area) === normalizeClientName('Atendimento');
 
   const managerOptions = (allPessoas || []).filter(p => !initial || p.id !== initial.id);
 
@@ -4602,7 +4611,8 @@ function PersonModal({initial, allPessoas, onSave, onClose}){
         <button className="btn btn-primary" disabled={!canSave} style={!canSave ? {opacity:0.5, cursor:'not-allowed'} : undefined}
           onClick={() => canSave && onSave({
             nome: nome.trim(), funcao: funcao.trim(), area: area.trim(),
-            reportsToId: reportsToId || null, lideranca
+            reportsToId: reportsToId || null, lideranca,
+            atendimentoLabel: isAtendimento ? atendimentoLabel : '',
           })}>
           Salvar
         </button>
@@ -4630,6 +4640,29 @@ function PersonModal({initial, allPessoas, onSave, onClose}){
         </select>
         <div className="hint">Define a posição desta pessoa no organograma.</div>
       </div>
+      {isAtendimento && (
+        <div className="field">
+          <label style={{marginBottom:6}}>Label de Atendimento</label>
+          <div className="chip-row" style={{marginBottom:0}}>
+            {ATENDIMENTO_LABEL_OPTIONS.map(opt => {
+              const checked = atendimentoLabel === opt;
+              return (
+                <label key={opt} style={{display:'inline-flex', alignItems:'center', gap:6, cursor:'pointer', marginRight:14}}>
+                  <span
+                    className={"checkbox" + (checked ? ' checked' : '')}
+                    style={{display:'inline-flex', verticalAlign:'middle', cursor:'pointer'}}
+                    onClick={() => setAtendimentoLabel(l => l === opt ? '' : opt)}
+                  >
+                    {checked && <IconCheck width="10" height="10" stroke="#fff"/>}
+                  </span>
+                  {opt}
+                </label>
+              );
+            })}
+          </div>
+          <div className="hint">Especialista/N1/Projeto — só uma opção por pessoa. Usado nos cálculos de Atendimento (Planning, Report Mensal e as telas de Média dias em aberto/CSAT Atendimento).</div>
+        </div>
+      )}
       <div className="field">
         <label style={{marginBottom:0}}>
           <span
@@ -4652,7 +4685,14 @@ function PersonCard({person, onEdit, onDelete}){
     <div className="orgchart-person">
       <div className="orgchart-avatar" style={{background: colorForArea(person.area)}}>{initials(person.nome)}</div>
       <div className="orgchart-person-info">
-        <div className={"orgchart-person-name" + (person.lideranca ? ' lideranca' : '')}>{person.nome}</div>
+        <div className={"orgchart-person-name" + (person.lideranca ? ' lideranca' : '')}>
+          {person.nome}
+          {person.atendimentoLabel && (
+            <span className="status-pill" style={{marginLeft:6, fontSize:10, verticalAlign:'middle', background:'var(--accent-soft)', color:'var(--accent-ink)'}}>
+              {person.atendimentoLabel}
+            </span>
+          )}
+        </div>
         <div className="orgchart-person-role">{person.funcao ? person.funcao : (person.area || '—')}</div>
       </div>
       <div className="orgchart-person-actions">
@@ -5291,7 +5331,12 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
     // pedido em 27/08/2026: ver comentário em CsatMatrixPage / no campo mesConclusao.
     const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+    // Pedido em 04/09/2026: pessoa com o label de Atendimento "Projeto" (ver ATENDIMENTO_LABEL_OPTIONS)
+    // refina os tickets ANTES de chegarem no Especialista — pra ela, o CSAT considera só tickets de
+    // Atendimento que JÁ TÊM um desenvolvedor alocado, diferente de Especialista/N1 (sem essa exigência).
+    const pessoaProjeto = slug === 'csat-atendimento' && pessoaFiltro && pessoaFiltro.atendimentoLabel === 'Projeto';
     const scoped = merged.filter(m => m.classificacao && matchFn(m.classificacao) && m.mesConclusao
+      && (pessoaProjeto ? !!m.responsavelDesenvolvimentoId : true)
       && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
     MONTHS.forEach(m => {
@@ -5311,10 +5356,15 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
     // Pedido em 03/09/2026: tickets marcados como "Blocked" (bloqueados por outra task, ainda não podem
     // nem começar) também ficam de fora — do contrário inflariam a média sem refletir um problema real
     // de atendimento, já que o relógio está correndo por um motivo alheio à fila.
+    // Pedido em 04/09/2026: pessoa com o label de Atendimento "Projeto" (ver ATENDIMENTO_LABEL_OPTIONS)
+    // refina os tickets ANTES de chegarem no Especialista — pra ela, inverte o critério de alocação de
+    // dev: considera só tickets que JÁ TÊM um desenvolvedor alocado (Especialista/N1 continuam exigindo o
+    // oposto — sem dev alocado). Só se aplica quando a meta está escopada por essa pessoa específica.
+    const pessoaProjeto = pessoaFiltro && pessoaFiltro.atendimentoLabel === 'Projeto';
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
       .filter(m => m.prioridade !== 'Despriorizado')
       .filter(m => !m.blocked)
-      .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId);
+      .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && (pessoaProjeto ? !!m.responsavelDesenvolvimentoId : !m.responsavelDesenvolvimentoId));
     const scoped = merged.filter(m => pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
     const out = {};
     MONTHS.forEach(m => {
@@ -5525,18 +5575,24 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     // pedido em 27/08/2026: ver comentário em CsatMatrixPage / no campo mesConclusao.
     const matchFn = DEMANDA_SLUG_MATCH_FN[slug];
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+    // Mesmo critério de escopo do agregado acima (ver getMetaRealizadoByMonth) — pessoa "Projeto" exige
+    // dev alocado (pedido 04/09/2026), Especialista/N1 não têm essa exigência.
+    const pessoaProjeto = slug === 'csat-atendimento' && pessoaFiltro && pessoaFiltro.atendimentoLabel === 'Projeto';
     const subset = merged.filter(x => x.classificacao && matchFn(x.classificacao) && String(x.mesConclusao) === String(mesN) && x.cliente === clienteNome
+      && (pessoaProjeto ? !!x.responsavelDesenvolvimentoId : true)
       && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     return avgCsat(subset.map(x => x.csat));
   }
   if(slug === 'dias-ticket-aberto'){
     // Mesmo critério de escopo do agregado acima (ver getMetaRealizadoByMonth): exclui Despriorizados,
-    // Blocked (pedido 03/09/2026) e só considera tickets de Atendimento sem responsável de
-    // Desenvolvimento alocado (pedido 31/08/2026).
+    // Blocked (pedido 03/09/2026), inverte a exigência de dev alocado pra pessoa "Projeto" (pedido
+    // 04/09/2026) e, pras demais, só considera tickets de Atendimento sem responsável de Desenvolvimento
+    // alocado (pedido 31/08/2026).
+    const pessoaProjeto = pessoaFiltro && pessoaFiltro.atendimentoLabel === 'Projeto';
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
       .filter(m => m.prioridade !== 'Despriorizado')
       .filter(m => !m.blocked)
-      .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId);
+      .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && (pessoaProjeto ? !!m.responsavelDesenvolvimentoId : !m.responsavelDesenvolvimentoId));
     const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
       .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, mesN))
@@ -7075,9 +7131,21 @@ function addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel){
     headerRow3.push({text: 'vs BGT', options: {align: 'center', fill: {color: 'F0F0F0'}, fontSize: 9, color: RIVIO_PPTX.tintaSoft}});
   });
 
+  // Pedido em 04/09/2026, item (vi): pessoa de Atendimento com o label "Projeto" (ver
+  // ATENDIMENTO_LABEL_OPTIONS) não atende o cliente diretamente — SLA 1ª Resposta não se aplica a ela
+  // (o real dos demais KPIs de Atendimento dessa pessoa já vem certo de getMetaRealizadoByMonth, que
+  // aplica a régua "só tickets com dev alocado" internamente).
+  const labelAtendimentoPorNome = {};
+  (data.pessoas || []).forEach(p => { if(p.atendimentoLabel) labelAtendimentoPorNome[p.nome] = p.atendimentoLabel; });
+
   const bodyRows = rows.map(r => {
     const cells = [{text: r.pessoa, options: {bold: true, fontSize: 10}}];
     area.kpis.forEach(slug => {
+      if(slug === 'sla-primeira-resposta' && labelAtendimentoPorNome[r.pessoa] === 'Projeto'){
+        cells.push({text: '—', options: {align: 'center', fontSize: 9.5, color: 'C7C9D1'}});
+        cells.push({text: 'Não se aplica', options: {align: 'center', fontSize: 9, italic: true, color: RIVIO_PPTX.tintaSoft, colspan: 2}});
+        return;
+      }
       const v = r.valores[slug];
       if(!v){
         cells.push({text: '—', options: {align: 'center', fontSize: 9.5, color: 'C7C9D1'}});
@@ -7112,6 +7180,15 @@ function addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel){
     slide.addText(
       '* Tempo Processamento: cada pessoa considera só os clientes em que está envolvida, exceto ' + TEMPO_PROCESSAMENTO_PESSOA_GLOBAL_NOME + ', que é responsável por essa frente em todos os clientes (função "Executar dentro do prazo as demandas de desenvolvimento relacionadas a performance e lentidão da plataforma" em Papéis e Responsabilidades) e por isso considera a média de todos.',
       {x: 0.4, y: 6.95, w: 11.3, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 7.5, italic: true, color: RIVIO_PPTX.tintaSoft, valign: 'top'}
+    );
+  }
+  // Nota de rodapé (pedido em 04/09/2026, item vi): explica o "Não se aplica" do SLA 1ª Resposta pras
+  // pessoas com o label "Projeto" — só mostra quando o slide realmente tem esse KPI e alguém com esse
+  // label na lista.
+  if(area.kpis.includes('sla-primeira-resposta') && rows.some(r => labelAtendimentoPorNome[r.pessoa] === 'Projeto')){
+    slide.addText(
+      '* SLA 1ª Resposta não se aplica a quem tem o label "Projeto" (organograma) — essa pessoa refina os tickets antes do Especialista, sem contato direto com o cliente. Nos demais KPIs de Atendimento, ela considera só os tickets já com desenvolvedor alocado.',
+      {x: 0.4, y: area.kpis.includes('tempo-processamento') ? 7.32 : 6.95, w: 11.3, h: 0.35, fontFace: RIVIO_PPTX.fontFace, fontSize: 7.5, italic: true, color: RIVIO_PPTX.tintaSoft, valign: 'top'}
     );
   }
 }
@@ -7575,13 +7652,30 @@ function addPlanningDeploymentGeralSlide(pptx, data, mesN, mesLabel){
 
 // Slides 10-11 (ou mais, dependendo de quantos devs alocados) — Geral Desenvolvimento: 2 desenvolvedores
 // por slide, cada um com o esforço total (Planning/Plus) e a lista de demandas.
+// Ordena as tarefas do slide "Geral · Desenvolvimento": primeiro por tipo (Planning aparece antes de
+// Nova Demanda) e, dentro de cada tipo, por prioridade (P0, P1, P2, ... e por fim sem prioridade/
+// Despriorizado). Pedido em 04/09/2026, item (ii).
+function comparePlanningDevRows(a, b){
+  const tipoOrdem = t => t === 'Planning' ? 0 : (t === 'Nova Demanda' ? 1 : 2);
+  const tOrd = tipoOrdem(a.tipo) - tipoOrdem(b.tipo);
+  if(tOrd !== 0) return tOrd;
+  const prioOrdem = p => {
+    const m = /^P(\d+)$/.exec(p || '');
+    return m ? Number(m[1]) : 99;
+  };
+  return prioOrdem(a.prioridade) - prioOrdem(b.prioridade);
+}
+
 function addPlanningDevSlide(pptx, devsPair, data, mesN, mesLabel){
   const slide = pptx.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
   addPlanningHeader(pptx, slide, 'Visão geral · desenvolvimento', 'Geral · Desenvolvimento');
 
   const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
-  const gap = 0.28, colW = (12.53 - gap)/2, startX = 0.4, startY = 1.9, colH = 5.2;
+  // Pedido em 04/09/2026, item (i): tabelas/formas um pouco mais largas (gap e margem menores) e mais
+  // próximas do título (startY reduzido, ganho de altura repassado para a tabela) — objetivo é caber
+  // mais tarefas listadas sem cortar.
+  const gap = 0.2, startX = 0.3, colW = (13.33 - startX*2 - gap)/2, startY = 1.66, colH = 5.44;
 
   devsPair.forEach((dev, i) => {
     const x = startX + i*(colW+gap);
@@ -7589,7 +7683,8 @@ function addPlanningDevSlide(pptx, devsPair, data, mesN, mesLabel){
     slide.addText(dev ? dev.nome : '—', {x:x+0.16, y:startY+0.1, w:colW-0.32, h:0.3, fontFace:RIVIO_PPTX.fontFace, fontSize:14, bold:true, color:RIVIO_PPTX.tinta});
     if(!dev) return;
     const rows = merged.filter(m => m.responsavelDesenvolvimentoId === dev.id && demandaEmAbertoPlanning(m)
-      && m.classificacao && PLANNING_CLASSIF_DEV.includes(m.classificacao) && (m.tipo === 'Planning' || m.tipo === 'Nova Demanda'));
+      && m.classificacao && PLANNING_CLASSIF_DEV.includes(m.classificacao) && (m.tipo === 'Planning' || m.tipo === 'Nova Demanda'))
+      .slice().sort(comparePlanningDevRows);
     const planningRows = rows.filter(m => m.tipo === 'Planning');
     const plusRows = rows.filter(m => m.tipo === 'Nova Demanda');
     const somaEsforco = list => list.reduce((a,m) => a + (Number(m.esforco)||0), 0);
@@ -7598,8 +7693,8 @@ function addPlanningDevSlide(pptx, devsPair, data, mesN, mesLabel){
     addPlanningStatSingleCard(pptx, slide, x+0.16+statW+0.14, startY+0.46, statW, 0.5, String(somaEsforco(plusRows)), 'ESFORÇO TOTAL · PLUS', RIVIO_PPTX.azul);
 
     const tableRows = rows.map(m => [m.assunto || '(sem assunto)', m.cliente || '—', m.prioridade || '—', m.esforco === null || m.esforco === undefined ? '—' : String(m.esforco), m.tipo || '—']);
-    addPlanningListTable(pptx, slide, x+0.16, startY+1.12, colW-0.32, colH-1.28, ['DEMANDA','CLIENTE','','ESFORÇO','TIPO'], tableRows,
-      [null, 0.9, 0.62, 0.9, 0.8], {fontSize:8});
+    addPlanningListTable(pptx, slide, x+0.16, startY+1.0, colW-0.32, colH-1.16, ['DEMANDA','CLIENTE','','ESFORÇO','TIPO'], tableRows,
+      [null, 0.9, 0.62, 0.9, 0.8], {fontSize:7});
   });
 }
 
@@ -7658,13 +7753,21 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
   const mesAnt = mesAnteriorPlanning(mesN);
   const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
   const base = merged.filter(m => demandaEmAbertoPlanning(m) && m.classificacao && PLANNING_CLASSIF_ATENDIMENTO.includes(m.classificacao));
-  // Pedido em 29/08/2026: só entram nomes de pessoas de fato cadastradas no organograma com
-  // area==='Atendimento' — antes qualquer texto distinto encontrado no campo "Responsável" dos tickets
-  // virava uma linha (incluindo nomes com erro de digitação ou de gente que já saiu do time).
-  const nomesAtendimentoOrganograma = new Set((data.pessoas || []).filter(p => p.area === 'Atendimento').map(p => p.nome));
-  const responsaveis = Array.from(new Set(base.map(m => m.responsavel).filter(Boolean)))
-    .filter(nome => nomesAtendimentoOrganograma.has(nome))
+  const baseComDev = base.filter(m => !!m.responsavelDesenvolvimentoId);
+  // Pedido em 04/09/2026, item (iv): o roster deste slide passa a vir do label formal de Atendimento
+  // (ver ATENDIMENTO_LABEL_OPTIONS), não mais só de quem apareceu nos tickets — TODOS os N1 aparecem
+  // (a meta é a mesma pra todos, só o real muda) e quem tem o label "Projeto" também aparece, mas com
+  // regras próprias: SLA 1ª Resposta mostra "não se aplica" (Projeto não atende o cliente diretamente,
+  // só refina antes do Especialista), e CSAT / Média dias em aberto passam a considerar só os tickets
+  // de Atendimento que JÁ TÊM um desenvolvedor alocado (baseComDev). Especialistas continuam só no
+  // slide "Atendimento Personalização" (função texto-livre, sem mudança).
+  const pessoasAtendimentoLabel = (data.pessoas || []).filter(p => p.area === 'Atendimento' && (p.atendimentoLabel === 'N1' || p.atendimentoLabel === 'Projeto'));
+  const responsaveis = pessoasAtendimentoLabel
+    .map(p => p.nome)
     .sort((a,b) => a.localeCompare(b,'pt-BR'));
+  const labelPorNome = {};
+  pessoasAtendimentoLabel.forEach(p => { labelPorNome[p.nome] = p.atendimentoLabel; });
+  const isProjeto = resp => labelPorNome[resp] === 'Projeto';
 
   const gap = 0.2, colW = (12.53 - gap*2)/3, startX = 0.4, startY = 1.9, colH = 5.2;
 
@@ -7672,11 +7775,13 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
     {titulo:'CSAT', headers:['RESP.','CSAT REAL','CSAT META'], meta:'4,0',
       calc: resp => {
         if(!mesAnt) return null;
-        const subset = base.filter(m => m.responsavel === resp && String(m.mesConclusao) === String(mesAnt));
+        const source = isProjeto(resp) ? baseComDev : base;
+        const subset = source.filter(m => m.responsavel === resp && String(m.mesConclusao) === String(mesAnt));
         return avgCsat(subset.map(m => m.csat));
       }},
     {titulo:'SLA 1ª RESPOSTA', headers:['RESP.','SLA REAL','SLA META'], meta:'240',
       calc: resp => {
+        if(isProjeto(resp)) return 'na';
         if(!mesAnt) return null;
         const subset = base.filter(m => m.responsavel === resp && m.tempoPrimeiraResposta !== null && mesAnoAbertura(m.abertoEm, mesAnt));
         return subset.length ? avgOf(subset.map(m => m.tempoPrimeiraResposta)) : null;
@@ -7684,7 +7789,8 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
     {titulo:'MÉDIA DIAS EM ABERTO', headers:['RESP.','MÉDIA REAL','MÉDIA META'], meta:'5,0',
       calc: resp => {
         if(!mesAnt) return null;
-        const subset = base.filter(m => m.responsavel === resp);
+        const source = isProjeto(resp) ? baseComDev : base;
+        const subset = source.filter(m => m.responsavel === resp);
         const dias = subset.map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, m.statusEfetivo, CURRENT_YEAR, mesAnt)).filter(v => v !== null);
         return dias.length ? avgOf(dias) : null;
       }},
@@ -7696,10 +7802,14 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
     slide.addText(spec.titulo, {x:x+0.16, y:startY+0.1, w:colW-0.32, h:0.3, fontFace:RIVIO_PPTX.fontFace, fontSize:14, bold:true, color:RIVIO_PPTX.tinta});
     const rows = responsaveis.map(resp => {
       const v = spec.calc(resp);
-      return [resp, v === null ? '—' : v.toLocaleString('pt-BR', {maximumFractionDigits:1}), spec.meta];
+      const vTxt = v === 'na' ? 'Não se aplica' : (v === null ? '—' : v.toLocaleString('pt-BR', {maximumFractionDigits:1}));
+      const metaTxt = v === 'na' ? '—' : spec.meta;
+      return [resp, vTxt, metaTxt];
     });
     addPlanningListTable(pptx, slide, x+0.16, startY+0.5, colW-0.32, colH-0.66, spec.headers, rows, [null, 1.0, 1.0]);
   });
+  slide.addText('Pessoas com o label "Projeto" (organograma) refinam os tickets antes do Especialista: SLA 1ª Resposta não se aplica a elas, e CSAT / Média dias em aberto consideram só tickets de Atendimento com desenvolvedor já alocado.',
+    {x:0.4, y:startY+colH+0.06, w:12.53, h:0.3, fontFace:RIVIO_PPTX.fontFace, fontSize:8, italic:true, color:RIVIO_PPTX.tintaSoft});
 }
 
 // Slide 14 — Atendimento Personalização: mesmo padrão de organograma dos Slides 10-11 (2 pessoas por
@@ -10863,6 +10973,12 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
     merged.filter(m => m.classificacao && matchFn(m.classificacao) && !!m.mesConclusao),
   [merged]);
 
+  // Pedido em 04/09/2026: pessoa de Atendimento com o label "Projeto" (ver ATENDIMENTO_LABEL_OPTIONS)
+  // refina os tickets ANTES de chegarem no Especialista — pra ela (só relevante em CSAT Atendimento,
+  // extraDevTable), a linha "por pessoa" considera só os tickets que JÁ TÊM um desenvolvedor alocado, em
+  // vez de todos (Especialista/N1 continuam vendo todos, sem essa exigência).
+  const scopedComDev = useMemo(() => scoped.filter(m => !!m.responsavelDesenvolvimentoId), [scoped]);
+
   const overallAvg = useMemo(() => avgCsat(scoped.map(m => m.csat)), [scoped]);
 
   const devRowsFromScoped = (scopedList) => {
@@ -10878,10 +10994,17 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
       return rows;
     }
     const names = Array.from(new Set(scoped.map(m => m.responsavel).filter(Boolean))).sort();
-    const rows = names.map(n => ({key:n, label:n, match:(m)=>m.responsavel===n}));
-    if(scoped.some(m => !m.responsavel)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavel});
+    const rows = names.map(n => {
+      let base = scoped;
+      if(extraDevTable){
+        const pessoaObj = (data.pessoas || []).find(p => normalizeClientName(p.nome) === normalizeClientName(n));
+        if(pessoaObj && pessoaObj.atendimentoLabel === 'Projeto') base = scopedComDev;
+      }
+      return {key:n, label:n, match:(m)=>m.responsavel===n, base};
+    });
+    if(scoped.some(m => !m.responsavel)) rows.push({key:'__none', label:'Sem responsável', match:(m)=>!m.responsavel, base:scoped});
     return rows;
-  }, [scoped, devTeam, personMode]);
+  }, [scoped, scopedComDev, devTeam, personMode, extraDevTable, data.pessoas]);
 
   // Só relevante quando extraDevTable (CSAT Atendimento): tickets de Atendimento que também tiveram um
   // desenvolvedor alocado, agrupados por esse desenvolvedor — igual à lógica "por pessoa" de CSAT Tech.
@@ -10892,7 +11015,8 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
   [scoped]);
 
   function avgForRowMes(row, mesN){
-    const subset = scoped.filter(m => row.match(m) && String(m.mesConclusao) === String(mesN));
+    const source = row.base || scoped;
+    const subset = source.filter(m => row.match(m) && String(m.mesConclusao) === String(mesN));
     return avgCsat(subset.map(m => m.csat));
   }
 
@@ -10944,10 +11068,16 @@ function DiasTicketAbertoPage({data}){
   // de Desenvolvimento alocado (31/08/2026) e excluir tickets "Blocked" (03/09/2026) — o que fazia
   // essa tela (e a quebra "por pessoa e mês" abaixo) mostrar uma média bem mais alta que a da aba
   // "Gestão de Metas", por incluir tickets de Desenvolvimento, já com dev alocado, ou bloqueados.
-  const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
+  const baseAtendimento = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
     .filter(m => m.prioridade !== 'Despriorizado')
     .filter(m => !m.blocked)
-    .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
+    .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento')), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
+  const merged = useMemo(() => baseAtendimento.filter(m => !m.responsavelDesenvolvimentoId), [baseAtendimento]);
+  // Pedido em 04/09/2026: pessoa de Atendimento com o label "Projeto" (ver ATENDIMENTO_LABEL_OPTIONS)
+  // refina os tickets ANTES de chegarem no Especialista — pra ela, a linha "por pessoa" inverte o
+  // critério de alocação de dev: considera só tickets que JÁ TÊM um desenvolvedor alocado
+  // (Especialista/N1 e a quebra por cliente continuam usando `merged`, sem essa exigência).
+  const mergedComDev = useMemo(() => baseAtendimento.filter(m => !!m.responsavelDesenvolvimentoId), [baseAtendimento]);
 
   // Para cada mês civil, a média considera os tickets que — no fim daquele mês — já tinham sido
   // abertos e ainda não tinham sido finalizados (ou nunca chegaram a ser). Isso "congela" o cenário de
@@ -10977,16 +11107,24 @@ function DiasTicketAbertoPage({data}){
       const n = normalizeClientName(nome);
       return pessoasNormalizadas.some(pn => n === pn || n.includes(pn) || pn.includes(n));
     };
-    const names = Array.from(new Set(merged.map(m => m.responsavel).filter(Boolean).filter(isFuncionarioCadastrado))).sort();
-    return names.map(n => ({key:n, label:n, match:(m)=>m.responsavel===n}));
-  }, [merged, data.pessoas]);
+    const names = Array.from(new Set([...merged, ...mergedComDev].map(m => m.responsavel).filter(Boolean).filter(isFuncionarioCadastrado))).sort();
+    return names.map(n => {
+      const pessoaObj = (data.pessoas || []).find(p => {
+        const pn = normalizeClientName(p.nome), nn = normalizeClientName(n);
+        return nn === pn || nn.includes(pn) || pn.includes(nn);
+      });
+      const isProjeto = pessoaObj && pessoaObj.atendimentoLabel === 'Projeto';
+      return {key:n, label:n, match:(m)=>m.responsavel===n, base: isProjeto ? mergedComDev : merged};
+    });
+  }, [merged, mergedComDev, data.pessoas]);
 
   const clienteRows = useMemo(() =>
-    DEMANDAS_CLIENTES_ORDEM.filter(c => merged.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c})),
+    DEMANDAS_CLIENTES_ORDEM.filter(c => merged.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c, base: merged})),
   [merged]);
 
   function avgForRowMes(row, mesN){
-    const dias = merged
+    const source = row.base || merged;
+    const dias = source
       .filter(row.match)
       .map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, m.statusEfetivo, CURRENT_YEAR, mesN))
       .filter(v => v !== null);
