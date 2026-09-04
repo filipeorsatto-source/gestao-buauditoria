@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-04.1';
+const APP_BUILD_ID = '2026-09-04.2';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -1278,10 +1278,19 @@ const REALIZADO_SHEET_TAB = {
   'tempo-processamento': 'Tempo Processamento',
 };
 
-// Categorias fixas da meta Tempo Processamento — linhas da tabela de Realizado/Budget, sincronizadas
-// da aba "Tempo Processamento" da planilha Gestão Metas (mesmo formato "label nas linhas, Jan..Dez nas
-// colunas" das outras abas, só que aqui o label é a categoria em vez do nome do cliente).
-const TEMPO_PROCESSAMENTO_CATEGORIAS = ['Importação', 'Recálculo', 'LLM'];
+// Categorias fixas da meta Tempo Processamento. Removida "LLM" em 04/09/2026 — o consolidado agora é
+// só a média entre Importação e Recálculo. Usadas nas linhas da tabela de Budget (que continua uma
+// única linha por categoria, valendo igual para todos os clientes) e para agrupar o Realizado, que
+// desde 04/09/2026 tem granularidade por cliente também (ver parseTempoProcessamentoSheet).
+const TEMPO_PROCESSAMENTO_CATEGORIAS = ['Importação', 'Recálculo'];
+
+// Pedido em 04/09/2026: no Ranking Individual do Report Mensal (ver buildReportPessoaRankingArea), cada
+// desenvolvedor só deve ver, no KPI Tempo Processamento, a média dos clientes em que está envolvido —
+// EXCETO Gustavo Eger, cuja função em Papéis e Responsabilidades ("Executar dentro do prazo as demandas
+// de desenvolvimento relacionadas a performance e lentidão da plataforma") o torna responsável pelas
+// ações em TODOS os clientes, não só nos que aparecem vinculados a ele via tarefas — por isso ele sempre
+// vê a média global (sem filtro de cliente) nesse KPI especificamente.
+const TEMPO_PROCESSAMENTO_PESSOA_GLOBAL_NOME = 'Gustavo Eger';
 
 // Nomes canônicos de cliente usados no restante do painel — usado para casar com o nome como aparece
 // nas abas de sincronização, de forma insensível a acento/maiúsculas (ex.: evita divergências sutis
@@ -1381,6 +1390,55 @@ function parseClienteMesSheet(values){
   }
   if(!Object.keys(porCliente).length) throw new Error('Nenhum dado de cliente encontrado na aba (confirme se há uma linha por cliente, com Jan..Dez nas colunas).');
   return porCliente;
+}
+
+// Formato específico da aba "Tempo Processamento" desde o ajuste de 04/09/2026: uma linha por
+// combinação de Cliente x Tipo (colunas "Cliente" e "Tipo" logo antes de Jan..Dez, cada cliente
+// aparecendo uma vez por categoria — Importação e Recálculo), em vez de uma linha por categoria já
+// consolidada entre clientes. Retorna {categoria: {cliente: {mesN: valor}}}. Qualquer categoria que não
+// esteja em TEMPO_PROCESSAMENTO_CATEGORIAS (ex.: uma eventual linha "LLM" ainda presente na planilha)
+// é ignorada, já que essa categoria foi descontinuada da meta.
+function parseTempoProcessamentoSheet(values){
+  let headerRowIdx = -1, monthStartCol = -1;
+  for(let i = 0; i < values.length && headerRowIdx === -1; i++){
+    const row = values[i] || [];
+    for(let j = 0; j < row.length; j++){
+      if(MONTH_ABBR_TO_N[String(row[j]).trim()]){ headerRowIdx = i; monthStartCol = j; break; }
+    }
+  }
+  if(headerRowIdx === -1) throw new Error('Não foi possível localizar o cabeçalho de meses (Jan, Fev, ...) na aba.');
+
+  const headerRow = values[headerRowIdx];
+  const monthCols = [];
+  for(let j = monthStartCol; j < headerRow.length; j++){
+    const n = MONTH_ABBR_TO_N[String(headerRow[j]).trim()];
+    if(n) monthCols.push({col: j, n});
+  }
+  if(!monthCols.length) throw new Error('Nenhum mês reconhecido no cabeçalho da aba.');
+
+  const tipoCol = monthStartCol - 1;
+  const clienteCol = monthStartCol - 2;
+  const porCategoria = {};
+  for(let i = headerRowIdx + 1; i < values.length; i++){
+    const row = values[i] || [];
+    const clienteLabel = String((clienteCol >= 0 ? row[clienteCol] : '') || '').trim();
+    const tipoLabelRaw = String((tipoCol >= 0 ? row[tipoCol] : '') || '').trim();
+    if(!clienteLabel || !tipoLabelRaw) continue;
+    if(normalizeClientName(clienteLabel) === 'total') continue;
+    const tipoNorm = normalizeClientName(tipoLabelRaw);
+    const tipoCanonico = TEMPO_PROCESSAMENTO_CATEGORIAS.find(c => normalizeClientName(c) === tipoNorm);
+    if(!tipoCanonico) continue; // categoria não reconhecida (ex.: LLM) — ignora
+    const nomeCanonico = canonicalizeClientName(clienteLabel);
+    monthCols.forEach(({col, n}) => {
+      const val = parseBRNumberOrPercent(row[col]);
+      if(val === null) return;
+      if(!porCategoria[tipoCanonico]) porCategoria[tipoCanonico] = {};
+      if(!porCategoria[tipoCanonico][nomeCanonico]) porCategoria[tipoCanonico][nomeCanonico] = {};
+      porCategoria[tipoCanonico][nomeCanonico][n] = val;
+    });
+  }
+  if(!Object.keys(porCategoria).length) throw new Error('Nenhum dado de Tempo de Processamento encontrado na aba (confirme se há colunas Cliente, Tipo e Jan..Dez, com Tipo igual a "Importação" ou "Recálculo").');
+  return porCategoria;
 }
 
 // Formato diferente do "cliente x mês" acima: uma linha por avaliação de ticket, com colunas
@@ -2999,7 +3057,7 @@ const INDICADORES = [
   {slug:'efetividade-regras', titulo:'Efetividade Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
   {slug:'entregas-prazo', titulo:'% Entregas Prazo', area:'Desenvolvimento', descricao:'Escopos Cobertos / Escopos Essenciais', unidade:'%', fonte:'Movidesk + Planning'},
   {slug:'csat-tech', titulo:'CSAT Tech', area:'Desenvolvimento', descricao:'Avaliação dos tickets de tecnologia provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
-  {slug:'tempo-processamento', titulo:'Tempo Processamento', area:'Desenvolvimento', descricao:'Tempo de processamento por categoria (Importação, Recálculo, LLM) — a meta é a média consolidada entre as 3 categorias.', unidade:'Absoluto', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?gid=808343304#gid=808343304'},
+  {slug:'tempo-processamento', titulo:'Tempo Processamento', area:'Desenvolvimento', descricao:'Tempo de processamento por categoria (Importação, Recálculo) e por cliente — a meta é a média consolidada entre todos os clientes e categorias.', unidade:'Absoluto', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?gid=808343304#gid=808343304'},
   {slug:'dias-ticket-aberto', titulo:'Média dias ticket em aberto', area:'Atendimento', descricao:'Média de dias em aberto dos tickets provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'csat-atendimento', titulo:'CSAT Atendimento', area:'Atendimento', descricao:'Avaliação dos tickets de atendimento provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'sla-primeira-resposta', titulo:'SLA 1ª Resposta', area:'Atendimento', descricao:'Tempo médio (em minutos) até a primeira resposta do ticket, agrupado pela Data de Abertura.', unidade:'Absoluto', fonte:'Movidesk'},
@@ -5281,13 +5339,24 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   }
 
   if(slug === 'tempo-processamento'){
-    // Média entre as 3 categorias (Importação, Recálculo, LLM), mês a mês — "quanto menor, melhor" (ver
-    // META_MENOR_MELHOR_SLUGS). Comparar Real vs Budget usa essa média já consolidada de cada lado, não
-    // a média das razões individuais por categoria.
+    // Pedido em 04/09/2026: consolidado passou a ser a média entre Importação e Recálculo (LLM saiu da
+    // meta), e o Realizado passou a ter granularidade por cliente dentro de cada categoria — o
+    // consolidado é a média de TODOS os valores (todos os clientes, das duas categorias) juntos, mês a
+    // mês, não uma média de médias. "Quanto menor, melhor" (ver META_MENOR_MELHOR_SLUGS).
+    // clienteNomesFilter (quando presente) restringe a média aos clientes daquele Set — usado no Ranking
+    // Individual do Report Mensal pra cada desenvolvedor ver só a média dos clientes em que está
+    // envolvido (ver buildReportPessoaRankingArea), em vez da mesma média global pra todo mundo.
     const yearData = (data.financeiro && data.financeiro.tempoProcessamento && data.financeiro.tempoProcessamento[CURRENT_YEAR]) || {};
     const out = {};
     MONTHS.forEach(m => {
-      const vals = TEMPO_PROCESSAMENTO_CATEGORIAS.map(cat => (yearData[cat]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+      const vals = [];
+      TEMPO_PROCESSAMENTO_CATEGORIAS.forEach(cat => {
+        Object.entries(yearData[cat] || {}).forEach(([cliente, porMes]) => {
+          if(clienteNomesFilter && !clienteNomesFilter.has(cliente)) return;
+          const v = (porMes || {})[m.n];
+          if(v !== undefined && v !== null && v !== '') vals.push(Number(v));
+        });
+      });
       out[m.n] = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
     });
     return out;
@@ -6690,7 +6759,12 @@ function buildReportPessoaRankingArea(data, mesN, area){
     area.kpis.forEach(slug => {
       const goal = getMetaBySlug(data, slug);
       if(!goal || !(goal.pessoaIds||[]).includes(p.id)){ valores[slug] = null; return; }
-      valores[slug] = getKpiRealBudgetNoMes(data, slug, mesN, clienteNomesFilter, p.id);
+      // Exceção do Gustavo Eger (ver TEMPO_PROCESSAMENTO_PESSOA_GLOBAL_NOME) — só se aplica ao KPI
+      // Tempo Processamento; nos demais KPIs ele continua escopado pelos clientes dele, como todo mundo.
+      const filtroEfetivo = (slug === 'tempo-processamento' && normalizeClientName(p.nome) === normalizeClientName(TEMPO_PROCESSAMENTO_PESSOA_GLOBAL_NOME))
+        ? null
+        : clienteNomesFilter;
+      valores[slug] = getKpiRealBudgetNoMes(data, slug, mesN, filtroEfetivo, p.id);
     });
     return {pessoa: p.nome, valores};
   }).filter(r => area.kpis.some(slug => r.valores[slug]));
@@ -7025,6 +7099,17 @@ function addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel){
     fontFace: RIVIO_PPTX.fontFace, border: {type: 'solid', color: 'E3E3E6', pt: 0.5},
     autoPage: false, rowH: 0.36,
   });
+
+  // Nota de rodapé (pedido em 04/09/2026): só aparece no slide de Ranking Individual que tem o KPI
+  // Tempo Processamento (hoje só a área Desenvolvimento) — explica por que Gustavo Eger é a única pessoa
+  // com a média de todos os clientes nesse KPI, em vez de só os clientes em que está envolvido como os
+  // demais (ver TEMPO_PROCESSAMENTO_PESSOA_GLOBAL_NOME).
+  if(area.kpis.includes('tempo-processamento')){
+    slide.addText(
+      '* Tempo Processamento: cada pessoa considera só os clientes em que está envolvida, exceto ' + TEMPO_PROCESSAMENTO_PESSOA_GLOBAL_NOME + ', que é responsável por essa frente em todos os clientes (função "Executar dentro do prazo as demandas de desenvolvimento relacionadas a performance e lentidão da plataforma" em Papéis e Responsabilidades) e por isso considera a média de todos.',
+      {x: 0.4, y: 6.95, w: 11.3, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 7.5, italic: true, color: RIVIO_PPTX.tintaSoft, valign: 'top'}
+    );
+  }
 }
 
 // Ponto de entrada: monta o .pptx inteiro (11 slides: 1 visão geral + 5 abertura por cliente/evolução
@@ -9535,23 +9620,186 @@ function ContasAutomaticoPage({financeiro, actions, sync}){
     unidade="Absoluto" totalMode="soma"/>;
 }
 
-// Linhas fixas (Importação, Recálculo, LLM) em vez de clientes — reaproveita PercentClientGoalPage via
-// rowLabels, já que o formato "label nas linhas, Jan..Dez nas colunas" é idêntico. O Total exibido é a
-// MÉDIA entre as 3 categorias (não soma — tempo de processamento é uma medida de duração, não algo que
-// faça sentido somar entre categorias), igual ao que getMetaRealizadoByMonth('tempo-processamento', ...)
-// usa para a meta em Gestão de Metas.
+// Reescrito em 04/09/2026: o Realizado passou a ter granularidade por cliente dentro de cada categoria
+// (Importação e Recálculo — LLM saiu da meta), então não dá mais pra reaproveitar PercentClientGoalPage
+// direto (ela só suporta uma dimensão de linha). Aqui: uma tabela de Realizado por categoria (linhas =
+// clientes), um bloco consolidado (média de tudo — todos os clientes das duas categorias juntos, igual
+// ao que getMetaRealizadoByMonth('tempo-processamento', ...) usa pra meta em Gestão de Metas) e o Budget
+// continua uma única linha por categoria (o mesmo valor vale pra todos os clientes, preenchimento manual).
 function TempoProcessamentoPage({financeiro, actions, sync}){
   const handleSync = async () => {
     const token = await getGoogleDriveAccessToken();
     const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['tempo-processamento']);
-    const porCategoria = parseClienteMesSheet(values);
+    const porCategoria = parseTempoProcessamentoSheet(values);
     actions.importTempoProcessamentoRealizado(porCategoria);
   };
-  return <PercentClientGoalPage titulo="Tempo Processamento" financeiro={financeiro} dataKey="tempoProcessamento" budgetKey="tempoProcessamentoBudget"
-    rowLabels={TEMPO_PROCESSAMENTO_CATEGORIAS}
-    setRealizado={actions.setTempoProcessamentoRealizado} setBudget={actions.setTempoProcessamentoBudget}
-    sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Tempo Processamento" da planilha Gestão Metas — uma linha por categoria (Importação, Recálculo, LLM).'
-    unidade="Absoluto"/>;
+
+  const fmtVal = v => fmtChartValue(v, 'Absoluto');
+  const yearData = (financeiro && financeiro.tempoProcessamento && financeiro.tempoProcessamento[CURRENT_YEAR]) || {};
+  const budgetData = (financeiro && financeiro.tempoProcessamentoBudget && financeiro.tempoProcessamentoBudget[CURRENT_YEAR]) || {};
+
+  const clientesComDados = useMemo(() => {
+    const set = new Set();
+    TEMPO_PROCESSAMENTO_CATEGORIAS.forEach(cat => Object.keys(yearData[cat] || {}).forEach(c => set.add(c)));
+    const ordenados = FINANCE_CLIENT_ROWS_FALLBACK.filter(c => set.has(c));
+    const extras = Array.from(set).filter(c => !FINANCE_CLIENT_ROWS_FALLBACK.includes(c)).sort();
+    return ordenados.concat(extras);
+  }, [yearData]);
+
+  const colAvgCategoria = (cat, m) => {
+    const porCliente = yearData[cat] || {};
+    const vals = clientesComDados.map(c => (porCliente[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+    return vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+  };
+  const colAvgConsolidado = (m) => {
+    const vals = [];
+    TEMPO_PROCESSAMENTO_CATEGORIAS.forEach(cat => {
+      Object.values(yearData[cat] || {}).forEach(porMes => {
+        const v = (porMes || {})[m.n];
+        if(v !== undefined && v !== null && v !== '') vals.push(Number(v));
+      });
+    });
+    return vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+  };
+  const colAvgBudget = (m) => {
+    const vals = TEMPO_PROCESSAMENTO_CATEGORIAS.map(cat => (budgetData[cat]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
+    return vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : null;
+  };
+
+  const filledMonths = MONTHS.filter(m => colAvgConsolidado(m) !== null);
+  const lastMonth = filledMonths.length ? filledMonths[filledMonths.length - 1] : null;
+  const lastTotal = lastMonth ? colAvgConsolidado(lastMonth) : null;
+
+  return (
+    <div>
+      <div className="section-block">
+        <div className="kpi-hero">
+          {lastMonth && <div className="kpi-hero-period">Último mês · {lastMonth.label}/{CURRENT_YEAR}</div>}
+          <div className="kpi-hero-label">Tempo Processamento</div>
+          {lastTotal !== null ? (
+            <div className="kpi-hero-value positive">{fmtVal(lastTotal)}</div>
+          ) : (
+            <div className="kpi-hero-value" style={{fontSize:22, color:'#9BA0B8'}}>Sem dados preenchidos</div>
+          )}
+          <div className="kpi-hero-formula">Média entre todos os clientes e categorias (Importação e Recálculo), no mês</div>
+        </div>
+      </div>
+
+      {TEMPO_PROCESSAMENTO_CATEGORIAS.map((cat, idx) => (
+        <div className="card" style={{marginBottom:16}} key={cat}>
+          <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+            <div>
+              <div className="section-block-title">Tempo Processamento — {cat} · {CURRENT_YEAR}</div>
+              <div className="section-block-desc">Dados sincronizados da aba "Tempo Processamento" da planilha Gestão Metas, um cliente por linha.</div>
+              {idx === 0 && <div style={{marginTop:6, fontSize:12.5, fontStyle:'italic', color:'#8a8fa3'}}>{syncStatusText(sync)}</div>}
+            </div>
+            {idx === 0 && <SyncRealizadoButton label="Atualizar base Tempo Processamento" onSync={handleSync}/>}
+          </div>
+          <div className="table-wrap">
+            <table className="upsell-tbl">
+              <thead>
+                <tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr>
+              </thead>
+              <tbody>
+                {clientesComDados.length === 0 && (
+                  <tr><td colSpan={MONTHS.length + 1} style={{textAlign:'center', color:'#9BA0B8', padding:'14px 0'}}>Sem dados ainda — use "Atualizar base Tempo Processamento".</td></tr>
+                )}
+                {clientesComDados.map(cliente => (
+                  <tr key={cliente}>
+                    <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{cliente}</td>
+                    {MONTHS.map(m => {
+                      const raw = ((yearData[cat]||{})[cliente]||{})[m.n];
+                      return (
+                        <td key={m.n} className={isEmptyVal(raw) ? 'empty-val' : ''} style={{textAlign:'center'}}>
+                          {isEmptyVal(raw) ? '—' : fmtVal(Number(raw))}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+                {clientesComDados.length > 0 && (
+                  <tr className="upsell-pillar-row">
+                    <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                    {MONTHS.map(m => {
+                      const t = colAvgCategoria(cat, m);
+                      return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtVal(t)}</td>;
+                    })}
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ))}
+
+      <div className="card" style={{marginBottom:16}}>
+        <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+          <div>
+            <div className="section-block-title">Consolidado (todos os clientes e categorias) · {CURRENT_YEAR}</div>
+            <div className="section-block-desc">Esse é o valor usado como Realizado da meta em Gestão de Metas — a média de todos os valores acima, sem distinguir cliente ou categoria.</div>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="upsell-tbl">
+            <thead><tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr></thead>
+            <tbody>
+              <tr className="upsell-pillar-row">
+                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                {MONTHS.map(m => {
+                  const t = colAvgConsolidado(m);
+                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtVal(t)}</td>;
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="section-block-head" style={{padding:'18px 22px 0'}}>
+          <div>
+            <div className="section-block-title">Budget · Tempo Processamento · {CURRENT_YEAR}</div>
+            <div className="section-block-desc">Preenchimento manual por categoria e mês — o mesmo Budget vale para todos os clientes. Esse é o valor usado como Budget da meta em Gestão de Metas.</div>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table className="upsell-tbl">
+            <thead><tr><th></th>{MONTHS.map(m => <th key={m.n}>{m.label}</th>)}</tr></thead>
+            <tbody>
+              {TEMPO_PROCESSAMENTO_CATEGORIAS.map(cat => (
+                <tr key={cat}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:600}}>{cat}</td>
+                  {MONTHS.map(m => {
+                    const raw = (budgetData[cat]||{})[m.n];
+                    return (
+                      <td key={m.n}>
+                        <input
+                          type="number"
+                          className="upsell-input"
+                          defaultValue={isEmptyVal(raw) ? '' : raw}
+                          key={m.n + '-' + (raw ?? '')}
+                          placeholder="—"
+                          step="0.1"
+                          onBlur={e => actions.setTempoProcessamentoBudget(m.n, cat, e.target.value === '' ? null : e.target.value)}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr className="upsell-pillar-row">
+                <td style={{textAlign:'left', paddingLeft:12}}>Média</td>
+                {MONTHS.map(m => {
+                  const t = colAvgBudget(m);
+                  return <td key={m.n} className="upsell-pillar-score">{t === null ? '—' : fmtVal(t)}</td>;
+                })}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* ---------------------------------------------------------------
@@ -12012,6 +12260,16 @@ function DemandasPage({data, actions}){
               placeholder="Responsável Desenvolvimento"
             />
           </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            title="Aplica de uma vez os filtros usados no cálculo da meta 'Média dias ticket em aberto': Classificação = Atendimento (qualquer tipo), Prioridade = P0/P1/P2/Em branco (exclui Despriorizado), Responsável Desenvolvimento = Em branco."
+            onClick={() => {
+              setClassificacaoFilter(['Atendimento Bug', 'Atendimento Dúvida', 'Atendimento Personalização', 'Atendimento Regra']);
+              setPrioridadeFilter(['P0', 'P1', 'P2', DEMANDAS_FILTRO_BLANK_ID]);
+              setRespDevFilter([DEMANDAS_FILTRO_BLANK_ID]);
+            }}
+          >Meta Atendimento</button>
           {anyExtraFilterActive > 0 && <button className="btn btn-ghost btn-sm" onClick={clearExtraFilters}>Limpar</button>}
         </div>
       </div>
@@ -13441,6 +13699,8 @@ function App(){
     },
 
     // Realizado sincronizado da aba "Tempo Processamento" da planilha Gestão Metas (por categoria, nome como chave).
+    // porCategoria vem no formato {categoria: {cliente: {mesN: valor}}} desde 04/09/2026 (ver
+    // parseTempoProcessamentoSheet) — antes era {categoria: {mesN: valor}}, sem granularidade de cliente.
     importTempoProcessamentoRealizado: (porCategoria) => {
       const aplicarFinanceiro = (base) => {
         const financeiro = {...(base||{})};
@@ -13449,15 +13709,16 @@ function App(){
         financeiro.tempoProcessamento = tempoProcessamento;
         return financeiro;
       };
+      const totalClientes = new Set(Object.values(porCategoria).flatMap(porCliente => Object.keys(porCliente))).size;
       const aplicarSync = () => ({
         by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
         at: new Date().toISOString(),
-        count: Object.keys(porCategoria).length,
+        count: totalClientes,
       });
       return mutateFieldsGranular(
         d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), tempoProcessamentoSync: aplicarSync()}),
         { financeiro: aplicarFinanceiro, tempoProcessamentoSync: aplicarSync },
-        `Base de Tempo Processamento atualizada (${Object.keys(porCategoria).length} categoria${Object.keys(porCategoria).length===1?'':'s'})`
+        `Base de Tempo Processamento atualizada (${Object.keys(porCategoria).length} categoria${Object.keys(porCategoria).length===1?'':'s'}, ${totalClientes} cliente${totalClientes===1?'':'s'})`
       );
     },
 
