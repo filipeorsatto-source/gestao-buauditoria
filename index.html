@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-04.2';
+const APP_BUILD_ID = '2026-09-04.3';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -5352,6 +5352,10 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
       const vals = [];
       TEMPO_PROCESSAMENTO_CATEGORIAS.forEach(cat => {
         Object.entries(yearData[cat] || {}).forEach(([cliente, porMes]) => {
+          // Ignora registros de uma sincronização antiga (anterior a 04/09/2026, sem cliente — ver
+          // isRegistroPorCliente em TempoProcessamentoPage) que ainda não foram resincronizados: nesse
+          // formato porMes seria um número solto (valor direto do mês), não um objeto {mesN: valor}.
+          if(!porMes || typeof porMes !== 'object') return;
           if(clienteNomesFilter && !clienteNomesFilter.has(cliente)) return;
           const v = (porMes || {})[m.n];
           if(v !== undefined && v !== null && v !== '') vals.push(Number(v));
@@ -9638,9 +9642,21 @@ function TempoProcessamentoPage({financeiro, actions, sync}){
   const yearData = (financeiro && financeiro.tempoProcessamento && financeiro.tempoProcessamento[CURRENT_YEAR]) || {};
   const budgetData = (financeiro && financeiro.tempoProcessamentoBudget && financeiro.tempoProcessamentoBudget[CURRENT_YEAR]) || {};
 
+  // Defesa contra dado deixado por uma sincronização antiga (formato anterior a 04/09/2026, sem
+  // cliente: {categoria: {mesN: valor}}, com o valor de cada mês direto como número) que ainda não foi
+  // resincronizada nesta planilha — nesse formato, cada "chave" de yearData[cat] seria um NÚMERO DO MÊS
+  // (ex.: "6", "7", "8"), não um nome de cliente, e o valor seria um número solto, não um objeto
+  // {mesN: valor}. Sem essa checagem, essas chaves órfãs apareceriam como se fossem clientes. Uma vez
+  // que o usuário clique em "Atualizar base Tempo Processamento" aqui, o formato novo substitui o antigo
+  // e essas linhas somem sozinhas.
+  const isRegistroPorCliente = (v) => v && typeof v === 'object';
+
   const clientesComDados = useMemo(() => {
     const set = new Set();
-    TEMPO_PROCESSAMENTO_CATEGORIAS.forEach(cat => Object.keys(yearData[cat] || {}).forEach(c => set.add(c)));
+    TEMPO_PROCESSAMENTO_CATEGORIAS.forEach(cat => {
+      const porCliente = yearData[cat] || {};
+      Object.keys(porCliente).forEach(c => { if(isRegistroPorCliente(porCliente[c])) set.add(c); });
+    });
     const ordenados = FINANCE_CLIENT_ROWS_FALLBACK.filter(c => set.has(c));
     const extras = Array.from(set).filter(c => !FINANCE_CLIENT_ROWS_FALLBACK.includes(c)).sort();
     return ordenados.concat(extras);
@@ -9655,6 +9671,7 @@ function TempoProcessamentoPage({financeiro, actions, sync}){
     const vals = [];
     TEMPO_PROCESSAMENTO_CATEGORIAS.forEach(cat => {
       Object.values(yearData[cat] || {}).forEach(porMes => {
+        if(!isRegistroPorCliente(porMes)) return;
         const v = (porMes || {})[m.n];
         if(v !== undefined && v !== null && v !== '') vals.push(Number(v));
       });
