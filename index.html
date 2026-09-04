@@ -877,7 +877,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-03.1';
+const APP_BUILD_ID = '2026-09-04.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -10672,11 +10672,17 @@ function CsatMatrixPage({data, personMode, matchFn, titulo, formulaHint, extraDe
    MÉDIA DIAS TICKET EM ABERTO
 --------------------------------------------------------------- */
 function DiasTicketAbertoPage({data}){
-  // Exclui tickets com Prioridade "Despriorizado" (mesma regra usada no cálculo da meta em Gestão de
-  // Metas — ver getMetaRealizadoByMonth/getMetaRealizadoPorClienteMes), pra essa tela bater com o
-  // número mostrado lá.
+  // Mesmo escopo usado no cálculo oficial da meta (ver getMetaRealizadoByMonth/
+  // getMetaRealizadoPorClienteMes, slug 'dias-ticket-aberto') — pra essa tela bater com o número
+  // mostrado lá. Corrigido em 04/09/2026: esse filtro tinha ficado incompleto (só excluía
+  // Despriorizado) depois que a fórmula oficial passou a também exigir Atendimento sem Responsável
+  // de Desenvolvimento alocado (31/08/2026) e excluir tickets "Blocked" (03/09/2026) — o que fazia
+  // essa tela (e a quebra "por pessoa e mês" abaixo) mostrar uma média bem mais alta que a da aba
+  // "Gestão de Metas", por incluir tickets de Desenvolvimento, já com dev alocado, ou bloqueados.
   const merged = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
-    .filter(m => m.prioridade !== 'Despriorizado'), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
+    .filter(m => m.prioridade !== 'Despriorizado')
+    .filter(m => !m.blocked)
+    .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && !m.responsavelDesenvolvimentoId), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
 
   // Para cada mês civil, a média considera os tickets que — no fim daquele mês — já tinham sido
   // abertos e ainda não tinham sido finalizados (ou nunca chegaram a ser). Isso "congela" o cenário de
