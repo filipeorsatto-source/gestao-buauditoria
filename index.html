@@ -851,6 +851,14 @@
   .demanda-concluido-edit{white-space:nowrap;}
   .demanda-concluido-edit-inner{display:flex;align-items:center;justify-content:center;gap:3px;}
   .demanda-concluido-edit-inner .btn-icon{width:20px;height:20px;padding:0;}
+  /* Coluna "Linear" (pedido em 08/09/2026) — mesmo padrão visual/estrutural da célula "Concluído em"
+     acima (ver comentário grande logo acima do .demanda-concluido-cell): display:flex fica sempre no
+     elemento interno, nunca no <td>. */
+  .demanda-linear-cell{cursor:pointer;}
+  .demanda-linear-cell .btn-icon{opacity:0;transition:opacity .15s;width:20px;height:20px;padding:0;}
+  .demanda-linear-cell:hover .btn-icon{opacity:0.75;}
+  .demanda-linear-cell .btn-icon:hover{opacity:1;}
+  .demanda-linear-edit{white-space:nowrap;min-width:170px;}
   .manual-tag{
     font-size:9.3px;font-weight:700;text-transform:uppercase;letter-spacing:.03em;color:var(--accent-ink);
     background:var(--accent-soft);padding:1px 6px;border-radius:8px;white-space:nowrap;
@@ -877,7 +885,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-04.4';
+const APP_BUILD_ID = '2026-09-08.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2960,6 +2968,11 @@ function buildDemandasMergedUncached(customMap, baseRows, manualRows){
       urgencia: o.u,
       cliente: o.c,
       responsavel: o.r,
+      // Pedido em 08/09/2026: campo manual pra referenciar o ticket correspondente no Linear (número +
+      // link), pra facilitar ir e voltar entre as duas ferramentas — não entra em nenhum cálculo de meta,
+      // é só um atalho de navegação (ver LinearCell/DemandaRow).
+      linear: c.linear || '',
+      linearUrl: c.linearUrl || '',
       abertoEm: o.d,
       diasEmAberto: dias,
       tempoPrimeiraResposta: (o.tr === undefined || o.tr === null) ? null : o.tr, // minutos, vem direto do Movidesk
@@ -12493,6 +12506,7 @@ function DemandasClienteTable({cliente, rows, devTeam, actions, onRequestDeleteM
             <thead>
               <tr>
                 <th>Nº Ticket</th>
+                <th title="Número do ticket correspondente no Linear (campo manual, não afeta nenhuma meta) — use o ícone de link para colar o link direto do Linear.">Linear</th>
                 <th>Assunto</th>
                 <th>Status</th>
                 <th>Urgência</th>
@@ -12597,6 +12611,90 @@ function ConcluidoEmCell({row, actions}){
   );
 }
 
+// Pedido em 08/09/2026: campo manual "Linear" na tabela de Demandas — número do ticket correspondente
+// no Linear, com um ícone ao lado pra colar/abrir o link direto. Mesmo padrão de edição inline da
+// ConcluidoEmCell logo acima (duplo clique ou botão de lápis abre os dois campos — número e link — lado
+// a lado; fora da edição, mostra o número com o ícone de link, que abre o link num toque quando ele já
+// está preenchido).
+function LinearCell({row, actions}){
+  const [editing, setEditing] = useState(false);
+  const [draftNumero, setDraftNumero] = useState('');
+  const [draftUrl, setDraftUrl] = useState('');
+
+  const startEdit = () => {
+    setDraftNumero(row.linear || '');
+    setDraftUrl(row.linearUrl || '');
+    setEditing(true);
+  };
+  const commit = () => {
+    actions.updateDemandaCustom(row.numero, {linear: draftNumero.trim(), linearUrl: draftUrl.trim()});
+    setEditing(false);
+  };
+  const cancel = () => setEditing(false);
+
+  if(editing){
+    return (
+      <td className="demanda-linear-edit">
+        <div className="demanda-concluido-edit-inner" style={{flexDirection:'column', alignItems:'stretch', gap:4}}>
+          <input
+            type="text"
+            className="upsell-input"
+            value={draftNumero}
+            autoFocus
+            placeholder="Ex.: RIV-123"
+            onChange={e => setDraftNumero(e.target.value)}
+            onKeyDown={e => { if(e.key === 'Enter') commit(); if(e.key === 'Escape') cancel(); }}
+          />
+          <input
+            type="text"
+            className="upsell-input"
+            value={draftUrl}
+            placeholder="Link do Linear (https://linear.app/...)"
+            onChange={e => setDraftUrl(e.target.value)}
+            onKeyDown={e => { if(e.key === 'Enter') commit(); if(e.key === 'Escape') cancel(); }}
+          />
+          <div style={{display:'flex', gap:4, justifyContent:'flex-end'}}>
+            <button type="button" className="btn-icon" onClick={commit} title="Salvar" aria-label="Salvar">
+              <IconCheck width="11" height="11"/>
+            </button>
+            <button type="button" className="btn-icon" onClick={cancel} title="Cancelar" aria-label="Cancelar">
+              <IconX width="11" height="11"/>
+            </button>
+          </div>
+        </div>
+      </td>
+    );
+  }
+
+  return (
+    <td className="demanda-linear-cell" onDoubleClick={startEdit} title="Duplo clique para editar o número/link do Linear.">
+      <div className="demanda-concluido-cell-inner">
+        <span>{row.linear || '—'}</span>
+        {row.linearUrl ? (
+          <a
+            className="btn-icon"
+            href={row.linearUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Abrir no Linear"
+            aria-label="Abrir no Linear"
+            onClick={e => e.stopPropagation()}
+          >
+            <IconLink width="11" height="11"/>
+          </a>
+        ) : (
+          <button type="button" className="btn-icon" onClick={startEdit} title="Adicionar link do Linear" aria-label="Adicionar link do Linear">
+            <IconLink width="11" height="11"/>
+          </button>
+        )}
+        <button type="button" className="btn-icon" onClick={startEdit} title="Editar" aria-label="Editar">
+          <IconEdit width="11" height="11"/>
+        </button>
+      </div>
+    </td>
+  );
+}
+
 function DemandaRow({row, devTeam, actions, onRequestDeleteManual}){
   const statusCol = demandaStatusColor(row.status);
   const urgCol = demandaUrgenciaColor(row.urgencia);
@@ -12619,6 +12717,7 @@ function DemandaRow({row, devTeam, actions, onRequestDeleteManual}){
           </button>
         )}
       </td>
+      <LinearCell row={row} actions={actions}/>
       <td className="demanda-assunto" title={row.assunto}>
         {isManual ? (
           <input
