@@ -346,6 +346,9 @@
   .topbar-user-avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;background:var(--accent-soft);flex-shrink:0;}
   .topbar-user-avatar-fallback{width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
   .topbar-user-email{font-size:12.5px;color:var(--ink-soft);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .topbar-backup-btn{width:28px;height:28px;flex-shrink:0;color:var(--ink-soft);border:1px solid var(--line);border-radius:50%;background:var(--surface);display:flex;align-items:center;justify-content:center;cursor:pointer;}
+  .topbar-backup-btn:hover{color:var(--accent);border-color:var(--accent);}
+  .topbar-backup-btn:disabled{opacity:0.5;cursor:default;}
   .topbar-signout-btn{font-size:12px;color:var(--ink-soft);background:none;border:1px solid var(--line);border-radius:var(--radius-sm);padding:5px 10px;cursor:pointer;transition:background 0.14s;}
   .topbar-signout-btn:hover{background:var(--surface-2);color:var(--ink);}
   /* Pedido em 09/09/2026: indicador de sincronização de VERDADE (ver SyncIndicator/syncStatus em App) —
@@ -905,7 +908,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-09.1';
+const APP_BUILD_ID = '2026-09-09.3';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -4084,6 +4087,30 @@ async function getAppDataDocRef(){
   return fb.doc(fb.db, FIRESTORE_COLLECTION, FIRESTORE_DOC_ID);
 }
 
+// Pedido em 09/09/2026 (incidente de sincronização): botão de backup manual na topbar — baixa o
+// documento inteiro (gestaoAuditoria/appData) como JSON, direto do servidor (getDocFromServer, nunca do
+// cache offline, pelo mesmo motivo já documentado em persistPatch/ensureFirestoreSeeded: uma leitura que
+// pudesse vir do cache local tornaria o backup inútil justamente no cenário em que ele mais serve, que é
+// suspeitar que o cache local está desatualizado). Não depende de Cloud Storage nem de faturamento
+// (Blaze) — é uma leitura de documento normal, dentro da cota gratuita do Firestore.
+async function downloadFirestoreBackup(){
+  const fb = await waitForFirebase();
+  const ref = await getAppDataDocRef();
+  const snap = await fb.getDocFromServer(ref);
+  if(!snap.exists()) throw new Error('Documento não encontrado no Firestore.');
+  const data = snap.data();
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  a.href = url;
+  a.download = `firestore-appData-backup-${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 // Garante que o documento compartilhado existe no Firestore. Se ainda não existir
 // (primeiro uso após a migração), semeia com os dados locais já existentes neste
 // computador (ou com a base padrão, se não houver nada salvo localmente).
@@ -4162,6 +4189,56 @@ async function ensureProdutoFuncoesSeededOnce(){
   }catch(e){
     console.error('Erro ao semear funções de produto', e);
     produtoFuncoesSeedAttemptedGlobal = false;
+  }
+}
+
+// REPARO PONTUAL (09/09/2026) — incidente de perda de dados em produtoFuncoes: investigação (comparando
+// o backup manual baixado pela usuária com o catálogo PRODUTO_FUNCOES_SEED) confirmou que o catálogo
+// padrão inteiro (105 itens) tinha sido semeado e usado (a maioria com checks em produtoFuncoesChecks
+// para os 7 clientes), e em algum momento produtoFuncoes foi reduzido a só 1 item manual ("Recálculo de
+// conta") — pelo mesmo tipo de leitura-cache-desatualizada já documentado e corrigido em
+// ensureProdutoFuncoesSeededOnce/persistPatch/etc. Como o id de cada item do catálogo é DETERMINÍSTICO
+// (slugifyId a partir de categoria+descrição — ver comentário lá em cima, perto de slugifyId), dá pra
+// recompor os 105 itens com o texto exato e o MESMO id de sempre, sem precisar adivinhar nada: os checks
+// que sobreviveram órfãos em produtoFuncoesChecks reconectam sozinhos automaticamente.
+//
+// Esta função roda UMA VEZ, guardada por um flag dedicado (produtoFuncoesCatalogRepaired20260909),
+// diferente de produtoFuncoesSeeded — de propósito, pra não interferir na lógica normal de
+// "produtoFuncoesSeeded impede resemear pra sempre" (ensureProdutoFuncoesSeededOnce) nem exigir que ela
+// rode de novo. Depois de rodar uma vez (com sucesso confirmado pelo servidor), nunca mais mexe em
+// produtoFuncoes — igual ao padrão já usado ali em cima, pra não reverter futuras exclusões/edições reais
+// do usuário. Isso é uma correção pontual deste incidente específico, não uma resemeadura recorrente.
+let produtoFuncoesCatalogRepairAttemptedGlobal = false;
+async function repairProdutoFuncoesCatalog20260909(){
+  if(produtoFuncoesCatalogRepairAttemptedGlobal) return;
+  produtoFuncoesCatalogRepairAttemptedGlobal = true;
+  try{
+    const fb = await waitForFirebase();
+    const ref = await getAppDataDocRef();
+    const snap = await fb.getDocFromServer(ref);
+    const current = snap.exists() ? snap.data() : {};
+    if(current.produtoFuncoesCatalogRepaired20260909) return;
+    const existentes = new Set((current.produtoFuncoes || []).map(f => f.id));
+    const faltando = PRODUTO_FUNCOES_SEED
+      .map(f => ({id: slugifyId('pf', f.categoria + '|' + f.descricao), ...f}))
+      .filter(f => !existentes.has(f.id));
+    const patch = {
+      produtoFuncoes: faltando.length ? [...(current.produtoFuncoes || []), ...faltando] : (current.produtoFuncoes || []),
+      produtoFuncoesCatalogRepaired20260909: true,
+    };
+    await fb.updateDoc(ref, patch);
+    const verifySnap = await fb.getDocFromServer(ref);
+    const verifyData = verifySnap.exists() ? verifySnap.data() : {};
+    const ok = verifyData.produtoFuncoesCatalogRepaired20260909 === true && deepEqual(verifyData.produtoFuncoes, patch.produtoFuncoes);
+    if(!ok){
+      console.error('Reparo do catálogo de funções de produto não confirmado pelo servidor — tentará de novo na próxima sessão.');
+      produtoFuncoesCatalogRepairAttemptedGlobal = false;
+    } else {
+      console.log('Reparo do catálogo de Cobertura Produto concluído:', faltando.length, 'função(ões) restaurada(s).');
+    }
+  }catch(e){
+    console.error('Erro ao reparar catálogo de funções de produto', e);
+    produtoFuncoesCatalogRepairAttemptedGlobal = false;
   }
 }
 
@@ -13213,6 +13290,23 @@ function App(){
   const [syncRetryNonce, setSyncRetryNonce] = useState(0);
   const retrySync = useCallback(() => setSyncRetryNonce(n => n + 1), []);
 
+  // Pedido em 09/09/2026 (incidente de sincronização, depois de expor à usuária como baixar um backup
+  // manual via console do navegador) — o mesmo backup, agora como botão na topbar. Sempre lê do servidor
+  // (downloadFirestoreBackup usa getDocFromServer), nunca do cache offline.
+  const [backingUp, setBackingUp] = useState(false);
+  const handleDownloadBackup = useCallback(async () => {
+    setBackingUp(true);
+    try{
+      await downloadFirestoreBackup();
+      push('Backup baixado.');
+    }catch(e){
+      console.error('Erro ao baixar backup', e);
+      push('Não foi possível baixar o backup. Tente novamente.', 'error');
+    }finally{
+      setBackingUp(false);
+    }
+  }, [push]);
+
   // Autenticação (Google, restrito ao domínio da empresa)
   useEffect(() => {
     let unsub = () => {};
@@ -13286,6 +13380,10 @@ function App(){
       // abaixo, de propósito (ver ensureProdutoFuncoesSeededOnce e o comentário em runMigrations sobre
       // o achado ao vivo de 29/08/2026: excluir/editar uma função do catálogo padrão "voltava sozinha").
       ensureProdutoFuncoesSeededOnce();
+      // Reparo pontual do incidente de 09/09/2026 (ver comentário em repairProdutoFuncoesCatalog20260909)
+      // — roda uma única vez (flag próprio) pra devolver os 105 itens do catálogo padrão que sumiram de
+      // produtoFuncoes, reconectando os checks órfãos que sobreviveram em produtoFuncoesChecks.
+      repairProdutoFuncoesCatalog20260909();
       const fb = await waitForFirebase();
       const ref = await getAppDataDocRef();
 
@@ -14257,6 +14355,10 @@ function App(){
           </div>
           <div className="topbar-user">
             <SyncIndicator status={syncStatus} onRetry={retrySync}/>
+            <button type="button" className="btn-icon topbar-backup-btn" onClick={handleDownloadBackup} disabled={backingUp}
+              title="Baixar backup do banco (JSON, direto do servidor)" aria-label="Baixar backup">
+              <IconDownload width="14" height="14"/>
+            </button>
             {authUser.photoURL
               ? <img className="topbar-user-avatar" src={authUser.photoURL} referrerPolicy="no-referrer" alt=""/>
               : <div className="topbar-user-avatar-fallback">{(authUser.email||'?')[0].toUpperCase()}</div>}
