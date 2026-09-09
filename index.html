@@ -34,7 +34,7 @@
     getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut
   } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js';
   import {
-    initializeFirestore, persistentLocalCache, doc, getDoc, setDoc, updateDoc, onSnapshot, runTransaction
+    initializeFirestore, persistentLocalCache, doc, getDoc, getDocFromServer, setDoc, updateDoc, onSnapshot, runTransaction
   } from 'https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js';
 
   const firebaseConfig = {
@@ -59,7 +59,7 @@
   }
 
   window.__firebase = {
-    auth, db, doc, getDoc, setDoc, updateDoc, onSnapshot, signOut, runTransaction,
+    auth, db, doc, getDoc, getDocFromServer, setDoc, updateDoc, onSnapshot, signOut, runTransaction,
     GoogleAuthProvider, signInWithPopup, onAuthStateChanged,
     credentialFromResult: GoogleAuthProvider.credentialFromResult,
   };
@@ -348,9 +348,29 @@
   .topbar-user-email{font-size:12.5px;color:var(--ink-soft);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .topbar-signout-btn{font-size:12px;color:var(--ink-soft);background:none;border:1px solid var(--line);border-radius:var(--radius-sm);padding:5px 10px;cursor:pointer;transition:background 0.14s;}
   .topbar-signout-btn:hover{background:var(--surface-2);color:var(--ink);}
-  .sync-indicator{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-soft);font-family:var(--font-mono);}
-  .sync-dot{width:6px;height:6px;border-radius:50%;background:var(--positive);}
-  .sync-dot.offline{background:var(--warn);}
+  /* Pedido em 09/09/2026: indicador de sincronização de VERDADE (ver SyncIndicator/syncStatus em App) —
+     antes disso .sync-dot era sempre verde, fixo, e nunca refletia se a conexão em tempo real com o
+     Firestore tinha caído ou estava só respondendo do cache local. */
+  .sync-indicator{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-soft);font-family:var(--font-mono);cursor:default;}
+  .sync-indicator.clickable{cursor:pointer;}
+  .sync-dot{width:6px;height:6px;border-radius:50%;background:var(--positive);flex-shrink:0;}
+  .sync-dot.connecting{background:var(--ink-faint);animation:sync-pulse 1.1s ease-in-out infinite;}
+  .sync-dot.cache{background:var(--warn);}
+  .sync-dot.error{background:var(--negative);}
+  @keyframes sync-pulse{0%,100%{opacity:1;}50%{opacity:0.35;}}
+  .sync-status-banner{
+    display:flex;align-items:center;gap:10px;
+    padding:9px 32px;font-size:12.5px;
+    background:var(--warn-soft);color:#7A5A17;
+    border-bottom:1px solid #E8D9B0;
+  }
+  .sync-status-banner.error{background:var(--negative-soft);color:#8C3624;border-bottom-color:#EFC5B9;}
+  .sync-status-banner-retry{
+    margin-left:auto;font-size:12px;font-weight:600;color:inherit;
+    background:rgba(255,255,255,0.55);border:1px solid currentColor;border-radius:var(--radius-sm);
+    padding:4px 10px;cursor:pointer;flex-shrink:0;
+  }
+  .sync-status-banner-retry:hover{background:rgba(255,255,255,0.85);}
 
   /* MODAL */
   .modal-overlay{
@@ -885,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-08.1';
+const APP_BUILD_ID = '2026-09-09.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -4067,10 +4087,20 @@ async function getAppDataDocRef(){
 // Garante que o documento compartilhado existe no Firestore. Se ainda não existir
 // (primeiro uso após a migração), semeia com os dados locais já existentes neste
 // computador (ou com a base padrão, se não houver nada salvo localmente).
+//
+// ACHADO AO VIVO (09/09/2026, incidente de "dados voltaram para uma data antiga"): esta checagem usava
+// fb.getDoc(ref), que — com o cache offline (persistentLocalCache) ligado — pode responder a partir da
+// cópia LOCAL do navegador sem nunca de fato confirmar com o servidor. Isso é inofensivo pra LEITURA
+// normal (é o objetivo do cache offline), mas aqui especificamente decide se vai SOBRESCREVER o
+// documento inteiro (setDoc) com uma base antiga (loadLegacyLocalData, dados legados de antes do
+// Firestore) — um "falso negativo" de exists() bastaria pra apagar a base compartilhada de todo mundo.
+// Trocado para getDocFromServer, que força uma ida real ao servidor: se o navegador estiver sem conexão
+// de verdade com o Firestore, prefere ERRAR (não decidir nada, deixar quem chamou tratar) a arriscar
+// sobrescrever a base real com uma cópia local desatualizada.
 async function ensureFirestoreSeeded(){
   const fb = await waitForFirebase();
   const ref = await getAppDataDocRef();
-  const snap = await fb.getDoc(ref);
+  const snap = await fb.getDocFromServer(ref);
   if(!snap.exists()){
     const seed = await loadLegacyLocalData();
     await fb.setDoc(ref, seed);
@@ -4102,7 +4132,13 @@ async function ensureProdutoFuncoesSeededOnce(){
   try{
     const fb = await waitForFirebase();
     const ref = await getAppDataDocRef();
-    const snap = await fb.getDoc(ref);
+    // getDocFromServer (não getDoc) nas duas leituras abaixo — ver comentário no mesmo achado ao vivo de
+    // 09/09/2026 em ensureFirestoreSeeded: decidir com base numa leitura que pode vir do cache offline
+    // arrisca reintroduzir aqui exatamente o bug que este comentário já descreve (achado ao vivo de
+    // 29/08/2026) — e, pior, a "confirmação" pós-escrita perderia todo o valor se também pudesse ler do
+    // cache local (que reflete otimisticamente a própria escrita, mesmo se ela nunca tiver saído do
+    // navegador) em vez do servidor de verdade.
+    const snap = await fb.getDocFromServer(ref);
     const current = snap.exists() ? snap.data() : {};
     // Já foi semeado de verdade alguma vez (mesmo que em outra sessão/dia) — não mexe em produtoFuncoes
     // nunca mais, pra não reverter exclusões/edições feitas pelo usuário desde então.
@@ -4116,7 +4152,7 @@ async function ensureProdutoFuncoesSeededOnce(){
       produtoFuncoesSeeded: true,
     };
     await fb.updateDoc(ref, patch);
-    const verifySnap = await fb.getDoc(ref);
+    const verifySnap = await fb.getDocFromServer(ref);
     const verifyData = verifySnap.exists() ? verifySnap.data() : {};
     const ok = verifyData.produtoFuncoesSeeded === true && deepEqual(verifyData.produtoFuncoes, patch.produtoFuncoes);
     if(!ok){
@@ -4129,11 +4165,26 @@ async function ensureProdutoFuncoesSeededOnce(){
   }
 }
 
+// ACHADO AO VIVO (09/09/2026, incidente de "mudanças de todo mundo pareciam canceladas"): com o cache
+// offline (persistentLocalCache) ligado, updateDoc RESOLVE com sucesso mesmo sem internet de verdade —
+// ele só enfileira a escrita localmente e devolve uma promise "otimista". Sem confirmar com o servidor
+// depois, esta função (usada por praticamente toda ação da aplicação via mutate()) dizia "salvou!" pro
+// usuário mesmo quando a escrita nunca saiu do navegador — deixando a base compartilhada real congelada
+// no último estado que de fato chegou lá, enquanto cada pessoa via suas próprias edições "funcionando"
+// normalmente na tela (o estado local do React sempre atualiza otimista, batendo ou não com o servidor).
+// Agora relê do SERVIDOR (getDocFromServer, nunca do cache) logo em seguida pra confirmar de verdade.
 async function persistPatch(patch){
   try{
     const fb = await waitForFirebase();
     const ref = await getAppDataDocRef();
     await fb.updateDoc(ref, patch);
+    const verifySnap = await fb.getDocFromServer(ref);
+    const verifyData = verifySnap.exists() ? verifySnap.data() : {};
+    const persistedOk = Object.keys(patch).every(k => deepEqual(verifyData[k], patch[k]));
+    if(!persistedOk){
+      console.error('persistPatch: gravação não confirmada pelo servidor', patch);
+      return false;
+    }
     return true;
   }catch(e){
     console.error('Firestore write error', e);
@@ -4194,16 +4245,25 @@ function deepEqual(a, b){
   return keysA.every(k => Object.prototype.hasOwnProperty.call(b, k) && deepEqual(a[k], b[k]));
 }
 
+// ACHADO AO VIVO (09/09/2026, incidente de "mudanças de todo mundo pareciam canceladas" — ver
+// comentário grande em persistPatch acima): tanto a leitura usada para calcular o merge quanto a
+// releitura de confirmação usavam fb.getDoc, que pode ser respondida pelo cache offline local em vez do
+// servidor — inclusive quando esse cache só reflete uma escrita otimista que nunca realmente saiu do
+// navegador (ex.: Firestore bloqueado pela rede/firewall, mas a UI segue "funcionando" normalmente).
+// Isso fazia o merge partir de uma base LOCAL possivelmente desatualizada (o problema que esta função
+// foi criada pra evitar, só que reintroduzido pela leitura) e fazia a confirmação pós-escrita sempre
+// "bater", mesmo quando a gravação nunca chegou ao Firestore de verdade — a gravação usada pelo sync do
+// Movidesk (importDemandasBase) passa por aqui. Trocado para getDocFromServer nas duas leituras.
 async function persistFieldsMerge(mergeFns, extraTopLevelPatch){
   try{
     const fb = await waitForFirebase();
     const ref = await getAppDataDocRef();
-    const snap = await fb.getDoc(ref);
+    const snap = await fb.getDocFromServer(ref);
     const current = snap.exists() ? snap.data() : {};
     const patch = { ...(extraTopLevelPatch || {}) };
     Object.keys(mergeFns).forEach(fieldName => { patch[fieldName] = mergeFns[fieldName](current[fieldName]); });
     await fb.updateDoc(ref, patch);
-    const verifySnap = await fb.getDoc(ref);
+    const verifySnap = await fb.getDocFromServer(ref);
     const verifyData = verifySnap.exists() ? verifySnap.data() : {};
     const persistedOk = Object.keys(patch).every(k => deepEqual(verifyData[k], patch[k]));
     if(!persistedOk){
@@ -4232,14 +4292,24 @@ async function persistDemandasCustomMerge(mergeFn, extraTopLevelPatch){
     // função usa deliberadamente o padrão ler-mesclar-gravar em duas chamadas separadas (sem
     // runTransaction) como mecanismo PRINCIPAL, não como fallback — e confirma a gravação lendo de volta
     // antes de reportar sucesso, já que aqui já vimos escritas "resolverem" sem realmente acontecer.
-    const snap = await fb.getDoc(ref);
+    //
+    // ACHADO AO VIVO (09/09/2026): este comentário já dizia "confirmado lendo de volta com
+    // getDocFromServer" — mas o código abaixo, até esta correção, usava fb.getDoc (sem "FromServer") nas
+    // duas leituras, tanto para calcular o merge quanto para a confirmação pós-escrita. Com o cache
+    // offline ligado, getDoc pode responder a partir da cópia local do navegador sem nunca confirmar
+    // com o servidor — inclusive quando essa cópia local só reflete uma escrita otimista que nunca saiu
+    // do navegador de verdade (rede/firewall bloqueando o Firestore, por exemplo). Isso fazia a "prova"
+    // de gravação sempre passar mesmo com a escrita nunca tendo chegado ao servidor compartilhado —
+    // consistente com o incidente relatado em 09/09/2026 (várias pessoas editando, tudo "funcionando" na
+    // tela, e a base real ficando parada numa data antiga). Agora usa getDocFromServer nas duas leituras.
+    const snap = await fb.getDocFromServer(ref);
     const current = snap.exists() ? snap.data() : {};
     const mergedDemandasCustom = mergeFn(current.demandasCustom || {});
     const patch = { demandasCustom: mergedDemandasCustom, ...(extraTopLevelPatch || {}) };
     await fb.updateDoc(ref, patch);
     // Confirma que a gravação realmente chegou ao servidor antes de reportar sucesso pro chamador — não
     // basta o updateDoc "resolver", já vimos gravações resolverem sem persistir de fato neste ambiente.
-    const verifySnap = await fb.getDoc(ref);
+    const verifySnap = await fb.getDocFromServer(ref);
     const verifyData = verifySnap.exists() ? verifySnap.data() : {};
     const persistedOk = Object.keys(mergedDemandasCustom).every(k => deepEqual((verifyData.demandasCustom||{})[k], mergedDemandasCustom[k]));
     if(!persistedOk){
@@ -13084,6 +13154,47 @@ const ALLOWED_EMAIL_DOMAIN = '@rivio.com.br';
 // dispara uma segunda vez nesta aba.
 let migratedOnceGlobal = false;
 
+// Pedido em 09/09/2026 — ver comentário grande no useEffect de sincronização dentro de App(). Pequeno
+// indicador na barra de topo: bolinha + texto refletindo o status REAL da conexão com o Firestore
+// (syncStatus), clicável quando não está 'live' pra forçar uma nova tentativa na hora.
+function SyncIndicator({status, onRetry}){
+  const label = {
+    connecting: 'Conectando…',
+    live: 'Tempo real',
+    cache: 'Desatualizado',
+    error: 'Sem conexão',
+  }[status] || 'Tempo real';
+  const clickable = status !== 'live' && status !== 'connecting';
+  return (
+    <div
+      className={"sync-indicator" + (clickable ? ' clickable' : '')}
+      onClick={clickable ? onRetry : undefined}
+      title={clickable ? 'Clique para tentar reconectar agora' : 'Conectado em tempo real ao servidor compartilhado'}
+    >
+      <span className={"sync-dot " + status}></span>{label}
+    </div>
+  );
+}
+
+// Faixa persistente (não é um toast que some sozinho) mostrada logo abaixo da barra de topo sempre que
+// syncStatus !== 'live' — pedido em 09/09/2026 depois de um incidente em que a sincronização real caiu
+// por dias sem NENHUM aviso visível, e as pessoas só perceberam quando compararam com o Firestore
+// diretamente. 'cache' = ainda conectando ou só respondendo do cache local (pode estar desatualizado);
+// 'error' = a inscrição em tempo real caiu de vez (o app tenta sozinho de novo a cada poucos segundos,
+// mas o botão permite forçar na hora).
+function SyncStatusBanner({status, onRetry}){
+  const isError = status === 'error';
+  const text = isError
+    ? 'A conexão em tempo real com a base compartilhada caiu. O que você vê pode estar desatualizado e suas edições podem não estar sendo salvas de verdade. Tentando reconectar sozinho...'
+    : 'Ainda não foi possível confirmar com o servidor que os dados na tela estão atualizados (rodando a partir de uma cópia local). Se isso não sumir em alguns segundos, verifique sua conexão com a internet.';
+  return (
+    <div className={"sync-status-banner" + (isError ? ' error' : '')}>
+      <span>{text}</span>
+      <button type="button" className="sync-status-banner-retry" onClick={onRetry}>Tentar novamente</button>
+    </div>
+  );
+}
+
 function App(){
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -13092,6 +13203,15 @@ function App(){
   const [authError, setAuthError] = useState(null);
   const [signingIn, setSigningIn] = useState(false);
   const {toasts, push} = useToasts();
+  // Pedido em 09/09/2026 (incidente: várias pessoas editando, tudo parecia normal na tela, e a base real
+  // ficou congelada numa versão antiga por dias sem ninguém perceber) — status de sincronização REAL com
+  // o Firestore, em vez do indicador "Tempo real" fixo que existia antes (sempre verde, nunca refletia a
+  // conexão de verdade). Valores: 'connecting' (ainda não recebeu o 1º snapshot), 'live' (último snapshot
+  // veio confirmado do servidor), 'cache' (só temos a cópia local/offline — pode estar desatualizada;
+  // ver snap.metadata.fromCache), 'error' (a inscrição em tempo real caiu e não voltou sozinha ainda).
+  const [syncStatus, setSyncStatus] = useState('connecting');
+  const [syncRetryNonce, setSyncRetryNonce] = useState(0);
+  const retrySync = useCallback(() => setSyncRetryNonce(n => n + 1), []);
 
   // Autenticação (Google, restrito ao domínio da empresa)
   useEffect(() => {
@@ -13132,23 +13252,35 @@ function App(){
   }, []);
 
   // Sincronização em tempo real com o Firestore (somente após login válido)
+  //
+  // ACHADO AO VIVO (09/09/2026): este efeito não tinha NENHUM jeito de saber (nem de avisar) quando a
+  // inscrição em tempo real caía ou passava a responder só com a cópia local (cache offline) em vez do
+  // servidor de verdade — o indicador "Tempo real" na barra lateral era fixo, sempre verde. Isso deixou
+  // um incidente real passar batido por dias: várias pessoas editando, a tela de cada uma "funcionando"
+  // normalmente (o estado local do React sempre atualiza otimista), enquanto a base compartilhada real
+  // ficava parada numa versão antiga. Agora: (1) ensureFirestoreSeeded roda protegido por try/catch —
+  // se não conseguir confirmar com o servidor (offline de verdade), NÃO tenta semear nada, só loga e seva
+  // para o onSnapshot abaixo tentar mesmo assim (ele lida bem com cache); (2) onSnapshot pede
+  // includeMetadataChanges pra sabermos, a cada atualização, se ela veio do servidor confirmado
+  // (snap.metadata.fromCache === false) ou só da cópia local (=== true) — só nesse 2º caso é que o
+  // syncStatus vira 'cache' e a UI mostra um aviso persistente (ver <SyncStatusBanner> mais abaixo,
+  // renderizado sempre que syncStatus !== 'live'); (3) se onSnapshot cair de vez (err), tenta de novo
+  // sozinho a cada 8s em vez de mostrar um toast passageiro e nunca mais tentar.
   useEffect(() => {
     if(!authUser) return;
     let unsub = () => {};
     let cancelled = false;
-    // Só tenta persistir uma correção de migração UMA VEZ NESTA ABA (trava global, ver
-    // migratedOnceGlobal acima — não reseta nem se este efeito for recriado). Antes disso não existia
-    // trava nenhuma: se alguma migração (ex.: a que sincroniza título/descrição de cada meta com a
-    // definição atual de INDICADORES) nunca convergisse — por exemplo porque o texto persistido antigo
-    // nunca bate 100% com o texto atual, depois de reescrever a descrição de uma meta em uma rodada
-    // posterior — "changed" ficava true para SEMPRE, disparando persistPatch(migrated) a CADA snapshot
-    // recebido (inclusive o snapshot gerado pelo eco da própria escrita). Isso criava um loop de escrita
-    // automática que corria contra as edições reais do usuário: bastava a escrita da migração (calculada
-    // a partir de um snapshot um instante mais antigo, sem a edição do usuário) ser ENVIADA depois da
-    // escrita da edição do usuário para o servidor aplicar por último e reverter o responsável recém
-    // associado — exatamente o padrão relatado (nome aparece e some, repetidamente).
+    let retryTimer = null;
+    let staleWatchdog = null;
+
     (async () => {
-      await ensureFirestoreSeeded();
+      try{
+        await ensureFirestoreSeeded();
+      }catch(e){
+        // Não conseguiu confirmar com o SERVIDOR se o documento já existe — de propósito NÃO faz nada
+        // (nem semeia, nem trava o resto do efeito): ver comentário grande em ensureFirestoreSeeded.
+        console.error('ensureFirestoreSeeded: não foi possível confirmar com o servidor (segue sem semear)', e);
+      }
       if(cancelled) return;
       // Semeadura seura do catálogo de Cobertura Produto — à parte do bundle genérico de migração
       // abaixo, de propósito (ver ensureProdutoFuncoesSeededOnce e o comentário em runMigrations sobre
@@ -13156,12 +13288,30 @@ function App(){
       ensureProdutoFuncoesSeededOnce();
       const fb = await waitForFirebase();
       const ref = await getAppDataDocRef();
-      unsub = fb.onSnapshot(ref, snap => {
+
+      const clearStaleWatchdog = () => { if(staleWatchdog){ clearTimeout(staleWatchdog); staleWatchdog = null; } };
+
+      unsub = fb.onSnapshot(ref, {includeMetadataChanges: true}, snap => {
         if(!snap.exists()) return;
         const raw = snap.data();
         const {data: migrated, changed} = runMigrations(raw);
         setData(migrated);
         setLoading(false);
+
+        if(snap.metadata.fromCache){
+          // Só da cópia local por enquanto — pode ser só o instante inicial normal de conexão (dá tempo
+          // de confirmar sozinho) ou pode ser uma conexão real e persistentemente presa no cache; se não
+          // virar 'live' em alguns segundos, assume o pior e avisa.
+          setSyncStatus(s => s === 'live' ? 'cache' : s);
+          clearStaleWatchdog();
+          staleWatchdog = setTimeout(() => {
+            if(!cancelled) setSyncStatus(s => s === 'live' ? s : 'cache');
+          }, 6000);
+        } else {
+          clearStaleWatchdog();
+          setSyncStatus('live');
+        }
+
         if(changed && !migratedOnceGlobal){
           migratedOnceGlobal = true;
           // Escreve só as chaves de topo que a migração de fato alterou (mesma lógica de diff do
@@ -13181,11 +13331,23 @@ function App(){
         }
       }, err => {
         console.error('Firestore sync error', err);
-        push('Erro de sincronização com a base compartilhada.', 'error');
+        clearStaleWatchdog();
+        setSyncStatus('error');
+        push('Sincronização em tempo real caiu — tentando reconectar sozinho...', 'error');
+        // Antes disso, um erro aqui matava a inscrição pra sempre (o listener do onSnapshot já morreu
+        // nesse ponto) e não tentava de novo sozinho — a aba ficava "congelada" na última tela recebida,
+        // sem nenhum jeito de saber que a sincronização real tinha parado, até alguém dar refresh na mão.
+        // Agora tenta se reconectar sozinho depois de 8s, disparando este mesmo efeito de novo.
+        retryTimer = setTimeout(() => { if(!cancelled) retrySync(); }, 8000);
       });
     })();
-    return () => { cancelled = true; unsub(); };
-  }, [authUser, push]);
+    return () => {
+      cancelled = true;
+      unsub();
+      if(retryTimer) clearTimeout(retryTimer);
+      if(staleWatchdog) clearTimeout(staleWatchdog);
+    };
+  }, [authUser, push, syncRetryNonce, retrySync]);
 
   const mutate = useCallback((updater, successMsg) => {
     setData(prev => {
@@ -14094,7 +14256,7 @@ function App(){
             <div className="topbar-title">{pageTitle}</div>
           </div>
           <div className="topbar-user">
-            <div className="sync-indicator"><span className="sync-dot"></span>Tempo real</div>
+            <SyncIndicator status={syncStatus} onRetry={retrySync}/>
             {authUser.photoURL
               ? <img className="topbar-user-avatar" src={authUser.photoURL} referrerPolicy="no-referrer" alt=""/>
               : <div className="topbar-user-avatar-fallback">{(authUser.email||'?')[0].toUpperCase()}</div>}
@@ -14102,6 +14264,7 @@ function App(){
             <button className="topbar-signout-btn" onClick={handleSignOut}>Sair</button>
           </div>
         </div>
+        {syncStatus !== 'live' && <SyncStatusBanner status={syncStatus} onRetry={retrySync}/>}
         <div className={"content" + (route.section === 'demandas' ? ' content-demandas' : '') + ((route.section === 'overview' || route.section === 'roles') ? ' content-wide' : '')}>
           {route.section === 'overview' && <OverviewPage data={data} actions={actions}/>}
           {route.section === 'roles' && <RolesPage data={data} actions={actions}/>}
