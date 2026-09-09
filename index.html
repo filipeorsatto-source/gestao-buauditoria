@@ -673,6 +673,9 @@
   .kpi-hero-detail-item{}
   .kpi-hero-detail-label{font-size:10.5px;color:#8B90A8;font-family:var(--font-mono);text-transform:uppercase;margin-bottom:3px;}
   .kpi-hero-detail-value{font-size:14px;font-weight:600;}
+  /* Pedido em 09/09/2026: linha de valores acumulados (YTD) na tela de Margem Bruta — mesmo estilo da
+     linha "do mês", com um traço mais sutil pra diferenciar visualmente das duas linhas. */
+  .kpi-hero-detail-acumulado{border-top-style:dashed;opacity:0.92;}
 
   /* REPORT MENSAL (tela de "Acompanhamento de Metas" sem indicador selecionado) — pedido em 27/08/2026
      pra deixar de ser uma tela vazia/genérica (EmptyState) e virar uma tela própria, no mesmo padrão
@@ -908,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-09.3';
+const APP_BUILD_ID = '2026-09-09.4';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2852,9 +2855,19 @@ function anoDaData(iso){
   return ano || null;
 }
 
+// ACHADO AO VIVO (09/09/2026): quando `iso` é uma data PURA "YYYY-MM-DD" (sem hora), `new Date(iso)` o
+// navegador interpreta isso como meia-noite em UTC — em qualquer fuso atrás de UTC (ex.: Brasil, UTC-3),
+// isso já é o dia ANTERIOR no horário local, e como getDate()/getMonth()/getFullYear() abaixo leem no
+// fuso LOCAL, o dia exibido saía sempre 1 a menos (prazo 30 aparecia como 29) — reportado na seção
+// "Entregas por Data" da aba Demandas, mas o mesmo bug valia pra qualquer outro uso desta função com uma
+// data pura (ex.: "Data Abertura" na tabela de Demandas). Corrigido completando com "T00:00:00" quando
+// ainda não tem um "T" (mesmo padrão já usado em parseConcluidoEmDate) — assim o Date é construído à
+// meia-noite no fuso LOCAL, e exibe o dia certo independente do fuso de quem está vendo a tela. Timestamps
+// completos (com "T", ex.: sincronizados do Movidesk ou gerados via toISOString()) não são afetados — a
+// condição só entra quando falta o "T".
 function fmtDataAbertura(iso){
   if(!iso) return '—';
-  const d = new Date(iso);
+  const d = new Date(iso.includes('T') ? iso : iso + 'T00:00:00');
   if(isNaN(d.getTime())) return '—';
   const dd = String(d.getDate()).padStart(2,'0');
   const mm = String(d.getMonth()+1).padStart(2,'0');
@@ -3091,7 +3104,11 @@ const INDICADORES = [
   {slug:'nps', titulo:'NPS', area:'Geral', descricao:'Satisfação do cliente medida através de pesquisa bimestral.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/18JDaC4rIPpCGS2_3qgXLV0gwXjJNMaL0'},
   {slug:'penetracao-regras', titulo:'Penetração Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'http://central-regras.riviobizdev.com/'},
   {slug:'efetividade-regras', titulo:'Efetividade Regras', area:'Auditoria', descricao:'Fórmula a definir.', unidade:'%', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
-  {slug:'entregas-prazo', titulo:'% Entregas Prazo', area:'Desenvolvimento', descricao:'Escopos Cobertos / Escopos Essenciais', unidade:'%', fonte:'Movidesk + Planning'},
+  // Pedido em 09/09/2026: KPI invertido de "% Entregas no Prazo" (quanto maior, melhor) para "% Entregas
+  // Atrasadas" (quanto MENOR, melhor) — ver META_MENOR_MELHOR_SLUGS abaixo e EntregasPrazoPage. O slug
+  // ('entregas-prazo') foi mantido de propósito, para não quebrar o histórico de metas/budget já
+  // gravados no Firestore sob esse slug.
+  {slug:'entregas-prazo', titulo:'% Entregas Atrasadas', area:'Desenvolvimento', descricao:'Entregas Atrasadas / Entregas Planejadas', unidade:'%', fonte:'Movidesk + Planning'},
   {slug:'csat-tech', titulo:'CSAT Tech', area:'Desenvolvimento', descricao:'Avaliação dos tickets de tecnologia provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
   {slug:'tempo-processamento', titulo:'Tempo Processamento', area:'Desenvolvimento', descricao:'Tempo de processamento por categoria (Importação, Recálculo) e por cliente — a meta é a média consolidada entre todos os clientes e categorias.', unidade:'Absoluto', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?gid=808343304#gid=808343304'},
   {slug:'dias-ticket-aberto', titulo:'Média dias ticket em aberto', area:'Atendimento', descricao:'Média de dias em aberto dos tickets provenientes do Movidesk.', unidade:'Absoluto', fonte:'Movidesk'},
@@ -3152,7 +3169,8 @@ const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'e
 // Metas em que "quanto menor, melhor" (Realizado abaixo do Budget é bom) — o oposto da maioria das
 // metas, em que Realizado acima do Budget é bom. Usado só para decidir a cor (verde/vermelho) na
 // tabela "Realizado vs. Budget · % por mês" de Gestão de Metas — a fórmula do percentual em si não muda.
-const META_MENOR_MELHOR_SLUGS = ['dias-ticket-aberto', 'sla-primeira-resposta', 'tempo-processamento'];
+// 'entregas-prazo' adicionado em 09/09/2026 junto com a inversão do KPI para "% Entregas Atrasadas".
+const META_MENOR_MELHOR_SLUGS = ['dias-ticket-aberto', 'sla-primeira-resposta', 'tempo-processamento', 'entregas-prazo'];
 
 const AREA_PALETTE = ['#2C5AA0','#1F8A70','#B8862B','#8A4FBE','#C4432B','#2B8FA6','#6B5BD6','#A85A9E'];
 function colorForArea(area){
@@ -5475,13 +5493,16 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
   }
 
   if(slug === 'entregas-prazo'){
+    // Pedido em 09/09/2026: KPI invertido — agora é % de entregas ATRASADAS (quanto menor, melhor), ver
+    // META_MENOR_MELHOR_SLUGS e comentário em EntregasPrazoPage. Numerador trocado de concluidaNoPrazo
+    // para atrasado.
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const base = merged.filter(m => m.classificacao && m.classificacao.startsWith('Desenvolvimento') && m.mesPlanning
       && (pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente))));
     const out = {};
     MONTHS.forEach(m => {
       const subset = base.filter(x => String(x.mesPlanning) === String(m.n));
-      out[m.n] = subset.length ? (subset.filter(x => x.concluidaNoPrazo).length / subset.length * 100) : null;
+      out[m.n] = subset.length ? (subset.filter(x => x.atrasado).length / subset.length * 100) : null;
     });
     return out;
   }
@@ -5725,10 +5746,11 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     return checked / totalCampos * 100;
   }
   if(slug === 'entregas-prazo'){
+    // Ver comentário equivalente em getMetaRealizadoByMonth — KPI invertido em 09/09/2026.
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
     const subset = merged.filter(x => x.classificacao && x.classificacao.startsWith('Desenvolvimento') && String(x.mesPlanning) === String(mesN) && x.cliente === clienteNome
       && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
-    return subset.length ? (subset.filter(x => x.concluidaNoPrazo).length / subset.length * 100) : null;
+    return subset.length ? (subset.filter(x => x.atrasado).length / subset.length * 100) : null;
   }
   if(slug === 'csat-tech' || slug === 'csat-atendimento' || slug === 'csat-produto'){
     // Agrupa pelo mês de CONCLUSÃO do ticket (mesConclusao), não pelo mês do Prazo (mesPlanning) — ajuste
@@ -7852,9 +7874,12 @@ function addPlanningDevSlide(pptx, devsPair, data, mesN, mesLabel){
     addPlanningStatSingleCard(pptx, slide, x+0.16, startY+0.46, statW, 0.5, String(somaEsforco(planningRows)), 'ESFORÇO TOTAL · PLANNING', RIVIO_PPTX.tintaSoft);
     addPlanningStatSingleCard(pptx, slide, x+0.16+statW+0.14, startY+0.46, statW, 0.5, String(somaEsforco(plusRows)), 'ESFORÇO TOTAL · PLUS', RIVIO_PPTX.azul);
 
-    const tableRows = rows.map(m => [m.assunto || '(sem assunto)', m.cliente || '—', m.prioridade || '—', m.esforco === null || m.esforco === undefined ? '—' : String(m.esforco), m.tipo || '—']);
-    addPlanningListTable(pptx, slide, x+0.16, startY+1.0, colW-0.32, colH-1.16, ['DEMANDA','CLIENTE','','ESFORÇO','TIPO'], tableRows,
-      [null, 0.9, 0.62, 0.9, 0.8], {fontSize:7});
+    // Pedido em 09/09/2026: nova 1ª coluna com o número do ticket Linear (campo manual, ver LinearCell na
+    // aba Demandas), e coluna ESFORÇO mais estreita (0.9 -> 0.55) com título abreviado "ESF." pra abrir
+    // espaço sem espremer as demais colunas.
+    const tableRows = rows.map(m => [m.linear || '—', m.assunto || '(sem assunto)', m.cliente || '—', m.prioridade || '—', m.esforco === null || m.esforco === undefined ? '—' : String(m.esforco), m.tipo || '—']);
+    addPlanningListTable(pptx, slide, x+0.16, startY+1.0, colW-0.32, colH-1.16, ['LINEAR','DEMANDA','CLIENTE','','ESF.','TIPO'], tableRows,
+      [0.55, null, 0.9, 0.62, 0.55, 0.8], {fontSize:7});
   });
 }
 
@@ -9119,6 +9144,26 @@ function MargemBrutaPage({financeiro, financeiroSync, actions}){
   const lastData = lastMonth ? pnlYear[lastMonth.n] : null;
   const kpi = lastData ? (lastData.grossProfit / lastData.receitaTotal) * 100 : null;
 
+  // Pedido em 09/09/2026: além do mês de fechamento, mostrar também o acumulado do ano (Jan até o último
+  // mês já sincronizado) — mesmo critério de "meses acumulados" usado no Report Staff (buildStaffYtdCards),
+  // só que aqui somando também o EBITDA (que aquela função não precisa, mas esta tela quer mostrar).
+  const acumulado = useMemo(() => {
+    if(!filledMonths.length) return null;
+    let receitaTotal = 0, grossProfit = 0, ebitda = 0;
+    filledMonths.forEach(m => {
+      const d = pnlYear[m.n];
+      receitaTotal += Number(d.receitaTotal) || 0;
+      grossProfit += Number(d.grossProfit) || 0;
+      ebitda += Number(d.ebitda) || 0;
+    });
+    return {
+      receitaTotal,
+      grossProfit,
+      ebitda,
+      margemBruta: receitaTotal ? (grossProfit / receitaTotal * 100) : null,
+    };
+  }, [filledMonths, pnlYear]);
+
   // Descobre dinamicamente quais sub-linhas existem sob cada linha principal (ex.: clientes sob "Total
   // revenues", categorias como "Tecnologia"/"Viagens" sob "(-) COGS"), mesclando a ordem de todos os
   // meses já sincronizados — assim, uma linha nova adicionada na aba Finance aparece automaticamente,
@@ -9194,6 +9239,26 @@ function MargemBrutaPage({financeiro, financeiroSync, actions}){
               <div className="kpi-hero-detail-item">
                 <div className="kpi-hero-detail-label">EBITDA / burn</div>
                 <div className="kpi-hero-detail-value">{fmtCurrency(lastData.ebitda)}</div>
+              </div>
+            </div>
+          )}
+          {acumulado && (
+            <div className="kpi-hero-detail kpi-hero-detail-acumulado" title={`Acumulado de Jan a ${lastMonth.label}/${CURRENT_YEAR} (${filledMonths.length} mês${filledMonths.length===1?'':'es'} já sincronizado${filledMonths.length===1?'':'s'})`}>
+              <div className="kpi-hero-detail-item">
+                <div className="kpi-hero-detail-label">Margem Bruta Acumulada</div>
+                <div className="kpi-hero-detail-value">{acumulado.margemBruta === null ? '—' : fmtPercent(acumulado.margemBruta)}</div>
+              </div>
+              <div className="kpi-hero-detail-item">
+                <div className="kpi-hero-detail-label">Receita Líquida Acumulada</div>
+                <div className="kpi-hero-detail-value">{fmtCurrency(acumulado.receitaTotal)}</div>
+              </div>
+              <div className="kpi-hero-detail-item">
+                <div className="kpi-hero-detail-label">Gross Profit Acumulado</div>
+                <div className="kpi-hero-detail-value">{fmtCurrency(acumulado.grossProfit)}</div>
+              </div>
+              <div className="kpi-hero-detail-item">
+                <div className="kpi-hero-detail-label">EBITDA Acumulado</div>
+                <div className="kpi-hero-detail-value">{fmtCurrency(acumulado.ebitda)}</div>
               </div>
             </div>
           )}
@@ -10958,10 +11023,13 @@ function EntregasPrazoPage({data}){
     return true;
   }), [base, mesFilter, respFilter, classifFilter, tipoFilter]);
 
+  // Pedido em 09/09/2026: KPI invertido de "% Entregas no Prazo" para "% Entregas Atrasadas" — numerador
+  // trocado de concluidaNoPrazo para atrasado (ver isDemandaAtrasado). Agora quanto MENOR, melhor (ver
+  // META_MENOR_MELHOR_SLUGS, que já cuida da cor/seta em Gestão de Metas e no card de meta automaticamente).
   const planningScope = useMemo(() => filtered.filter(m => m.mesPlanning), [filtered]);
-  const concluidasNoPrazo = planningScope.filter(m => m.concluidaNoPrazo).length;
+  const atrasadas = planningScope.filter(m => m.atrasado).length;
   const totalPlanning = planningScope.length;
-  const kpiPct = totalPlanning > 0 ? (concluidasNoPrazo / totalPlanning * 100) : null;
+  const kpiPct = totalPlanning > 0 ? (atrasadas / totalPlanning * 100) : null;
 
   // matriz (meses x responsáveis) — respeita os filtros de responsável/classificação/tipo, mas não o de mês,
   // para mostrar a evolução completa ao longo do ano.
@@ -10982,8 +11050,8 @@ function EntregasPrazoPage({data}){
   function pctForRowMes(rowKey, mesN){
     const subset = matrixBase.filter(m => (m.responsavelDesenvolvimentoId || '') === rowKey && String(m.mesPlanning) === String(mesN));
     if(subset.length === 0) return null;
-    const ok = subset.filter(m => m.concluidaNoPrazo).length;
-    return ok / subset.length * 100;
+    const atrasadasSubset = subset.filter(m => m.atrasado).length;
+    return atrasadasSubset / subset.length * 100;
   }
 
   const byCliente = useMemo(() => {
@@ -10997,15 +11065,17 @@ function EntregasPrazoPage({data}){
   return (
     <div>
       <div className="kpi-hero" style={{marginBottom:16}}>
-        <div className="kpi-hero-label">% Entregas no Prazo{mesFilter ? (' · ' + mesPlanningNome(mesFilter)) : ''}</div>
+        <div className="kpi-hero-label">% Entregas Atrasadas{mesFilter ? (' · ' + mesPlanningNome(mesFilter)) : ''}</div>
         {kpiPct !== null ? (
-          <div className={"kpi-hero-value" + (kpiPct >= 80 ? ' positive' : (kpiPct < 50 ? ' negative' : ''))} style={kpiPct>=50 && kpiPct<80 ? {color:'#F2CB8A'} : undefined}>
+          // Invertido em 09/09/2026: agora é "quanto menor, melhor" — verde até 20% de atraso, vermelho
+          // acima de 50%, faixa intermediária em amarelo (espelha os limiares antigos de 80/50, só invertidos).
+          <div className={"kpi-hero-value" + (kpiPct <= 20 ? ' positive' : (kpiPct > 50 ? ' negative' : ''))} style={kpiPct>20 && kpiPct<=50 ? {color:'#F2CB8A'} : undefined}>
             {fmtPercent(kpiPct, 0)}
           </div>
         ) : (
           <div className="kpi-hero-value" style={{fontSize:20, color:'#9BA0B8'}}>Sem demandas na planning</div>
         )}
-        <div className="kpi-hero-formula">Demandas concluídas no prazo / Demandas total — considerando apenas tickets de Desenvolvimento com Prazo definido ({concluidasNoPrazo} de {totalPlanning})</div>
+        <div className="kpi-hero-formula">Demandas atrasadas / Demandas total — considerando apenas tickets de Desenvolvimento com Prazo definido ({atrasadas} de {totalPlanning})</div>
       </div>
 
       <div className="card demandas-filters-card">
@@ -11036,7 +11106,7 @@ function EntregasPrazoPage({data}){
       <div className="card" style={{marginBottom:16}}>
         <div className="section-block-head" style={{padding:'18px 22px 0'}}>
           <div>
-            <div className="section-block-title">% de entrega no prazo por responsável e mês</div>
+            <div className="section-block-title">% de entregas atrasadas por responsável e mês</div>
             <div className="section-block-desc">Baseado no mês do Prazo de cada ticket de Desenvolvimento. Respeita os filtros de responsável, classificação e tipo (o filtro de mês não se aplica à matriz, para mostrar a evolução completa do ano).</div>
           </div>
         </div>
@@ -12015,6 +12085,17 @@ function EntregaPorDataLinha({m, devNameById}){
         {m.classificacao && <span className="tag">{m.classificacao}</span>}
         <span>{m.assunto || '(sem assunto)'}</span>
         <span style={{color:'var(--ink-soft)', fontSize:12}}>#{m.numero}</span>
+        {/* Pedido em 09/09/2026: número do ticket Linear (campo manual, ver LinearCell) ao lado do nome
+            da demanda, igual ao Nº Ticket do Movidesk logo acima — vira link quando tem URL cadastrada. */}
+        {m.linear && (
+          m.linearUrl ? (
+            <a href={m.linearUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:12, color:'var(--accent)'}} title="Abrir no Linear" onClick={e => e.stopPropagation()}>
+              Linear: {m.linear}
+            </a>
+          ) : (
+            <span style={{color:'var(--ink-soft)', fontSize:12}}>Linear: {m.linear}</span>
+          )
+        )}
       </div>
       <div style={{display:'flex', alignItems:'center', gap:10, flexWrap:'wrap', fontSize:12, color:'var(--ink-soft)'}}>
         {m.responsavel && <span title="Responsável Atendimento">Atend.: <strong style={{color:'var(--ink)', fontWeight:600}}>{m.responsavel}</strong></span>}
