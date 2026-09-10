@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-09.4';
+const APP_BUILD_ID = '2026-09-10.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -3760,7 +3760,9 @@ const COBERTURA_BASES = [
   {key:'analises', nome:'Análises'},
   {key:'acessos', nome:'Acessos'},
 ];
-const COBERTURA_ITENS = ['Dados','Tabela','Visual'];
+// Pedido em 10/09/2026: "Visual" virou "Visual Externo" (ver migrateCoberturaDadosVisualExterno20260910,
+// que preserva os checks já marcados sob o nome antigo) e um novo item "Visual Interno" foi adicionado.
+const COBERTURA_ITENS = ['Dados','Tabela','Visual Externo','Visual Interno'];
 function coberturaRowKey(baseKey, item){ return baseKey + '__' + item; }
 
 function buildDefaultData(){
@@ -4257,6 +4259,59 @@ async function repairProdutoFuncoesCatalog20260909(){
   }catch(e){
     console.error('Erro ao reparar catálogo de funções de produto', e);
     produtoFuncoesCatalogRepairAttemptedGlobal = false;
+  }
+}
+
+// Pedido em 10/09/2026: em Cobertura de Dados, o item "Visual" virou "Visual Externo" (e um novo item
+// "Visual Interno" foi adicionado — ver COBERTURA_ITENS). Como coberturaRowKey(baseKey, item) usa o TEXTO
+// do item pra montar a chave salva no Firestore (ex.: "base1__Visual"), simplesmente trocar o texto no
+// array faria os checks já marcados sob "Visual" ficarem órfãos — exatamente o mesmo tipo de "dado
+// fantasma" do incidente de produtoFuncoes (ver repairProdutoFuncoesCatalog20260909 acima). Esta migração
+// evita isso: para cada ano/mês/base já preenchidos, copia o conteúdo salvo sob a chave antiga
+// ("...__Visual") para a nova ("...__Visual Externo") antes que o item antigo deixe de existir na lista —
+// os checks continuam batendo pros clientes que já tinham "Visual" marcado. Roda uma única vez (flag
+// dedicado, mesmo padrão de segurança: leitura fresca do servidor, escrita, confirmação relendo).
+let coberturaDadosVisualExternoMigrationAttemptedGlobal = false;
+async function migrateCoberturaDadosVisualExterno20260910(){
+  if(coberturaDadosVisualExternoMigrationAttemptedGlobal) return;
+  coberturaDadosVisualExternoMigrationAttemptedGlobal = true;
+  try{
+    const fb = await waitForFirebase();
+    const ref = await getAppDataDocRef();
+    const snap = await fb.getDocFromServer(ref);
+    const current = snap.exists() ? snap.data() : {};
+    if(current.coberturaDadosVisualExternoMigrated20260910) return;
+    const coberturaDados = JSON.parse(JSON.stringify(current.coberturaDados || {}));
+    Object.keys(coberturaDados).forEach(ano => {
+      const yearData = coberturaDados[ano] || {};
+      Object.keys(yearData).forEach(mesN => {
+        const monthData = yearData[mesN] || {};
+        COBERTURA_BASES.forEach(base => {
+          const oldKey = base.key + '__Visual';
+          const newKey = base.key + '__Visual Externo';
+          if(monthData[oldKey]){
+            monthData[newKey] = {...(monthData[oldKey]||{}), ...(monthData[newKey]||{})};
+            delete monthData[oldKey];
+          }
+        });
+        yearData[mesN] = monthData;
+      });
+      coberturaDados[ano] = yearData;
+    });
+    const patch = { coberturaDados, coberturaDadosVisualExternoMigrated20260910: true };
+    await fb.updateDoc(ref, patch);
+    const verifySnap = await fb.getDocFromServer(ref);
+    const verifyData = verifySnap.exists() ? verifySnap.data() : {};
+    const ok = verifyData.coberturaDadosVisualExternoMigrated20260910 === true && deepEqual(verifyData.coberturaDados, patch.coberturaDados);
+    if(!ok){
+      console.error('Migração de Cobertura de Dados (Visual -> Visual Externo) não confirmada pelo servidor — tentará de novo na próxima sessão.');
+      coberturaDadosVisualExternoMigrationAttemptedGlobal = false;
+    } else {
+      console.log('Migração de Cobertura de Dados (Visual -> Visual Externo) concluída.');
+    }
+  }catch(e){
+    console.error('Erro ao migrar Cobertura de Dados (Visual -> Visual Externo)', e);
+    coberturaDadosVisualExternoMigrationAttemptedGlobal = false;
   }
 }
 
@@ -13465,6 +13520,10 @@ function App(){
       // — roda uma única vez (flag próprio) pra devolver os 105 itens do catálogo padrão que sumiram de
       // produtoFuncoes, reconectando os checks órfãos que sobreviveram em produtoFuncoesChecks.
       repairProdutoFuncoesCatalog20260909();
+      // Migração pontual de Cobertura de Dados (ver migrateCoberturaDadosVisualExterno20260910) — roda uma
+      // única vez, renomeando as chaves salvas de "Visual" para "Visual Externo" antes que esse item mude
+      // de nome na tela, pra não deixar nenhum check já marcado órfão.
+      migrateCoberturaDadosVisualExterno20260910();
       const fb = await waitForFirebase();
       const ref = await getAppDataDocRef();
 
