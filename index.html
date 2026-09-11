@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-11.1';
+const APP_BUILD_ID = '2026-09-11.2';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7702,10 +7702,11 @@ function addPlanningListTable(pptx, slide, x, y, w, h, headers, rows, colWs, opt
 
   let bodyRows;
   if(rows && rows.length){
-    // Calcula a altura necessária de cada linha (o maior número de linhas quebradas entre as células
-    // daquela linha) e para de adicionar linhas assim que ultrapassar a altura disponível — em vez de
-    // deixar a tabela vazar pra fora do card, mostra "+N mais" na última linha (mesmo padrão já usado na
-    // grade de códigos do Movidesk).
+    // Pedido em 11/09/2026: mostrar SEMPRE todas as demandas, mesmo que a tabela fique mais alta que o
+    // card/coluna do slide (antes, cortava e mostrava "+N demanda(s) não exibida(s)" quando a altura
+    // disponível estourava — o usuário prefere a tabela vazando visualmente e ajustar manualmente depois
+    // a ter demandas escondidas). Mantém o cálculo de altura por linha (rowH) só para dar à célula altura
+    // suficiente pro texto que quebra em mais de 1 linha — não é mais usado para decidir onde cortar.
     const rowHeights = rows.map(r => {
       const maxLinhas = r.reduce((max, val, i) => {
         const texto = val === null || val === undefined ? '' : String(val);
@@ -7714,23 +7715,8 @@ function addPlanningListTable(pptx, slide, x, y, w, h, headers, rows, colWs, opt
       }, 1);
       return Math.max(0.19, maxLinhas * lineH);
     });
-    const available = h - headerH;
-    let usedH = 0, cutAt = rows.length;
-    for(let i = 0; i < rowHeights.length; i++){
-      if(usedH + rowHeights[i] > available){ cutAt = i; break; }
-      usedH += rowHeights[i];
-    }
-    const overflow = cutAt < rows.length;
-    // Se sobrar só espaço pra 1 linha a mais, reserva ela pra mensagem "+N mais" em vez da última
-    // demanda que coubesse (evita deixar só metade de uma linha visível e depois o resumo).
-    const shownRows = overflow ? rows.slice(0, Math.max(0, cutAt)) : rows;
-    const shownHeights = overflow ? rowHeights.slice(0, Math.max(0, cutAt)) : rowHeights;
-    bodyRows = shownRows.map(r => r.map(val => ({text: val === null || val === undefined ? '' : String(val), options:{fontSize:bodyFontSize, color:RIVIO_PPTX.tinta}})));
-    let finalRowH = [headerH, ...shownHeights];
-    if(overflow){
-      bodyRows.push([{text: '+' + (rows.length - shownRows.length) + ' demanda(s) não exibida(s)', options:{fontSize:bodyFontSize, italic:true, color:RIVIO_PPTX.tintaSoft, colspan: headers.length, align:'center'}}]);
-      finalRowH.push(0.19);
-    }
+    bodyRows = rows.map(r => r.map(val => ({text: val === null || val === undefined ? '' : String(val), options:{fontSize:bodyFontSize, color:RIVIO_PPTX.tinta}})));
+    const finalRowH = [headerH, ...rowHeights];
     slide.addTable([header, ...bodyRows], {
       x, y, w, colW,
       fontFace: RIVIO_PPTX.fontFace, border: {type:'solid', color:RIVIO_PPTX.linhaClara, pt:0.5},
@@ -8088,9 +8074,11 @@ function addPlanningAtendimentoPersonalizacaoSlide(pptx, especialistasPair, data
     addPlanningStatSingleCard(pptx, slide, x+0.16, startY+0.46, statW, 0.5, String(somaEsforco(planningRows)), 'ESFORÇO TOTAL · PLANNING', RIVIO_PPTX.tintaSoft);
     addPlanningStatSingleCard(pptx, slide, x+0.16+statW+0.14, startY+0.46, statW, 0.5, String(somaEsforco(plusRows)), 'ESFORÇO TOTAL · PLUS', RIVIO_PPTX.azul);
 
-    const tableRows = rows.map(m => [m.assunto || '(sem assunto)', m.cliente || '—', m.prioridade || '—', m.esforco === null || m.esforco === undefined ? '—' : String(m.esforco), m.tipo || '—']);
-    addPlanningListTable(pptx, slide, x+0.16, startY+1.12, colW-0.32, colH-1.28, ['DEMANDA','CLIENTE','','ESFORÇO','TIPO'], tableRows,
-      [null, 0.9, 0.62, 0.9, 0.8], {fontSize:8});
+    // Pedido em 11/09/2026: número do ticket Linear como 1ª coluna, igual ao que já foi feito no slide de
+    // Desenvolvimento (Slides 10-11) — mesmo padrão de largura/abreviação de cabeçalho.
+    const tableRows = rows.map(m => [m.linear || '—', m.assunto || '(sem assunto)', m.cliente || '—', m.prioridade || '—', m.esforco === null || m.esforco === undefined ? '—' : String(m.esforco), m.tipo || '—']);
+    addPlanningListTable(pptx, slide, x+0.16, startY+1.12, colW-0.32, colH-1.28, ['LINEAR','DEMANDA','CLIENTE','','ESF.','TIPO'], tableRows,
+      [0.55, null, 0.9, 0.62, 0.55, 0.8], {fontSize:8});
   });
 }
 
