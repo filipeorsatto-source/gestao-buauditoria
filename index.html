@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-11.2';
+const APP_BUILD_ID = '2026-09-11.4';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7989,8 +7989,8 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
   // slide "Atendimento Personalização" (função texto-livre, sem mudança).
   const pessoasAtendimentoLabel = (data.pessoas || []).filter(p => p.area === 'Atendimento' && (p.atendimentoLabel === 'N1' || p.atendimentoLabel === 'Projeto'));
   const responsaveis = pessoasAtendimentoLabel
-    .map(p => p.nome)
-    .sort((a,b) => a.localeCompare(b,'pt-BR'));
+    .slice()
+    .sort((a,b) => a.nome.localeCompare(b.nome,'pt-BR'));
   const labelPorNome = {};
   pessoasAtendimentoLabel.forEach(p => { labelPorNome[p.nome] = p.atendimentoLabel; });
   const isProjeto = resp => labelPorNome[resp] === 'Projeto';
@@ -7999,26 +7999,33 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
 
   const specs = [
     {titulo:'CSAT', headers:['RESP.','CSAT REAL','CSAT META'], meta:'4,0',
-      calc: resp => {
+      calc: pessoa => {
+        const resp = pessoa.nome;
         if(!mesAnt) return null;
         const source = isProjeto(resp) ? baseComDev : base;
         const subset = source.filter(m => m.responsavel === resp && String(m.mesConclusao) === String(mesAnt));
         return avgCsat(subset.map(m => m.csat));
       }},
+    // CORRIGIDO em 11/09/2026: SLA 1ª Resposta e Média Dias em Aberto tinham um cálculo próprio aqui no
+    // deck que não reproduzia os mesmos filtros de negócio das abas de Metas (ex.: Dias em Aberto exclui
+    // tickets "Despriorizado" e bloqueados, e considera o status na DATA DE FECHAMENTO do mês, não o
+    // status atual do ticket) — o usuário reportou valores errados. Agora os dois usam
+    // getMetaRealizadoByMonth (a MESMA função usada em Acompanhamento de Metas / Gestão de Metas),
+    // filtrando pela pessoa (pessoaId) e lendo o valor do mês ANTERIOR ao selecionado na lista suspensa
+    // (mesAnt) — sempre o fechamento do mês anterior, igual ao resto do deck. CSAT não foi alterado (não
+    // foi reportado como errado e mantém seu próprio cálculo aqui).
     {titulo:'SLA 1ª RESPOSTA', headers:['RESP.','SLA REAL','SLA META'], meta:'240',
-      calc: resp => {
-        if(isProjeto(resp)) return 'na';
+      calc: pessoa => {
+        if(isProjeto(pessoa.nome)) return 'na';
         if(!mesAnt) return null;
-        const subset = base.filter(m => m.responsavel === resp && m.tempoPrimeiraResposta !== null && mesAnoAbertura(m.abertoEm, mesAnt));
-        return subset.length ? avgOf(subset.map(m => m.tempoPrimeiraResposta)) : null;
+        const realByMonth = getMetaRealizadoByMonth('sla-primeira-resposta', data, null, pessoa.id);
+        return realByMonth ? realByMonth[mesAnt] : null;
       }},
     {titulo:'MÉDIA DIAS EM ABERTO', headers:['RESP.','MÉDIA REAL','MÉDIA META'], meta:'5,0',
-      calc: resp => {
+      calc: pessoa => {
         if(!mesAnt) return null;
-        const source = isProjeto(resp) ? baseComDev : base;
-        const subset = source.filter(m => m.responsavel === resp);
-        const dias = subset.map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, m.statusEfetivo, CURRENT_YEAR, mesAnt)).filter(v => v !== null);
-        return dias.length ? avgOf(dias) : null;
+        const realByMonth = getMetaRealizadoByMonth('dias-ticket-aberto', data, null, pessoa.id);
+        return realByMonth ? realByMonth[mesAnt] : null;
       }},
   ];
 
@@ -8026,11 +8033,11 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
     const x = startX + i*(colW+gap);
     slide.addShape(pptx.ShapeType.roundRect, {x, y:startY, w:colW, h:colH, rectRadius:0.05, fill:{color:RIVIO_PPTX.branco}, line:{color:'E6E6E6', width:1}});
     slide.addText(spec.titulo, {x:x+0.16, y:startY+0.1, w:colW-0.32, h:0.3, fontFace:RIVIO_PPTX.fontFace, fontSize:14, bold:true, color:RIVIO_PPTX.tinta});
-    const rows = responsaveis.map(resp => {
-      const v = spec.calc(resp);
-      const vTxt = v === 'na' ? 'Não se aplica' : (v === null ? '—' : v.toLocaleString('pt-BR', {maximumFractionDigits:1}));
+    const rows = responsaveis.map(pessoa => {
+      const v = spec.calc(pessoa);
+      const vTxt = v === 'na' ? 'Não se aplica' : (v === null || v === undefined ? '—' : v.toLocaleString('pt-BR', {maximumFractionDigits:1}));
       const metaTxt = v === 'na' ? '—' : spec.meta;
-      return [resp, vTxt, metaTxt];
+      return [pessoa.nome, vTxt, metaTxt];
     });
     addPlanningListTable(pptx, slide, x+0.16, startY+0.5, colW-0.32, colH-0.66, spec.headers, rows, [null, 1.0, 1.0]);
   });
@@ -8944,10 +8951,14 @@ async function gerarReportStaffDocx(data, mesN, colId){
       const { Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType } = window.docx;
       const thinBorder = {style: BorderStyle.SINGLE, size: 4, color: STAFF_DOCX.linhaClara};
       const borders = {top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder, insideHorizontal: thinBorder, insideVertical: thinBorder};
-      const headerRow = new TableRow({children: ['Assunto', 'Responsável', 'Prazo', 'Status'].map(t => new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.tinta}, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: t, bold: true, size: 15, color: 'FFFFFF'})]})]})), tableHeader: true});
+      // Pedido em 11/09/2026: coluna trocada de "Responsável" (campo texto "Responsável Atendimento",
+      // vindo do Movidesk — só preenchido pelo N1) para "Desenvolvedor" (responsavelDesenvolvimentoId,
+      // resolvido pelo nome via pessoaNomePlanning) — mesmo padrão já usado nas tabelas por
+      // desenvolvedor/atendimento do deck da Planning (addPlanningDevSlide / addPlanningClientSlide).
+      const headerRow = new TableRow({children: ['Assunto', 'Desenvolvedor', 'Prazo', 'Status'].map(t => new TableCell({shading: {type: ShadingType.CLEAR, fill: STAFF_DOCX.tinta}, children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: t, bold: true, size: 15, color: 'FFFFFF'})]})]})), tableHeader: true});
       const bodyRows = rowsPlanning.map(r => new TableRow({children: [
         new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.assunto || '(sem assunto)', size: 14})]})]}),
-        new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.responsavel || '—', size: 14})]})]}),
+        new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: pessoaNomePlanning(data, r.responsavelDesenvolvimentoId) || '—', size: 14})]})]}),
         new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.prazo ? fmtDataColunaReport(r.prazo) : '—', size: 14})]})]}),
         new TableCell({children: [new Paragraph({alignment: AlignmentType.CENTER, children: [new TextRun({text: r.status || '—', size: 14})]})]}),
       ]}));
