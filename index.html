@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-10.1';
+const APP_BUILD_ID = '2026-09-11.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -8059,9 +8059,13 @@ function addPlanningAtendimentoKpisSlide(pptx, data, mesN, mesLabel){
 // cadastradas no organograma com area==='Atendimento' e funcao==='Especialista' (hoje, só a Angela
 // Censi) — no mesmo formato do slide de Desenvolvimento (nome no topo, cards de esforço, tabela
 // DEMANDA/CLIENTE/[prioridade sem cabeçalho]/ESFORÇO/TIPO, "Nenhuma demanda encontrada" quando vazio).
-// Os tickets de cada especialista são os classificados como "Atendimento Personalização" onde o campo
-// texto "responsavel" (agente de atendimento) bate com o nome dela — diferente do slide de
-// Desenvolvimento, que casa por responsavelDesenvolvimentoId (um vínculo por id, não por nome de texto).
+// CORRIGIDO em 11/09/2026: a Especialista (Angela) na prática funciona como uma desenvolvedora que só
+// mexe em tickets de integração/personalização — por isso ela é alocada nos tickets pela MESMA coluna
+// que os desenvolvedores (responsavelDesenvolvimentoId, escolhida em dropdown dentro do app), e NÃO pelo
+// campo texto "Responsável Atendimento" (esse é preenchido pelo N1 na planilha do Movidesk e nunca traz
+// o nome dela). A versão anterior deste filtro comparava m.responsavel === pessoa.nome (texto vindo do
+// Movidesk) e por isso nunca encontrava nenhum ticket dela — corrigido para casar por id, no mesmo
+// padrão do slide de Desenvolvimento (Slides 10-11).
 function addPlanningAtendimentoPersonalizacaoSlide(pptx, especialistasPair, data, mesN, mesLabel){
   const slide = pptx.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
@@ -8076,7 +8080,7 @@ function addPlanningAtendimentoPersonalizacaoSlide(pptx, especialistasPair, data
     slide.addText(pessoa ? pessoa.nome : '—', {x:x+0.16, y:startY+0.1, w:colW-0.32, h:0.3, fontFace:RIVIO_PPTX.fontFace, fontSize:14, bold:true, color:RIVIO_PPTX.tinta});
     if(!pessoa) return;
     const rows = merged.filter(m => demandaEmAbertoPlanning(m) && m.classificacao === 'Atendimento Personalização'
-      && m.responsavel === pessoa.nome && (m.tipo === 'Planning' || m.tipo === 'Nova Demanda'));
+      && m.responsavelDesenvolvimentoId === pessoa.id && (m.tipo === 'Planning' || m.tipo === 'Nova Demanda'));
     const planningRows = rows.filter(m => m.tipo === 'Planning');
     const plusRows = rows.filter(m => m.tipo === 'Nova Demanda');
     const somaEsforco = list => list.reduce((a,m) => a + (Number(m.esforco)||0), 0);
