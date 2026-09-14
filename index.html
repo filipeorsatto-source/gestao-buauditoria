@@ -697,19 +697,13 @@
   .report-hero-title{font-family:var(--font-display);font-size:29px;font-weight:700;margin:0 0 10px 0;position:relative;}
   .report-hero-sub{font-size:13.2px;color:#C7CBDB;max-width:640px;line-height:1.6;position:relative;}
 
-  .report-grid{display:grid;grid-template-columns:1.15fr 0.85fr;gap:18px;align-items:start;}
-  @media(max-width:920px){.report-grid{grid-template-columns:1fr;}}
+  /* Pedido em 14/09/2026: era um grid de 2 colunas (features estáticas | card único com TODOS os
+     geradores empilhados) — agora cada gerador tem seu próprio card, then o grid se adapta com quantos
+     couberem por linha (3 no desktop largo, 2 ou 1 conforme a tela estreita). */
+  .report-grid{display:grid;grid-template-columns:repeat(auto-fit, minmax(300px, 1fr));gap:18px;align-items:start;}
 
   .report-card-title{font-weight:700;font-size:13.5px;color:var(--ink);margin-bottom:4px;}
   .report-card-sub{font-size:12px;color:var(--ink-soft);margin-bottom:14px;}
-  .report-feature-item{display:flex;gap:13px;padding:13px 0;border-bottom:1px solid var(--line-soft);}
-  .report-feature-item:last-child{border-bottom:none;padding-bottom:2px;}
-  .report-feature-icon{
-    width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;
-    flex-shrink:0;color:#fff;
-  }
-  .report-feature-name{font-weight:700;font-size:13px;color:var(--ink);margin-bottom:2px;}
-  .report-feature-desc{font-size:12px;color:var(--ink-soft);line-height:1.5;}
 
   .report-generate-card .field{margin-bottom:16px;}
   .report-generate-btn{width:100%;justify-content:center;padding-top:11px;padding-bottom:11px;font-size:13.5px;}
@@ -911,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.4';
+const APP_BUILD_ID = '2026-09-14.5';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7006,6 +7000,19 @@ function buildReportAreaSummary(data, mesN){
     kpis: area.kpis.map(slug => ({slug, ...getKpiRealBudgetNoMes(data, slug, mesN, null, null)})),
   }));
 }
+// Mesma coisa, mas escopada a UM cliente (pedido em 14/09/2026, pro slide de OKRs por cliente no fim do
+// Report Mensal) — reaproveita getKpiRealBudgetNoMes com o filtro de cliente (mesmo mecanismo já usado no
+// Ranking Individual por pessoa, ver buildReportPessoaRankingArea/getPessoaClienteNomes), só que aqui o
+// filtro é sempre um Set de 1 elemento só. Igual ao resumo geral, o Budget de metas SEM budget nativo por
+// cliente (fora de PLANNING_BUDGET_POR_CLIENTE_SLUGS/META_BUDGET_EXTERNO_SLUGS) continua sendo o budget
+// único da empresa inteira — não dá pra "dividir" um budget que nunca foi lançado por cliente.
+function buildReportAreaSummaryPorCliente(data, mesN, clienteNome){
+  const clienteNomesFilter = new Set([clienteNome]);
+  return REPORT_AREAS.map(area => ({
+    nome: area.nome,
+    kpis: area.kpis.map(slug => ({slug, ...getKpiRealBudgetNoMes(data, slug, mesN, clienteNomesFilter, null)})),
+  }));
+}
 
 // Monta a abertura por cliente (Slides 2 a 6): para os KPIs de uma área que têm granularidade por
 // cliente (META_GRANULAR_CLIENTE_SLUGS), Real/Budget de cada cliente naquele mês. KPIs sem granularidade
@@ -7122,10 +7129,14 @@ function addReportHeader(pptx, slide, mesLabel, titulo){
 }
 
 // Slide 1: 5 colunas (uma por área), cada uma com um card branco por KPI mostrando Real x Budget do mês.
-function addReportSlide1(pptx, areaSummary, mesLabel){
+// Pedido em 14/09/2026: reaproveitado também pros slides de OKR POR CLIENTE no fim do deck (ver
+// buildReportAreaSummaryPorCliente) — por isso o título agora é um parâmetro opcional, caindo no texto
+// original quando não informado (não afeta a chamada do Slide 1 "de verdade", que continua sem passar
+// titulo).
+function addReportSlide1(pptx, areaSummary, mesLabel, titulo){
   const slide = pptx.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
-  addReportHeader(pptx, slide, mesLabel, 'Resultados do mês · visão geral por área');
+  addReportHeader(pptx, slide, mesLabel, titulo || 'Resultados do mês · visão geral por área');
 
   const startX = 0.4, startY = 1.7, totalW = 12.53, gap = 0.18;
   const colW = (totalW - gap * (areaSummary.length - 1)) / areaSummary.length;
@@ -7346,6 +7357,26 @@ function buildOnePagerAtrasadasRows(merged, inicioIso, data){
 }
 const ONE_PAGER_ENTREGAS_HEADERS = ['DATA','CLIENTE','DEMANDA','CLASSIFICAÇÃO','LINEAR','RESP.'];
 const ONE_PAGER_ENTREGAS_COLW = [0.55, 0.95, null, 1.5, 0.55, 1.0];
+// Mesmas colunas do One-Pager, só que redimensionadas pra largura widescreen do deck (12.53" de conteúdo
+// em vez dos 7.5" do One-Pager em retrato) — usadas no slide de Backlog da Semana por cliente, ver
+// addReportClienteBacklogSemanaSlide.
+const REPORT_CLIENTE_BACKLOG_COLW = [0.75, 1.4, null, 2.2, 0.85, 1.5];
+
+// Slide "Backlog da Semana" POR CLIENTE, no fim do Report Mensal (pedido em 14/09/2026) — mesma tabela de
+// "Entregas" do One-Pager Plano (mesmas colunas/infos: data, cliente, demanda, classificação, ticket do
+// Linear e responsável), só que filtrada pra UM cliente e sempre pelo PRAZO (todas as tasks previstas pra
+// serem entregues na semana escolhida — sem o acréscimo de atrasadas de semanas anteriores que o One-Pager
+// Plano tem, já que aqui o recorte é "o que está previsto pra essa semana, desse cliente").
+function addReportClienteBacklogSemanaSlide(pptx, clienteNome, merged, inicioIso, fimIso, mesLabel, semanaLabel, data){
+  const slide = pptx.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+  addReportHeader(pptx, slide, mesLabel, 'Backlog da semana (' + semanaLabel + ') · ' + clienteNome);
+
+  const doCliente = merged.filter(m => m.cliente === clienteNome);
+  const rows = buildOnePagerEntregasRows(doCliente, 'prazo', inicioIso, fimIso, null, data);
+
+  addPlanningListTable(pptx, slide, 0.4, 1.7, 12.53, 5.3, ONE_PAGER_ENTREGAS_HEADERS, rows, REPORT_CLIENTE_BACKLOG_COLW, {fontSize: 9, align: 'center', emptyText: 'Nenhuma entrega com prazo previsto para esta semana.'});
+}
 
 // KPI "Contas Finalizadas por cliente" — Real do mês (único valor mensal já lançado) x Budget
 // PROPORCIONAL ao fim da semana escolhida (ver budgetProporcionalAteData) — igual pros dois One-Pagers.
@@ -7773,7 +7804,13 @@ async function finalizarExportacao(pptx, fileNameSemExtensao, formato){
   }
 }
 
-async function gerarReportPptx(data, mesN, formato){
+// Pedido em 14/09/2026: além dos slides que já existiam (visão geral, abertura por cliente e ranking por
+// área), o deck agora termina com 2 slides por cliente — OKRs do cliente (mesmo formato do Slide 1, só
+// que com os números filtrados pra esse cliente) seguido do Backlog da Semana desse cliente (mesma tabela
+// de "Entregas" do One-Pager Plano, filtrada por PRAZO na semana escolhida) — nessa ordem, cliente a
+// cliente. Por isso o gerador ganhou um 4º parâmetro, semanaN, reaproveitando a mesma "Semana do
+// One-Pager" já selecionada na tela (ver TrackingIndexPage/handleGerar).
+async function gerarReportPptx(data, mesN, formato, semanaN){
   if(formato === 'pdf'){
     // As únicas imagens usadas no Report/Planning são as 2 logos (preta/branca) — pré-carrega as duas
     // ANTES de montar os slides, porque addImage do CanvasPdfSlide precisa ser síncrono (desenha direto
@@ -7794,6 +7831,17 @@ async function gerarReportPptx(data, mesN, formato){
   addReportSlide1(pptx, areaSummary, mesLabel);
   REPORT_AREAS.forEach(area => addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel));
   REPORT_AREAS.forEach(area => addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel));
+
+  const {inicio: inicioSemana, fim: fimSemana} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
+  const inicioIso = dateParaIsoDia(inicioSemana), fimIso = dateParaIsoDia(fimSemana);
+  const semanaLabel = fmtSemanaLabel(inicioSemana, fimSemana);
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+  const clientesOkrBacklog = DEMANDAS_CLIENTES_ORDEM.filter(c => c.toLowerCase() !== 'interno');
+  clientesOkrBacklog.forEach(clienteNome => {
+    const areaSummaryCliente = buildReportAreaSummaryPorCliente(data, mesN, clienteNome);
+    addReportSlide1(pptx, areaSummaryCliente, mesLabel, 'Resultados do mês · ' + clienteNome);
+    addReportClienteBacklogSemanaSlide(pptx, clienteNome, merged, inicioIso, fimIso, mesLabel, semanaLabel, data);
+  });
 
   await finalizarExportacao(pptx, 'Report Auditoria - ' + mesNome + ' ' + CURRENT_YEAR, formato);
 }
@@ -9324,7 +9372,11 @@ function TrackingIndexPage({data}){
     setGerando(true);
     setErro('');
     try{
-      await gerarReportPptx(data, mesRelatorio, formatoExport);
+      // semanaOnePager (declarado mais abaixo, junto da seção do One-Pager) é reaproveitado aqui pros
+      // novos slides de "Backlog da Semana" por cliente no fim do deck — ver comentário em
+      // gerarReportPptx. Funciona por closure mesmo declarado depois: só é lido quando o botão é
+      // clicado, bem depois do componente já ter renderizado por completo.
+      await gerarReportPptx(data, mesRelatorio, formatoExport, semanaOnePager);
     }catch(e){
       console.error('Erro ao gerar Report', e);
       setErro((e && e.message) || 'Não foi possível gerar o report. Tente novamente.');
@@ -9405,12 +9457,12 @@ function TrackingIndexPage({data}){
     }
   };
 
-  const features = [
-    {icon: IconGrid, cor: '#2C5AA0', nome: 'Visão geral por área', desc: 'Real x Budget dos 15 KPIs das 5 áreas (Deployment, Auditoria, Desenvolvimento, Atendimento e Produto), lado a lado.'},
-    {icon: IconUsers, cor: '#1F8A70', nome: 'Abertura por cliente', desc: 'Um slide por área com a tabela Cliente x KPI e a evolução mês a mês (Real e Budget) de cada indicador.'},
-    {icon: IconTarget, cor: '#8A4FBE', nome: 'Ranking individual', desc: 'Um slide por área com todas as pessoas e o desempenho de cada uma frente ao budget, sinalizado em verde/vermelho.'},
-  ];
-
+  // Pedido em 14/09/2026: a antiga área "O que o report inclui" (uma listagem estática e genérica de
+  // features do Report Mensal) saiu de cena — o app foi ganhando reports novos aos poucos (One-Pagers,
+  // Report Staff) e aquele conteúdo tinha ficado datado e desbalanceado ao lado de uma única coluna com
+  // TODOS os geradores empilhados. Em vez disso, cada gerador agora tem seu próprio card, com uma
+  // descrição curta do que ele produz logo abaixo do título — a tela usa a largura toda e cada card fica
+  // auto-suficiente (config + botão + o que esperar do arquivo).
   return (
     <div>
       <div className="report-hero">
@@ -9418,30 +9470,16 @@ function TrackingIndexPage({data}){
         <div className="report-hero-label">Acompanhamento de Metas</div>
         <div className="report-hero-title">Report Mensal</div>
         <div className="report-hero-sub">
-          Escolha um indicador no menu lateral para ver o acompanhamento detalhado dele, ou gere aqui o
-          Report Mensal ou o Planning do mês, em .pptx ou .pdf — com os principais KPIs e a estrutura de
-          trabalho de todas as áreas, prontos para apresentar, no padrão visual das apresentações Rivio.
+          Escolha um indicador no menu lateral para ver o acompanhamento detalhado dele, ou gere aqui
+          qualquer um dos reports do time — Report Mensal, Planning, One-Pagers Semanais ou Report Staff —
+          prontos para apresentar, no padrão visual das apresentações Rivio.
         </div>
       </div>
 
       <div className="report-grid">
-        <div className="card">
-          <div className="report-card-title">O que o report inclui</div>
-          <div className="report-card-sub">11 slides gerados a partir dos dados já carregados no app — nenhuma configuração extra.</div>
-          {features.map(f => (
-            <div className="report-feature-item" key={f.nome}>
-              <span className="report-feature-icon" style={{background:f.cor}}><f.icon width="17" height="17"/></span>
-              <div>
-                <div className="report-feature-name">{f.nome}</div>
-                <div className="report-feature-desc">{f.desc}</div>
-              </div>
-            </div>
-          ))}
-        </div>
-
         <div className="card report-generate-card">
-          <div className="report-card-title">Gerar report</div>
-          <div className="report-card-sub">O download começa automaticamente assim que o report terminar de ser montado.</div>
+          <div className="report-card-title">Report Mensal &amp; Planning</div>
+          <div className="report-card-sub">Apresentações em .pptx ou .pdf, geradas a partir dos dados já carregados no app.</div>
           <div className="field">
             <label>Mês da análise</label>
             <select className="select" value={mesRelatorio} onChange={e => setMesRelatorio(Number(e.target.value))}>
@@ -9458,49 +9496,55 @@ function TrackingIndexPage({data}){
           <button type="button" className="btn btn-primary report-generate-btn" disabled={gerando} onClick={handleGerar}>
             {gerando ? 'Gerando report…' : 'Gerar Report'}
           </button>
+          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Visão geral por área (Real x Budget dos 15 KPIs das 5 áreas), abertura Cliente x KPI com evolução mês a mês, ranking individual por pessoa e, no fim, um slide de OKRs + um de Backlog da Semana (usa a semana escolhida ao lado, em "One-Pager Semanal") para cada cliente.</div>
           {erro && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erro}</div>}
 
-          <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:10}} disabled={gerandoPlanning} onClick={handleGerarPlanning}>
+          <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:14}} disabled={gerandoPlanning} onClick={handleGerarPlanning}>
             {gerandoPlanning ? 'Gerando planning…' : 'Gerar Planning'}
           </button>
+          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Plano de trabalho do mês: 1 slide por cliente com as demandas de Planning, mais as visões gerais de Deployment, Desenvolvimento, Auditoria, Atendimento e Produto.</div>
           {erroPlanning && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroPlanning}</div>}
+        </div>
 
-          <div style={{marginTop:18, paddingTop:16, borderTop:'1px solid var(--line)'}}>
-            <div className="field">
-              <label>Semana do One-Pager</label>
-              <select className="select" value={semanaOnePager} onChange={e => setSemanaOnePager(Number(e.target.value))}>
-                {semanaOnePagerOpcoes.map(o => <option value={o.n} key={o.n}>{o.label}</option>)}
-              </select>
-              <div className="hint">Semanas de Segunda a Domingo — a Semana 1 é sempre a 1ª semana inteiramente dentro do mês escolhido acima em "Mês da análise".</div>
-            </div>
-            <button type="button" className="btn btn-ghost report-generate-btn" disabled={gerandoOnePagerPlano} onClick={handleGerarOnePagerPlano}>
-              {gerandoOnePagerPlano ? 'Gerando one-pager…' : 'Gerar One-Pager Plano'}
-            </button>
-            <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Entregas com prazo na semana escolhida, Contas Finalizadas (real x budget proporcional ao fim da semana) e o backlog de tickets em aberto por classificação — uma página .png, formato retrato.</div>
-            {erroOnePagerPlano && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePagerPlano}</div>}
-
-            <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:10}} disabled={gerandoOnePagerResultados} onClick={handleGerarOnePagerResultados}>
-              {gerandoOnePagerResultados ? 'Gerando one-pager…' : 'Gerar One-Pager Resultados'}
-            </button>
-            <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Entregas concluídas na semana escolhida (com desenvolvedor alocado), o mesmo KPI de Contas Finalizadas e o total entregue por classificação — também em .png, formato retrato.</div>
-            {erroOnePagerResultados && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePagerResultados}</div>}
+        <div className="card report-generate-card">
+          <div className="report-card-title">One-Pager Semanal</div>
+          <div className="report-card-sub">Uma página .png por relatório, formato retrato, pronta pra compartilhar.</div>
+          <div className="field">
+            <label>Semana do One-Pager</label>
+            <select className="select" value={semanaOnePager} onChange={e => setSemanaOnePager(Number(e.target.value))}>
+              {semanaOnePagerOpcoes.map(o => <option value={o.n} key={o.n}>{o.label}</option>)}
+            </select>
+            <div className="hint">Semanas de Segunda a Domingo — a Semana 1 é sempre a 1ª semana inteiramente dentro do mês escolhido em "Mês da análise" ao lado.</div>
           </div>
+          <button type="button" className="btn btn-primary report-generate-btn" disabled={gerandoOnePagerPlano} onClick={handleGerarOnePagerPlano}>
+            {gerandoOnePagerPlano ? 'Gerando one-pager…' : 'Gerar One-Pager Plano'}
+          </button>
+          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Entregas com prazo na semana escolhida (+ atrasadas de semanas anteriores ainda não concluídas), Contas Finalizadas (real x budget proporcional ao fim da semana) e o backlog de tickets em aberto por classificação.</div>
+          {erroOnePagerPlano && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePagerPlano}</div>}
 
-          <div style={{marginTop:18, paddingTop:16, borderTop:'1px solid var(--line)'}}>
-            <div className="field">
-              <label>Semana (aba "Report")</label>
-              <select className="select" value={semanaStaff} onChange={e => setSemanaStaff(e.target.value)}>
-                <option value="">Sem semana (relatório só com números)</option>
-                {reportColunas.map(col => <option value={col.id} key={col.id}>Semana de {fmtDataColunaReport(col.dataIso)}</option>)}
-              </select>
-              <div className="hint">Define de qual coluna da aba "Report" vêm o texto de Overview e a descrição de cada cliente. Os números continuam vindo do "Mês da análise" acima.</div>
-            </div>
-            <button type="button" className="btn btn-ghost report-generate-btn" disabled={gerandoStaff} onClick={handleGerarStaff}>
-              {gerandoStaff ? 'Gerando report staff…' : 'Gerar Report Staff'}
-            </button>
-            <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Relatório completo em Word (.docx) para o founder — Overview, Financials, OKRs, Saúde Operacional e uma seção por cliente.</div>
-            {erroStaff && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroStaff}</div>}
+          <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:14}} disabled={gerandoOnePagerResultados} onClick={handleGerarOnePagerResultados}>
+            {gerandoOnePagerResultados ? 'Gerando one-pager…' : 'Gerar One-Pager Resultados'}
+          </button>
+          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Entregas concluídas na semana escolhida (com desenvolvedor alocado), o mesmo KPI de Contas Finalizadas e o total entregue por classificação.</div>
+          {erroOnePagerResultados && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePagerResultados}</div>}
+        </div>
+
+        <div className="card report-generate-card">
+          <div className="report-card-title">Report Staff</div>
+          <div className="report-card-sub">Relatório completo em Word (.docx) para o founder.</div>
+          <div className="field">
+            <label>Semana (aba "Report")</label>
+            <select className="select" value={semanaStaff} onChange={e => setSemanaStaff(e.target.value)}>
+              <option value="">Sem semana (relatório só com números)</option>
+              {reportColunas.map(col => <option value={col.id} key={col.id}>Semana de {fmtDataColunaReport(col.dataIso)}</option>)}
+            </select>
+            <div className="hint">Define de qual coluna da aba "Report" vêm o texto de Overview e a descrição de cada cliente. Os números continuam vindo do "Mês da análise" ao lado.</div>
           </div>
+          <button type="button" className="btn btn-primary report-generate-btn" disabled={gerandoStaff} onClick={handleGerarStaff}>
+            {gerandoStaff ? 'Gerando report staff…' : 'Gerar Report Staff'}
+          </button>
+          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Overview, Financials, OKRs, Saúde Operacional e uma seção por cliente.</div>
+          {erroStaff && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroStaff}</div>}
         </div>
       </div>
     </div>
