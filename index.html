@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.1';
+const APP_BUILD_ID = '2026-09-14.2';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7270,13 +7270,15 @@ function addOnePagerKpiTable(slide, x, y, w, headers, rows, totalRow, colWs, opt
     const flexW = nullCount ? Math.max(0.4, (w - fixedTotal) / nullCount) : 0;
     colW = colW.map(v => v === null ? flexW : v);
   }
-  const header = headers.map(h => ({text: h, options: {bold: true, fill: {color: 'F4F4F5'}, fontSize, color: RIVIO_PPTX.tintaSoft}}));
+  // align (pedido em 14/09/2026): mesma ideia de addPlanningListTable — cai em 'left' quando não informado.
+  const align = opts.align || 'left';
+  const header = headers.map(h => ({text: h, options: {bold: true, fill: {color: 'F4F4F5'}, fontSize, color: RIVIO_PPTX.tintaSoft, align}}));
   const linhas = rows.length ? rows : [[opts.emptyText || 'Sem dados', '', ''].slice(0, headers.length)];
-  const bodyRows = linhas.map(r => r.map(v => ({text: v === null || v === undefined ? '' : String(v), options: {fontSize, color: RIVIO_PPTX.tinta}})));
+  const bodyRows = linhas.map(r => r.map(v => ({text: v === null || v === undefined ? '' : String(v), options: {fontSize, color: RIVIO_PPTX.tinta, align}})));
   const allRows = [header, ...bodyRows];
   const rowH = [0.22, ...linhas.map(() => 0.2)];
   if(totalRow){
-    allRows.push(totalRow.map(v => ({text: v === null || v === undefined ? '' : String(v), options: {bold: true, fill: {color: 'EAF0F8'}, fontSize, color: RIVIO_PPTX.tinta}})));
+    allRows.push(totalRow.map(v => ({text: v === null || v === undefined ? '' : String(v), options: {bold: true, fill: {color: 'EAF0F8'}, fontSize, color: RIVIO_PPTX.tinta, align}})));
     rowH.push(0.22);
   }
   slide.addTable(allRows, {
@@ -7355,9 +7357,12 @@ function buildOnePagerContasFinalizadasKpi(data, mesN, fimSemana){
 // Tabela "Tickets em Aberto por Classificação" (One-Pager Plano) — todos os tickets atualmente em
 // aberto (qualquer prazo, não só da semana escolhida — é uma foto do backlog atual pra dar contexto ao
 // planejamento), agrupados por classificação: quantidade e média de dias em aberto (m.diasEmAberto, já
-// calculado em buildDemandasMergedUncached como dias corridos desde a abertura até HOJE).
+// calculado em buildDemandasMergedUncached como dias corridos desde a abertura até HOJE). Pedido em
+// 14/09/2026: só entram classificações de Atendimento (Atendimento Bug/Dúvida/Personalização/Regra) e
+// Auditoria — Desenvolvimento (e tickets sem classificação) ficam de fora dessa tabela.
 function buildOnePagerAbertosPorClassificacao(merged){
-  const abertos = merged.filter(m => !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo));
+  const classificacaoRelevante = m => m.classificacao && (m.classificacao.startsWith('Atendimento') || m.classificacao === 'Auditoria');
+  const abertos = merged.filter(m => !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo) && classificacaoRelevante(m));
   const porClass = {};
   abertos.forEach(m => {
     const key = m.classificacao || 'Sem classificação';
@@ -7389,6 +7394,29 @@ function buildOnePagerEntreguesPorClassificacao(entregues){
   return {rows, totalRow};
 }
 
+// KPI "Média Dias em Aberto · Em Análise Técnica" (pedido em 14/09/2026) — igual nos dois One-Pagers,
+// já que é sempre uma FOTO DO MOMENTO ATUAL (não depende da semana escolhida): todos os tickets cujo
+// status efetivo é exatamente "Em Análise Técnica", e a média de m.diasEmAberto (dias corridos desde a
+// abertura até hoje) entre eles.
+function buildOnePagerEmAnaliseTecnicaKpi(merged){
+  const lista = merged.filter(m => m.statusEfetivo === 'Em Análise Técnica');
+  const dias = lista.map(m => m.diasEmAberto).filter(v => v !== null && v !== undefined);
+  const media = dias.length ? avgOf(dias) : null;
+  return {qtd: lista.length, media};
+}
+// Cartão de KPI único (rótulo + valor grande), pro rodapé dos One-Pagers — mais simples que uma tabela,
+// já que é um único número.
+function addOnePagerStatCard(slide, x, y, w, h, label, value, sub){
+  slide.addShape('roundRect', {
+    x, y, w, h, rectRadius: 0.06, fill: {color: RIVIO_PPTX.branco}, line: {color: RIVIO_PPTX.linhaClara, width: 1},
+    shadow: {type: 'outer', color: '0A0A0A', opacity: 0.12, blur: 5, offset: 2, angle: 90},
+  });
+  slide.addText(label, {x: x + 0.16, y: y + 0.12, w: w - 0.32, h: 0.28, fontFace: RIVIO_PPTX.fontFace, fontSize: 9, color: RIVIO_PPTX.tintaSoft, bold: true});
+  slide.addText(value, {x: x + 0.16, y: y + 0.4, w: w - 0.32, h: 0.5, fontFace: RIVIO_PPTX.fontFace, fontSize: 22, color: RIVIO_PPTX.azul, bold: true});
+  if(sub) slide.addText(sub, {x: x + 0.16, y: y + h - 0.28, w: w - 0.32, h: 0.22, fontFace: RIVIO_PPTX.fontFace, fontSize: 8, color: RIVIO_PPTX.tintaSoft, valign: 'bottom'});
+}
+const ONE_PAGER_STAT_CARD_H = 1.05;
+
 // Monta o One-Pager "Plano" — o que está previsto pra semana escolhida, pelos PRAZOS lançados na aba
 // Demandas: tabela de entregas previstas, KPI de Contas Finalizadas (real x budget proporcional ao fim
 // da semana) e o backlog atual de tickets em aberto por classificação. A altura da página se ajusta ao
@@ -7404,6 +7432,7 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   const entregasRows = buildOnePagerEntregasRows(merged, 'prazo', inicioIso, fimIso, null, data);
   const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
   const kpiAbertos = buildOnePagerAbertosPorClassificacao(merged);
+  const kpiAnaliseTecnica = buildOnePagerEmAnaliseTecnicaKpi(merged);
 
   const PAGE_W = 8.5, ONE_PAGER_DPI = 220, startX = 0.5, contentW = PAGE_W - startX * 2;
   const y = 1.62 + 0.32; // título da seção "Entregas" (0.32 = mesmo avanço de addOnePagerSectionTitle)
@@ -7413,8 +7442,9 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   const yAposKpiContas = yKpiContasTable + alturaKpiTabela(kpiContas.rows, kpiContas.totalRow) + 0.28;
   const yKpiAbertosTitle = yAposKpiContas;
   const yKpiAbertosTable = yKpiAbertosTitle + 0.32;
-  const yAposKpiAbertos = yKpiAbertosTable + alturaKpiTabela(kpiAbertos.rows, kpiAbertos.totalRow);
-  const PAGE_H = Math.max(11, yAposKpiAbertos + 0.7);
+  const yAposKpiAbertos = yKpiAbertosTable + alturaKpiTabela(kpiAbertos.rows, kpiAbertos.totalRow) + 0.3;
+  const yKpiAnaliseTecnica = yAposKpiAbertos;
+  const PAGE_H = Math.max(11, yKpiAnaliseTecnica + ONE_PAGER_STAT_CARD_H + 0.7);
 
   const pptxLike = new CanvasPdfPptx();
   pptxLike.defineLayout({width: PAGE_W, height: PAGE_H});
@@ -7427,13 +7457,17 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   addOnePagerHeader(slide, 'One-Pager Plano · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Plano da Semana', PAGE_W);
 
   addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS COM PRAZO NA SEMANA');
-  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, emptyText: 'Nenhuma entrega com prazo previsto para esta semana.'});
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma entrega com prazo previsto para esta semana.'});
 
   addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
-  addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, emptyText: 'Nenhum cliente com dado neste mês.'});
+  addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
 
-  addOnePagerSectionTitle(slide, startX, yKpiAbertosTitle, contentW, 'TICKETS EM ABERTO POR CLASSIFICAÇÃO (BACKLOG ATUAL)');
-  addOnePagerKpiTable(slide, startX, yKpiAbertosTable, contentW, ['CLASSIFICAÇÃO','QTD.','MÉDIA DIAS EM ABERTO'], kpiAbertos.rows, kpiAbertos.totalRow, [null, 0.9, 1.9], {fontSize: 8.5, emptyText: 'Nenhum ticket em aberto.'});
+  addOnePagerSectionTitle(slide, startX, yKpiAbertosTitle, contentW, 'TICKETS EM ABERTO POR CLASSIFICAÇÃO (ATENDIMENTO E AUDITORIA · BACKLOG ATUAL)');
+  addOnePagerKpiTable(slide, startX, yKpiAbertosTable, contentW, ['CLASSIFICAÇÃO','QTD.','MÉDIA DIAS EM ABERTO'], kpiAbertos.rows, kpiAbertos.totalRow, [null, 0.9, 1.9], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum ticket em aberto.'});
+
+  addOnePagerStatCard(slide, startX, yKpiAnaliseTecnica, contentW, ONE_PAGER_STAT_CARD_H, 'MÉDIA DIAS EM ABERTO · TICKETS EM ANÁLISE TÉCNICA (FOTO ATUAL)',
+    kpiAnaliseTecnica.media === null ? '—' : kpiAnaliseTecnica.media.toLocaleString('pt-BR', {maximumFractionDigits: 1}),
+    kpiAnaliseTecnica.qtd + ' ticket' + (kpiAnaliseTecnica.qtd === 1 ? '' : 's') + ' em Análise Técnica agora');
 
   addOnePagerFooter(slide, PAGE_W, PAGE_H);
 
@@ -7457,6 +7491,7 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
   const entreguesNaSemana = merged.filter(m => temDevAlocado(m) && isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso));
   const kpiEntregues = buildOnePagerEntreguesPorClassificacao(entreguesNaSemana);
+  const kpiAnaliseTecnica = buildOnePagerEmAnaliseTecnicaKpi(merged);
 
   const PAGE_W = 8.5, ONE_PAGER_DPI = 220, startX = 0.5, contentW = PAGE_W - startX * 2;
   const y = 1.62 + 0.32; // título da seção "Entregas" (0.32 = mesmo avanço de addOnePagerSectionTitle)
@@ -7466,8 +7501,9 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   const yAposKpiContas = yKpiContasTable + alturaKpiTabela(kpiContas.rows, kpiContas.totalRow) + 0.28;
   const yKpiEntreguesTitle = yAposKpiContas;
   const yKpiEntreguesTable = yKpiEntreguesTitle + 0.32;
-  const yAposKpiEntregues = yKpiEntreguesTable + alturaKpiTabela(kpiEntregues.rows, kpiEntregues.totalRow);
-  const PAGE_H = Math.max(11, yAposKpiEntregues + 0.7);
+  const yAposKpiEntregues = yKpiEntreguesTable + alturaKpiTabela(kpiEntregues.rows, kpiEntregues.totalRow) + 0.3;
+  const yKpiAnaliseTecnica = yAposKpiEntregues;
+  const PAGE_H = Math.max(11, yKpiAnaliseTecnica + ONE_PAGER_STAT_CARD_H + 0.7);
 
   const pptxLike = new CanvasPdfPptx();
   pptxLike.defineLayout({width: PAGE_W, height: PAGE_H});
@@ -7480,13 +7516,17 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   addOnePagerHeader(slide, 'One-Pager Resultados · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Resultados da Semana', PAGE_W);
 
   addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS CONCLUÍDAS NA SEMANA (COM DESENVOLVEDOR ALOCADO)');
-  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, emptyText: 'Nenhuma entrega concluída nesta semana com desenvolvedor alocado.'});
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma entrega concluída nesta semana com desenvolvedor alocado.'});
 
   addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
-  addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, emptyText: 'Nenhum cliente com dado neste mês.'});
+  addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
 
   addOnePagerSectionTitle(slide, startX, yKpiEntreguesTitle, contentW, 'TICKETS ENTREGUES NA SEMANA POR CLASSIFICAÇÃO');
-  addOnePagerKpiTable(slide, startX, yKpiEntreguesTable, contentW, ['CLASSIFICAÇÃO','QTD. ENTREGUE'], kpiEntregues.rows, kpiEntregues.totalRow, [null, 1.4], {fontSize: 8.5, emptyText: 'Nenhum ticket entregue nesta semana.'});
+  addOnePagerKpiTable(slide, startX, yKpiEntreguesTable, contentW, ['CLASSIFICAÇÃO','QTD. ENTREGUE'], kpiEntregues.rows, kpiEntregues.totalRow, [null, 1.4], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum ticket entregue nesta semana.'});
+
+  addOnePagerStatCard(slide, startX, yKpiAnaliseTecnica, contentW, ONE_PAGER_STAT_CARD_H, 'MÉDIA DIAS EM ABERTO · TICKETS EM ANÁLISE TÉCNICA (FOTO ATUAL)',
+    kpiAnaliseTecnica.media === null ? '—' : kpiAnaliseTecnica.media.toLocaleString('pt-BR', {maximumFractionDigits: 1}),
+    kpiAnaliseTecnica.qtd + ' ticket' + (kpiAnaliseTecnica.qtd === 1 ? '' : 's') + ' em Análise Técnica agora');
 
   addOnePagerFooter(slide, PAGE_W, PAGE_H);
 
@@ -7940,7 +7980,11 @@ function addPlanningListTable(pptx, slide, x, y, w, h, headers, rows, colWs, opt
     colW = colW.map(v => v === null ? flexW : v);
   }
 
-  const header = headers.map(htext => ({text: htext, options:{bold:true, fill:{color:'F4F4F5'}, fontSize:headerFontSize, color:RIVIO_PPTX.tintaSoft}}));
+  // align (opcional, pedido em 14/09/2026 pros One-Pagers Semanais): alinhamento horizontal de TODAS as
+  // células (cabeçalho + corpo) — cai em 'left' (padrão de sempre) quando não informado, então não afeta
+  // nenhuma das tabelas já existentes no Report/Planning que não passam essa opção.
+  const align = opts.align || 'left';
+  const header = headers.map(htext => ({text: htext, options:{bold:true, fill:{color:'F4F4F5'}, fontSize:headerFontSize, color:RIVIO_PPTX.tintaSoft, align}}));
   const headerH = 0.2;
   const lineH = bodyFontSize * 1.22 / 72 + 0.06; // altura de 1 linha de texto + folga de padding da célula
 
@@ -7959,7 +8003,7 @@ function addPlanningListTable(pptx, slide, x, y, w, h, headers, rows, colWs, opt
       }, 1);
       return Math.max(0.19, maxLinhas * lineH);
     });
-    bodyRows = rows.map(r => r.map(val => ({text: val === null || val === undefined ? '' : String(val), options:{fontSize:bodyFontSize, color:RIVIO_PPTX.tinta}})));
+    bodyRows = rows.map(r => r.map(val => ({text: val === null || val === undefined ? '' : String(val), options:{fontSize:bodyFontSize, color:RIVIO_PPTX.tinta, align}})));
     const finalRowH = [headerH, ...rowHeights];
     slide.addTable([header, ...bodyRows], {
       x, y, w, colW,
