@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.3';
+const APP_BUILD_ID = '2026-09-14.4';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7375,10 +7375,13 @@ function buildOnePagerContasFinalizadasKpi(data, mesN, fimSemana){
 // planejamento), agrupados por classificação: quantidade e média de dias em aberto (m.diasEmAberto, já
 // calculado em buildDemandasMergedUncached como dias corridos desde a abertura até HOJE). Pedido em
 // 14/09/2026: só entram classificações de Atendimento (Atendimento Bug/Dúvida/Personalização/Regra) e
-// Auditoria — Desenvolvimento (e tickets sem classificação) ficam de fora dessa tabela.
+// Auditoria — Desenvolvimento (e tickets sem classificação) ficam de fora dessa tabela. Ajuste em
+// 14/09/2026 (2ª rodada): também só entram tickets SEM desenvolvedor alocado (responsavelDesenvolvimentoId
+// vazio) — um ticket de Atendimento/Auditoria que já tem um desenvolvedor puxado pra mexer nele conta como
+// "em desenvolvimento" pra fins desse backlog, então some tanto da contagem quanto da média de dias.
 function buildOnePagerAbertosPorClassificacao(merged){
   const classificacaoRelevante = m => m.classificacao && (m.classificacao.startsWith('Atendimento') || m.classificacao === 'Auditoria');
-  const abertos = merged.filter(m => !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo) && classificacaoRelevante(m));
+  const abertos = merged.filter(m => !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo) && classificacaoRelevante(m) && !m.responsavelDesenvolvimentoId);
   const porClass = {};
   abertos.forEach(m => {
     const key = m.classificacao || 'Sem classificação';
@@ -7482,7 +7485,7 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
   addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
 
-  addOnePagerSectionTitle(slide, startX, yKpiAbertosTitle, contentW, 'TICKETS EM ABERTO POR CLASSIFICAÇÃO (ATENDIMENTO E AUDITORIA · BACKLOG ATUAL)');
+  addOnePagerSectionTitle(slide, startX, yKpiAbertosTitle, contentW, 'TICKETS EM ABERTO POR CLASSIFICAÇÃO (ATENDIMENTO E AUDITORIA · SEM DEV. ALOCADO · BACKLOG ATUAL)');
   addOnePagerKpiTable(slide, startX, yKpiAbertosTable, contentW, ['CLASSIFICAÇÃO','QTD.','MÉDIA DIAS EM ABERTO'], kpiAbertos.rows, kpiAbertos.totalRow, [null, 0.9, 1.9], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum ticket em aberto.'});
 
   addOnePagerStatCard(slide, startX, yKpiAnaliseTecnica, contentW, ONE_PAGER_STAT_CARD_H, 'MÉDIA DIAS EM ABERTO · TICKETS EM ANÁLISE TÉCNICA (FOTO ATUAL)',
