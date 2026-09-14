@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-11.4';
+const APP_BUILD_ID = '2026-09-14.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -6900,8 +6900,9 @@ class CanvasPdfPptx{
   set company(v){ this._company = v; }
   set title(v){ this._title = v; }
   addSlide(){
-    // dpi maior que o padrão pro One-Pager (ver gerarOnePagerPng) — a imagem final é usada quase em
-    // página cheia dentro de um Word, então pede mais resolução do que os slides do Report/Planning.
+    // dpi maior que o padrão pros One-Pagers (ver gerarOnePagerPlanoPng/gerarOnePagerResultadosPng) — a
+    // imagem final é usada quase em página cheia dentro de um Word, então pede mais resolução do que os
+    // slides do Report/Planning.
     const slide = new CanvasPdfSlide(this._layout.width, this._layout.height, this._dpi || PDF_CANVAS_DPI);
     this.slides.push(slide);
     return slide;
@@ -7162,13 +7163,14 @@ function addReportSlide1(pptx, areaSummary, mesLabel){
 }
 
 /* ---------------------------------------------------------------
-   ONE-PAGER EM PNG (pedido em 30/08/2026) — mesmo conteúdo do Slide 1 do Report Mensal (visão geral por
-   área), só que desenhado direto num <canvas> em formato RETRATO (não passa pelo PptxGenJS, nem monta um
-   .pptx/.pdf de verdade) e exportado como uma única imagem .png — pensado pra colar quase em página
-   cheia num documento Word, como pedido pelo usuário. Reaproveita CanvasPdfSlide (o mesmo "gêmeo" em
-   canvas usado no export em PDF) só que com dimensões de página A4/carta em retrato em vez do slide
-   16:9, e uma versão compacta do cabeçalho/cards (colunas mais estreitas, fontes menores) — o layout de
-   5 colunas lado a lado do Slide 1 não cabe do jeito landscape original numa página estreita e alta.
+   ONE-PAGERS SEMANAIS EM PNG (pedido em 14/09/2026) — substituem por completo o One-Pager único de
+   30/08/2026 (visão geral por área). Agora são DOIS one-pagers, cada um com seu próprio botão, escopados
+   por SEMANA (não mais só por mês): "Plano" (o que está previsto pra semana, pelos prazos da aba
+   Demandas) e "Resultados" (o que foi de fato entregue na semana, pelas datas de conclusão). Os dois
+   continuam desenhados direto num <canvas> em formato retrato (CanvasPdfSlide/CanvasPdfPptx, o mesmo
+   "gêmeo" em canvas do export em PDF) e exportados como .png — só que agora reaproveitando addTable (via
+   addPlanningListTable, que já é agnóstico entre PptxGenJS real e este canvas) pras tabelas, em vez de só
+   cards de KPI.
 --------------------------------------------------------------- */
 function downloadDataUrl(dataUrl, fileName){
   const a = document.createElement('a');
@@ -7179,75 +7181,317 @@ function downloadDataUrl(dataUrl, fileName){
   document.body.removeChild(a);
 }
 
-function addOnePagerContent(slide, areaSummary, mesLabel, pageW, pageH){
-  // Cabeçalho compacto (mesma linguagem visual do addReportHeader, redimensionado pra largura da página
-  // retrato em vez dos 13.333in do slide 16:9).
+// Semanas de Segunda a Domingo. "Semana 1" de um mês é a primeira semana INTEIRAMENTE dentro daquele mês
+// (a partir da 1ª segunda-feira do mês) — ex.: Setembro/2026 começa numa terça-feira, então 31/08 a
+// 06/09 fica de fora e a Semana 1 é 07/09 a 13/09 (pedido/exemplo do usuário). As semanas seguintes (2 a
+// 5) são sempre +7 dias, mesmo que a 5ª acabe invadindo o mês seguinte — mesma lógica de qualquer grade
+// de calendário por semana (nem todo mês tem exatamente 4 semanas completas).
+function getWeekRangeOfMonth(ano, mesN, semanaN){
+  const primeiroDia = new Date(ano, mesN - 1, 1);
+  const diasAteSegunda = (1 - primeiroDia.getDay() + 7) % 7;
+  const inicio = new Date(ano, mesN - 1, 1 + diasAteSegunda + (semanaN - 1) * 7);
+  const fim = new Date(ano, mesN - 1, 1 + diasAteSegunda + (semanaN - 1) * 7 + 6);
+  return {inicio, fim};
+}
+function dateParaIsoDia(d){ return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+function isoDiaDentroDoIntervalo(iso, inicioIso, fimIso){
+  if(!iso) return false;
+  const dia = iso.slice(0, 10);
+  return dia >= inicioIso && dia <= fimIso;
+}
+function fmtDataCurtaDDMM(d){ return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1); }
+function fmtSemanaLabel(inicio, fim){ return fmtDataCurtaDDMM(inicio) + ' a ' + fmtDataCurtaDDMM(fim); }
+// As 5 opções do dropdown "Semana do One-Pager" pro mês escolhido em "Mês da análise".
+function getWeekOptionsForMonth(ano, mesN){
+  const opts = [];
+  for(let n = 1; n <= 5; n++){
+    const {inicio, fim} = getWeekRangeOfMonth(ano, mesN, n);
+    opts.push({n, label: 'Semana ' + n + ' (' + fmtSemanaLabel(inicio, fim) + ')'});
+  }
+  return opts;
+}
+
+// Budget de um KPI linear no tempo (hoje só usado para "Contas Finalizadas"), proporcional aos dias do
+// mês já decorridos até uma DATA-LIMITE arbitrária — generaliza a mesma ideia de
+// linearizarBudgetContasFinalizadasReport (que só linhariza até "hoje", e só quando o mês é o corrente)
+// para qualquer data-limite (aqui, o fim da semana escolhida no One-Pager), em qualquer mês, passado ou
+// futuro. Ex.: budget cheio do mês = 100, mês tem 30 dias, a semana escolhida termina no dia 15 -> 100 ×
+// 15/30 = 50. Se a data-limite já passa do fim do mês (semana selecionada termina só no mês seguinte),
+// considera o mês inteiro (100%); se for antes do início do mês, considera 0%.
+function budgetProporcionalAteData(budgetCheio, ano, mesN, dataLimite){
+  if(budgetCheio === null || budgetCheio === undefined || budgetCheio === '') return budgetCheio;
+  const diasNoMes = new Date(ano, mesN, 0).getDate();
+  const inicioMes = new Date(ano, mesN - 1, 1);
+  const fimMes = new Date(ano, mesN, 0);
+  let diaLimite;
+  if(dataLimite < inicioMes) diaLimite = 0;
+  else if(dataLimite > fimMes) diaLimite = diasNoMes;
+  else diaLimite = dataLimite.getDate();
+  return Number(budgetCheio) * (diaLimite / diasNoMes);
+}
+
+// Estima a altura total (header + linhas) que addPlanningListTable vai ocupar, com a MESMA lógica de
+// quebra de linha (estimarLinhasTexto) que ela usa internamente — precisa pra saber onde posicionar o
+// próximo bloco do One-Pager sem sobrepor conteúdo, já que addPlanningListTable não retorna sua altura.
+function alturaListaTabela(rows, w, colWs, fontSize){
+  const bodyFontSize = fontSize || 9;
+  let colW = colWs;
+  if(colW){
+    const fixedTotal = colW.filter(v => v !== null).reduce((a,b) => a+b, 0);
+    const nullCount = colW.filter(v => v === null).length;
+    const flexW = nullCount ? Math.max(0.4, (w - fixedTotal) / nullCount) : 0;
+    colW = colW.map(v => v === null ? flexW : v);
+  }
+  const headerH = 0.2;
+  if(!rows || !rows.length) return headerH + 0.19;
+  const lineH = bodyFontSize * 1.22 / 72 + 0.06;
+  const rowHeights = rows.map(r => {
+    const maxLinhas = r.reduce((max, val, i) => {
+      const texto = val === null || val === undefined ? '' : String(val);
+      const linhas = estimarLinhasTexto(texto, colW ? colW[i] : w / r.length, bodyFontSize);
+      return Math.max(max, linhas);
+    }, 1);
+    return Math.max(0.19, maxLinhas * lineH);
+  });
+  return headerH + rowHeights.reduce((a,b) => a+b, 0);
+}
+
+// Tabela de KPI com uma linha de TOTAL destacada (negrito + fundo) — addPlanningListTable não suporta
+// estilizar uma linha específica, então esta é uma versão enxuta própria do One-Pager, usada nas duas
+// tabelas de KPI (Contas Finalizadas por cliente, e Tickets por Classificação). Funciona tanto com
+// CanvasPdfSlide (One-Pager) quanto com um slide real do PptxGenJS, já que só usa slide.addTable.
+function addOnePagerKpiTable(slide, x, y, w, headers, rows, totalRow, colWs, opts){
+  opts = opts || {};
+  const fontSize = opts.fontSize || 8.5;
+  let colW = colWs;
+  if(colW){
+    const fixedTotal = colW.filter(v => v !== null).reduce((a,b) => a+b, 0);
+    const nullCount = colW.filter(v => v === null).length;
+    const flexW = nullCount ? Math.max(0.4, (w - fixedTotal) / nullCount) : 0;
+    colW = colW.map(v => v === null ? flexW : v);
+  }
+  const header = headers.map(h => ({text: h, options: {bold: true, fill: {color: 'F4F4F5'}, fontSize, color: RIVIO_PPTX.tintaSoft}}));
+  const linhas = rows.length ? rows : [[opts.emptyText || 'Sem dados', '', ''].slice(0, headers.length)];
+  const bodyRows = linhas.map(r => r.map(v => ({text: v === null || v === undefined ? '' : String(v), options: {fontSize, color: RIVIO_PPTX.tinta}})));
+  const allRows = [header, ...bodyRows];
+  const rowH = [0.22, ...linhas.map(() => 0.2)];
+  if(totalRow){
+    allRows.push(totalRow.map(v => ({text: v === null || v === undefined ? '' : String(v), options: {bold: true, fill: {color: 'EAF0F8'}, fontSize, color: RIVIO_PPTX.tinta}})));
+    rowH.push(0.22);
+  }
+  slide.addTable(allRows, {
+    x, y, w, colW, fontFace: RIVIO_PPTX.fontFace,
+    border: {type: 'solid', color: RIVIO_PPTX.linhaClara, pt: 0.5}, autoPage: false, rowH,
+  });
+}
+function alturaKpiTabela(rows, totalRow){
+  return 0.22 + Math.max(1, rows.length) * 0.2 + (totalRow ? 0.22 : 0);
+}
+
+// Cabeçalho compacto do One-Pager (mesma linguagem visual do antigo addOnePagerContent) — agora
+// mostrando a semana escolhida em vez de "visão geral por área".
+function addOnePagerHeader(slide, tituloTop, tituloGrande, pageW){
   slide.addShape('ellipse', {x: 0.5, y: 0.42, w: 0.3, h: 0.3, fill: {color: RIVIO_PPTX.branco}, line: {color: '9AA0AE', width: 1.25}});
   slide.addShape('ellipse', {x: 0.5 + 0.3/2 - 0.028, y: 0.42 + 0.3/2 - 0.028, w: 0.056, h: 0.056, fill: {color: RIVIO_PPTX.azul}, line: {type: 'none'}});
   slide.addShape('line', {x: 0.95, y: 0.57, w: 1.1, h: 0, line: {color: 'CCCCCC', width: 1}});
-  slide.addText('Report Mensal · ' + mesLabel, {x: 2.15, y: 0.38, w: pageW - 2.65, h: 0.34, fontFace: RIVIO_PPTX.fontFace, fontSize: 12, color: RIVIO_PPTX.tinta, valign: 'middle'});
-  slide.addText('Resultados do mês · visão geral por área', {x: 0.5, y: 0.86, w: pageW - 1.0, h: 0.6, fontFace: RIVIO_PPTX.fontFace, fontSize: 21, color: RIVIO_PPTX.tinta, valign: 'middle'});
-
-  const startX = 0.5, startY = 1.62, gap = 0.14;
-  const totalW = pageW - startX * 2;
-  const colW = (totalW - gap * (areaSummary.length - 1)) / areaSummary.length;
-  const bottomMargin = 0.6;
-
-  areaSummary.forEach((area, i) => {
-    const x = startX + i * (colW + gap);
-    slide.addText(area.nome.toUpperCase(), {
-      x, y: startY, w: colW, h: 0.4, fontFace: RIVIO_PPTX.fontFace, fontSize: 8, color: RIVIO_PPTX.azul, bold: true,
-    });
-    let y = startY + 0.46;
-    const cardH = (pageH - bottomMargin - y) / area.kpis.length - 0.09;
-    area.kpis.forEach(kpi => {
-      slide.addShape('roundRect', {
-        x, y, w: colW, h: cardH, rectRadius: 0.06,
-        fill: {color: RIVIO_PPTX.branco}, line: {color: RIVIO_PPTX.linhaClara, width: 1},
-        shadow: {type: 'outer', color: '0A0A0A', opacity: 0.14, blur: 5, offset: 2, angle: 90},
-      });
-      const cor = kpiStatusColorReport(kpi.real, kpi.budget, kpi.slug);
-      slide.addText(kpi.titulo, {
-        x: x + 0.08, y: y + 0.06, w: colW - 0.16, h: 0.36,
-        fontFace: RIVIO_PPTX.fontFace, fontSize: 6.6, color: RIVIO_PPTX.tintaSoft, valign: 'top',
-      });
-      slide.addText(fmtMetaValorReport(kpi.real, kpi.unidade), {
-        x: x + 0.08, y: y + 0.42, w: colW - 0.16, h: 0.4,
-        fontFace: RIVIO_PPTX.fontFace, fontSize: 13.5, color: cor, bold: true, valign: 'top',
-      });
-      slide.addText('Budget: ' + fmtMetaValorReportArredondado(kpi.budget, kpi.unidade), {
-        x: x + 0.08, y: y + cardH - 0.22, w: colW - 0.16, h: 0.2,
-        fontFace: RIVIO_PPTX.fontFace, fontSize: 6.2, color: RIVIO_PPTX.tintaSoft, valign: 'bottom',
-      });
-      y += cardH + 0.09;
-    });
-  });
-
+  slide.addText(tituloTop, {x: 2.15, y: 0.38, w: pageW - 2.65, h: 0.34, fontFace: RIVIO_PPTX.fontFace, fontSize: 11.5, color: RIVIO_PPTX.tinta, valign: 'middle'});
+  slide.addText(tituloGrande, {x: 0.5, y: 0.86, w: pageW - 1.0, h: 0.6, fontFace: RIVIO_PPTX.fontFace, fontSize: 21, color: RIVIO_PPTX.tinta, valign: 'middle'});
+}
+function addOnePagerSectionTitle(slide, x, y, w, texto){
+  slide.addText(texto, {x, y, w, h: 0.26, fontFace: RIVIO_PPTX.fontFace, fontSize: 11, color: RIVIO_PPTX.azul, bold: true});
+  return y + 0.32;
+}
+function addOnePagerFooter(slide, pageW, pageH){
   const logoW = 0.85, logoH = 0.2;
   slide.addImage({data: 'image/png;base64,' + RIVIO_LOGO_PRETO_B64, x: pageW - 0.5 - logoW, y: pageH - 0.35 - logoH, w: logoW, h: logoH});
 }
 
-// Ponto de entrada do botão "Gerar One-Pager": monta a MESMA visão geral por área do Slide 1 do Report
-// Mensal (mesmos dados/cálculos — buildReportAreaSummary), só que numa página única em retrato
-// (formato carta, 8.5×11in, resolução alta pensada pra colar quase em página cheia num Word) e baixa
-// como .png em vez de .pptx/.pdf.
-async function gerarOnePagerPng(data, mesN){
+// Linhas da tabela de "Entregas" (Plano: por Prazo · Resultados: por Concluído em), no mesmo espírito da
+// tabela "Entregas por Data" no fundo da tela Demandas — cliente, demanda, classificação, ticket do
+// Linear e responsável (desenvolvedor alocado quando houver, senão o responsável de atendimento) — só
+// que em formato de tabela plana (uma linha por ticket, ordenada pela data), já que addPlanningListTable
+// não tem como agrupar visualmente por data dentro de uma mesma tabela.
+function buildOnePagerEntregasRows(merged, campoData, inicioIso, fimIso, filterFn, data){
+  return merged
+    .filter(m => (!filterFn || filterFn(m)) && isoDiaDentroDoIntervalo(m[campoData], inicioIso, fimIso))
+    .slice()
+    .sort((a, b) => {
+      const da = a[campoData] || '', db = b[campoData] || '';
+      if(da !== db) return da < db ? -1 : 1;
+      return (a.cliente || '').localeCompare(b.cliente || '', 'pt-BR');
+    })
+    .map(m => {
+      const devNome = m.responsavelDesenvolvimentoId ? pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) : '';
+      const resp = devNome || m.responsavel || '—';
+      return [fmtDataAbertura(m[campoData]), m.cliente || '—', m.assunto || '(sem assunto)', m.classificacao || '—', m.linear || '—', resp];
+    });
+}
+const ONE_PAGER_ENTREGAS_HEADERS = ['DATA','CLIENTE','DEMANDA','CLASSIFICAÇÃO','LINEAR','RESP.'];
+const ONE_PAGER_ENTREGAS_COLW = [0.55, 0.95, null, 1.5, 0.55, 1.0];
+
+// KPI "Contas Finalizadas por cliente" — Real do mês (único valor mensal já lançado) x Budget
+// PROPORCIONAL ao fim da semana escolhida (ver budgetProporcionalAteData) — igual pros dois One-Pagers.
+function buildOnePagerContasFinalizadasKpi(data, mesN, fimSemana){
+  const clientes = (data.clientes || []).filter(c => c.nome.toLowerCase() !== 'interno');
+  let totalReal = 0, totalBudget = 0, temReal = false, temBudget = false;
+  const rows = [];
+  clientes.forEach(c => {
+    const real = getMetaRealizadoPorClienteMes('contas-finalizadas', data, c.id, c.nome, mesN, null);
+    const budgetCheio = getClienteBudgetComFallback(data, 'contas-finalizadas', c.id, c.nome, mesN);
+    const budgetProp = budgetProporcionalAteData(budgetCheio, CURRENT_YEAR, mesN, fimSemana);
+    if(real === null && (budgetProp === null || budgetProp === undefined)) return;
+    if(real !== null){ totalReal += real; temReal = true; }
+    if(budgetProp !== null && budgetProp !== undefined){ totalBudget += budgetProp; temBudget = true; }
+    rows.push([
+      c.nome,
+      real === null ? '—' : Math.round(real).toLocaleString('pt-BR'),
+      (budgetProp === null || budgetProp === undefined) ? '—' : Math.round(budgetProp).toLocaleString('pt-BR'),
+    ]);
+  });
+  const totalRow = ['TOTAL', temReal ? Math.round(totalReal).toLocaleString('pt-BR') : '—', temBudget ? Math.round(totalBudget).toLocaleString('pt-BR') : '—'];
+  return {rows, totalRow};
+}
+
+// Tabela "Tickets em Aberto por Classificação" (One-Pager Plano) — todos os tickets atualmente em
+// aberto (qualquer prazo, não só da semana escolhida — é uma foto do backlog atual pra dar contexto ao
+// planejamento), agrupados por classificação: quantidade e média de dias em aberto (m.diasEmAberto, já
+// calculado em buildDemandasMergedUncached como dias corridos desde a abertura até HOJE).
+function buildOnePagerAbertosPorClassificacao(merged){
+  const abertos = merged.filter(m => !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo));
+  const porClass = {};
+  abertos.forEach(m => {
+    const key = m.classificacao || 'Sem classificação';
+    (porClass[key] = porClass[key] || []).push(m);
+  });
+  const rows = Object.keys(porClass).sort((a,b) => a.localeCompare(b, 'pt-BR')).map(key => {
+    const list = porClass[key];
+    const dias = list.map(m => m.diasEmAberto).filter(v => v !== null && v !== undefined);
+    const media = dias.length ? avgOf(dias) : null;
+    return [key, String(list.length), media === null ? '—' : media.toLocaleString('pt-BR', {maximumFractionDigits: 1})];
+  });
+  const diasTodos = abertos.map(m => m.diasEmAberto).filter(v => v !== null && v !== undefined);
+  const mediaTodos = diasTodos.length ? avgOf(diasTodos) : null;
+  const totalRow = ['TOTAL', String(abertos.length), mediaTodos === null ? '—' : mediaTodos.toLocaleString('pt-BR', {maximumFractionDigits: 1})];
+  return {rows, totalRow};
+}
+
+// Tabela "Tickets Entregues por Classificação" (One-Pager Resultados) — mesma população da tabela de
+// Entregas do Resultados (concluídos na semana escolhida E com desenvolvedor alocado), só que agrupada
+// por classificação, contando quantidade entregue.
+function buildOnePagerEntreguesPorClassificacao(entregues){
+  const porClass = {};
+  entregues.forEach(m => {
+    const key = m.classificacao || 'Sem classificação';
+    porClass[key] = (porClass[key] || 0) + 1;
+  });
+  const rows = Object.keys(porClass).sort((a,b) => a.localeCompare(b, 'pt-BR')).map(key => [key, String(porClass[key])]);
+  const totalRow = ['TOTAL', String(entregues.length)];
+  return {rows, totalRow};
+}
+
+// Monta o One-Pager "Plano" — o que está previsto pra semana escolhida, pelos PRAZOS lançados na aba
+// Demandas: tabela de entregas previstas, KPI de Contas Finalizadas (real x budget proporcional ao fim
+// da semana) e o backlog atual de tickets em aberto por classificação. A altura da página se ajusta ao
+// conteúdo (nunca corta linhas — mesmo espírito do ajuste de 11/09/2026 no deck da Planning), em vez de
+// uma altura fixa de carta que poderia cortar tabelas grandes.
+async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   await preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64);
 
-  const PAGE_W = 8.5, PAGE_H = 11, ONE_PAGER_DPI = 220;
+  const {inicio, fim} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
+  const inicioIso = dateParaIsoDia(inicio), fimIso = dateParaIsoDia(fim);
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+
+  const entregasRows = buildOnePagerEntregasRows(merged, 'prazo', inicioIso, fimIso, null, data);
+  const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
+  const kpiAbertos = buildOnePagerAbertosPorClassificacao(merged);
+
+  const PAGE_W = 8.5, ONE_PAGER_DPI = 220, startX = 0.5, contentW = PAGE_W - startX * 2;
+  const y = 1.62 + 0.32; // título da seção "Entregas" (0.32 = mesmo avanço de addOnePagerSectionTitle)
+  const yAposEntregas = y + alturaListaTabela(entregasRows, contentW, ONE_PAGER_ENTREGAS_COLW, 7.5) + 0.28;
+  const yKpiContasTitle = yAposEntregas;
+  const yKpiContasTable = yKpiContasTitle + 0.32;
+  const yAposKpiContas = yKpiContasTable + alturaKpiTabela(kpiContas.rows, kpiContas.totalRow) + 0.28;
+  const yKpiAbertosTitle = yAposKpiContas;
+  const yKpiAbertosTable = yKpiAbertosTitle + 0.32;
+  const yAposKpiAbertos = yKpiAbertosTable + alturaKpiTabela(kpiAbertos.rows, kpiAbertos.totalRow);
+  const PAGE_H = Math.max(11, yAposKpiAbertos + 0.7);
+
   const pptxLike = new CanvasPdfPptx();
   pptxLike.defineLayout({width: PAGE_W, height: PAGE_H});
   pptxLike._dpi = ONE_PAGER_DPI;
   const slide = pptxLike.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
 
-  const mesNome = mesPlanningNome(mesN);
-  const mesLabel = mesNome + '/' + CURRENT_YEAR;
-  const areaSummary = buildReportAreaSummary(data, mesN);
-  addOnePagerContent(slide, areaSummary, mesLabel, PAGE_W, PAGE_H);
+  const mesLabel = mesPlanningNome(mesN) + '/' + CURRENT_YEAR;
+  const semanaLabel = fmtSemanaLabel(inicio, fim);
+  addOnePagerHeader(slide, 'One-Pager Plano · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Plano da Semana', PAGE_W);
+
+  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS COM PRAZO NA SEMANA');
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, emptyText: 'Nenhuma entrega com prazo previsto para esta semana.'});
+
+  addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
+  addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, emptyText: 'Nenhum cliente com dado neste mês.'});
+
+  addOnePagerSectionTitle(slide, startX, yKpiAbertosTitle, contentW, 'TICKETS EM ABERTO POR CLASSIFICAÇÃO (BACKLOG ATUAL)');
+  addOnePagerKpiTable(slide, startX, yKpiAbertosTable, contentW, ['CLASSIFICAÇÃO','QTD.','MÉDIA DIAS EM ABERTO'], kpiAbertos.rows, kpiAbertos.totalRow, [null, 0.9, 1.9], {fontSize: 8.5, emptyText: 'Nenhum ticket em aberto.'});
+
+  addOnePagerFooter(slide, PAGE_W, PAGE_H);
 
   const dataUrl = slide.canvas.toDataURL('image/png');
-  downloadDataUrl(dataUrl, 'One-Pager - ' + mesNome + ' ' + CURRENT_YEAR + '.png');
+  downloadDataUrl(dataUrl, 'One-Pager Plano - Semana ' + semanaN + ' - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.png');
+}
+
+// Monta o One-Pager "Resultados" — o que foi de fato entregue na semana escolhida, pela data de
+// CONCLUSÃO lançada na aba Demandas, restrito a tickets com um desenvolvedor alocado (mesmo critério
+// pedido pelo usuário): tabela de entregas concluídas, o mesmo KPI de Contas Finalizadas (real x budget
+// proporcional ao fim da semana) e o total entregue por classificação.
+async function gerarOnePagerResultadosPng(data, mesN, semanaN){
+  await preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64);
+
+  const {inicio, fim} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
+  const inicioIso = dateParaIsoDia(inicio), fimIso = dateParaIsoDia(fim);
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+  const temDevAlocado = m => !!m.responsavelDesenvolvimentoId;
+
+  const entregasRows = buildOnePagerEntregasRows(merged, 'concluidoEm', inicioIso, fimIso, temDevAlocado, data);
+  const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
+  const entreguesNaSemana = merged.filter(m => temDevAlocado(m) && isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso));
+  const kpiEntregues = buildOnePagerEntreguesPorClassificacao(entreguesNaSemana);
+
+  const PAGE_W = 8.5, ONE_PAGER_DPI = 220, startX = 0.5, contentW = PAGE_W - startX * 2;
+  const y = 1.62 + 0.32; // título da seção "Entregas" (0.32 = mesmo avanço de addOnePagerSectionTitle)
+  const yAposEntregas = y + alturaListaTabela(entregasRows, contentW, ONE_PAGER_ENTREGAS_COLW, 7.5) + 0.28;
+  const yKpiContasTitle = yAposEntregas;
+  const yKpiContasTable = yKpiContasTitle + 0.32;
+  const yAposKpiContas = yKpiContasTable + alturaKpiTabela(kpiContas.rows, kpiContas.totalRow) + 0.28;
+  const yKpiEntreguesTitle = yAposKpiContas;
+  const yKpiEntreguesTable = yKpiEntreguesTitle + 0.32;
+  const yAposKpiEntregues = yKpiEntreguesTable + alturaKpiTabela(kpiEntregues.rows, kpiEntregues.totalRow);
+  const PAGE_H = Math.max(11, yAposKpiEntregues + 0.7);
+
+  const pptxLike = new CanvasPdfPptx();
+  pptxLike.defineLayout({width: PAGE_W, height: PAGE_H});
+  pptxLike._dpi = ONE_PAGER_DPI;
+  const slide = pptxLike.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+
+  const mesLabel = mesPlanningNome(mesN) + '/' + CURRENT_YEAR;
+  const semanaLabel = fmtSemanaLabel(inicio, fim);
+  addOnePagerHeader(slide, 'One-Pager Resultados · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Resultados da Semana', PAGE_W);
+
+  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS CONCLUÍDAS NA SEMANA (COM DESENVOLVEDOR ALOCADO)');
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, emptyText: 'Nenhuma entrega concluída nesta semana com desenvolvedor alocado.'});
+
+  addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
+  addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, emptyText: 'Nenhum cliente com dado neste mês.'});
+
+  addOnePagerSectionTitle(slide, startX, yKpiEntreguesTitle, contentW, 'TICKETS ENTREGUES NA SEMANA POR CLASSIFICAÇÃO');
+  addOnePagerKpiTable(slide, startX, yKpiEntreguesTable, contentW, ['CLASSIFICAÇÃO','QTD. ENTREGUE'], kpiEntregues.rows, kpiEntregues.totalRow, [null, 1.4], {fontSize: 8.5, emptyText: 'Nenhum ticket entregue nesta semana.'});
+
+  addOnePagerFooter(slide, PAGE_W, PAGE_H);
+
+  const dataUrl = slide.canvas.toDataURL('image/png');
+  downloadDataUrl(dataUrl, 'One-Pager Resultados - Semana ' + semanaN + ' - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.png');
 }
 
 // Slides 2 a 6: uma área por slide, com uma tabela Cliente x KPI (Real/Budget) para os KPIs que têm
@@ -9038,21 +9282,39 @@ function TrackingIndexPage({data}){
     }
   };
 
-  const [gerandoOnePager, setGerandoOnePager] = useState(false);
-  const [erroOnePager, setErroOnePager] = useState('');
-  // Terceiro gerador (pedido em 30/08/2026): a MESMA visão geral por área do Slide 1 do Report Mensal,
-  // só que como uma única imagem .png em formato retrato — pra colar quase em página cheia num
-  // documento Word. Não depende do seletor de formato PPTX/PDF acima (esse botão sempre gera .png).
-  const handleGerarOnePager = async () => {
-    setGerandoOnePager(true);
-    setErroOnePager('');
+  // Terceiro e quarto geradores — os One-Pagers Semanais (pedido em 14/09/2026, substituindo por
+  // completo o One-Pager único de 30/08/2026): "Plano" (previsão da semana, pelos Prazos) e "Resultados"
+  // (o que foi entregue na semana, pelas datas de Conclusão). Ficam numa seção própria, separada dos
+  // botões de Report/Planning acima, com seu próprio seletor de SEMANA (além do "Mês da análise" já
+  // existente, que define de qual mês vêm as 5 semanas do dropdown — ver getWeekOptionsForMonth).
+  const semanaOnePagerOpcoes = useMemo(() => getWeekOptionsForMonth(CURRENT_YEAR, mesRelatorio), [mesRelatorio]);
+  const [semanaOnePager, setSemanaOnePager] = useState(1);
+  const [gerandoOnePagerPlano, setGerandoOnePagerPlano] = useState(false);
+  const [erroOnePagerPlano, setErroOnePagerPlano] = useState('');
+  const handleGerarOnePagerPlano = async () => {
+    setGerandoOnePagerPlano(true);
+    setErroOnePagerPlano('');
     try{
-      await gerarOnePagerPng(data, mesRelatorio);
+      await gerarOnePagerPlanoPng(data, mesRelatorio, semanaOnePager);
     }catch(e){
-      console.error('Erro ao gerar One-Pager', e);
-      setErroOnePager((e && e.message) || 'Não foi possível gerar o one-pager. Tente novamente.');
+      console.error('Erro ao gerar One-Pager Plano', e);
+      setErroOnePagerPlano((e && e.message) || 'Não foi possível gerar o one-pager. Tente novamente.');
     }finally{
-      setGerandoOnePager(false);
+      setGerandoOnePagerPlano(false);
+    }
+  };
+  const [gerandoOnePagerResultados, setGerandoOnePagerResultados] = useState(false);
+  const [erroOnePagerResultados, setErroOnePagerResultados] = useState('');
+  const handleGerarOnePagerResultados = async () => {
+    setGerandoOnePagerResultados(true);
+    setErroOnePagerResultados('');
+    try{
+      await gerarOnePagerResultadosPng(data, mesRelatorio, semanaOnePager);
+    }catch(e){
+      console.error('Erro ao gerar One-Pager Resultados', e);
+      setErroOnePagerResultados((e && e.message) || 'Não foi possível gerar o one-pager. Tente novamente.');
+    }finally{
+      setGerandoOnePagerResultados(false);
     }
   };
 
@@ -9136,11 +9398,26 @@ function TrackingIndexPage({data}){
           </button>
           {erroPlanning && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroPlanning}</div>}
 
-          <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:10}} disabled={gerandoOnePager} onClick={handleGerarOnePager}>
-            {gerandoOnePager ? 'Gerando one-pager…' : 'Gerar One-Pager'}
-          </button>
-          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Visão geral por área (mesmo conteúdo do 1º slide do Report), em uma única imagem .png, em formato retrato — pronta para colar num documento.</div>
-          {erroOnePager && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePager}</div>}
+          <div style={{marginTop:18, paddingTop:16, borderTop:'1px solid var(--line)'}}>
+            <div className="field">
+              <label>Semana do One-Pager</label>
+              <select className="select" value={semanaOnePager} onChange={e => setSemanaOnePager(Number(e.target.value))}>
+                {semanaOnePagerOpcoes.map(o => <option value={o.n} key={o.n}>{o.label}</option>)}
+              </select>
+              <div className="hint">Semanas de Segunda a Domingo — a Semana 1 é sempre a 1ª semana inteiramente dentro do mês escolhido acima em "Mês da análise".</div>
+            </div>
+            <button type="button" className="btn btn-ghost report-generate-btn" disabled={gerandoOnePagerPlano} onClick={handleGerarOnePagerPlano}>
+              {gerandoOnePagerPlano ? 'Gerando one-pager…' : 'Gerar One-Pager Plano'}
+            </button>
+            <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Entregas com prazo na semana escolhida, Contas Finalizadas (real x budget proporcional ao fim da semana) e o backlog de tickets em aberto por classificação — uma página .png, formato retrato.</div>
+            {erroOnePagerPlano && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePagerPlano}</div>}
+
+            <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:10}} disabled={gerandoOnePagerResultados} onClick={handleGerarOnePagerResultados}>
+              {gerandoOnePagerResultados ? 'Gerando one-pager…' : 'Gerar One-Pager Resultados'}
+            </button>
+            <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Entregas concluídas na semana escolhida (com desenvolvedor alocado), o mesmo KPI de Contas Finalizadas e o total entregue por classificação — também em .png, formato retrato.</div>
+            {erroOnePagerResultados && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePagerResultados}</div>}
+          </div>
 
           <div style={{marginTop:18, paddingTop:16, borderTop:'1px solid var(--line)'}}>
             <div className="field">
