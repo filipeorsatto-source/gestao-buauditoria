@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.5';
+const APP_BUILD_ID = '2026-09-14.6';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7364,18 +7364,22 @@ const REPORT_CLIENTE_BACKLOG_COLW = [0.75, 1.4, null, 2.2, 0.85, 1.5];
 
 // Slide "Backlog da Semana" POR CLIENTE, no fim do Report Mensal (pedido em 14/09/2026) — mesma tabela de
 // "Entregas" do One-Pager Plano (mesmas colunas/infos: data, cliente, demanda, classificação, ticket do
-// Linear e responsável), só que filtrada pra UM cliente e sempre pelo PRAZO (todas as tasks previstas pra
-// serem entregues na semana escolhida — sem o acréscimo de atrasadas de semanas anteriores que o One-Pager
-// Plano tem, já que aqui o recorte é "o que está previsto pra essa semana, desse cliente").
+// Linear e responsável), só que filtrada pra UM cliente. Ajuste em 14/09/2026 (2ª rodada): assim como no
+// One-Pager Plano, também entram as tasks ATRASADAS — prazo de uma semana ANTERIOR à escolhida e ainda não
+// concluídas (ver buildOnePagerAtrasadasRows: "não concluída" é aferido pelo statusEfetivo, que já
+// contempla tanto o status oficial do Movidesk quanto uma conclusão lançada manualmente). Atrasadas
+// primeiro (prazo mais antigo), depois as da própria semana, na mesma tabela.
 function addReportClienteBacklogSemanaSlide(pptx, clienteNome, merged, inicioIso, fimIso, mesLabel, semanaLabel, data){
   const slide = pptx.addSlide();
   slide.background = {color: RIVIO_PPTX.branco};
-  addReportHeader(pptx, slide, mesLabel, 'Backlog da semana (' + semanaLabel + ') · ' + clienteNome);
+  addReportHeader(pptx, slide, mesLabel, 'Backlog da semana (' + semanaLabel + ' · inclui atrasadas) · ' + clienteNome);
 
   const doCliente = merged.filter(m => m.cliente === clienteNome);
-  const rows = buildOnePagerEntregasRows(doCliente, 'prazo', inicioIso, fimIso, null, data);
+  const atrasadasRows = buildOnePagerAtrasadasRows(doCliente, inicioIso, data);
+  const semanaRows = buildOnePagerEntregasRows(doCliente, 'prazo', inicioIso, fimIso, null, data);
+  const rows = atrasadasRows.concat(semanaRows);
 
-  addPlanningListTable(pptx, slide, 0.4, 1.7, 12.53, 5.3, ONE_PAGER_ENTREGAS_HEADERS, rows, REPORT_CLIENTE_BACKLOG_COLW, {fontSize: 9, align: 'center', emptyText: 'Nenhuma entrega com prazo previsto para esta semana.'});
+  addPlanningListTable(pptx, slide, 0.4, 1.7, 12.53, 5.3, ONE_PAGER_ENTREGAS_HEADERS, rows, REPORT_CLIENTE_BACKLOG_COLW, {fontSize: 9, align: 'center', emptyText: 'Nenhuma entrega com prazo previsto ou atrasada para esta semana.'});
 }
 
 // KPI "Contas Finalizadas por cliente" — Real do mês (único valor mensal já lançado) x Budget
