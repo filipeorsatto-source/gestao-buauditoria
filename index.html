@@ -911,7 +911,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.2';
+const APP_BUILD_ID = '2026-09-14.3';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7314,8 +7314,14 @@ function addOnePagerFooter(slide, pageW, pageH){
 // que em formato de tabela plana (uma linha por ticket, ordenada pela data), já que addPlanningListTable
 // não tem como agrupar visualmente por data dentro de uma mesma tabela.
 function buildOnePagerEntregasRows(merged, campoData, inicioIso, fimIso, filterFn, data){
-  return merged
-    .filter(m => (!filterFn || filterFn(m)) && isoDiaDentroDoIntervalo(m[campoData], inicioIso, fimIso))
+  const lista = merged.filter(m => (!filterFn || filterFn(m)) && isoDiaDentroDoIntervalo(m[campoData], inicioIso, fimIso));
+  return mapOnePagerEntregasRows(lista, campoData, data);
+}
+// Ordena (pela data escolhida, depois cliente) e mapeia pro formato de linha da tabela — extraído de
+// buildOnePagerEntregasRows pra poder ser reaproveitado também pelas linhas "atrasadas" (ver
+// buildOnePagerAtrasadasRows), que não vêm de um único filtro de intervalo de data.
+function mapOnePagerEntregasRows(lista, campoData, data){
+  return lista
     .slice()
     .sort((a, b) => {
       const da = a[campoData] || '', db = b[campoData] || '';
@@ -7327,6 +7333,16 @@ function buildOnePagerEntregasRows(merged, campoData, inicioIso, fimIso, filterF
       const resp = devNome || m.responsavel || '—';
       return [fmtDataAbertura(m[campoData]), m.cliente || '—', m.assunto || '(sem assunto)', m.classificacao || '—', m.linear || '—', resp];
     });
+}
+// Tickets ATRASADOS (só One-Pager Plano) — prazo era de uma semana ANTERIOR à escolhida e o ticket ainda
+// não foi concluído. "Não concluído" aqui é aferido pelo statusEfetivo (não-terminal), que já contempla
+// tanto o status oficial vindo do Movidesk quanto uma conclusão lançada manualmente na aba Demandas — ver
+// buildDemandasMergedUncached: quando concluidoEmManual está preenchido, statusEfetivo é forçado pra
+// 'Resolvido' independente do status bruto do Movidesk. Pedido em 14/09/2026: juntar essas linhas com as
+// de prazo-na-semana, pra dar visibilidade do que ficou pra trás.
+function buildOnePagerAtrasadasRows(merged, inicioIso, data){
+  const lista = merged.filter(m => m.prazo && m.prazo.slice(0, 10) < inicioIso && !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo));
+  return mapOnePagerEntregasRows(lista, 'prazo', data);
 }
 const ONE_PAGER_ENTREGAS_HEADERS = ['DATA','CLIENTE','DEMANDA','CLASSIFICAÇÃO','LINEAR','RESP.'];
 const ONE_PAGER_ENTREGAS_COLW = [0.55, 0.95, null, 1.5, 0.55, 1.0];
@@ -7429,7 +7445,11 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   const inicioIso = dateParaIsoDia(inicio), fimIso = dateParaIsoDia(fim);
   const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
 
-  const entregasRows = buildOnePagerEntregasRows(merged, 'prazo', inicioIso, fimIso, null, data);
+  const entregasSemanaRows = buildOnePagerEntregasRows(merged, 'prazo', inicioIso, fimIso, null, data);
+  const atrasadasRows = buildOnePagerAtrasadasRows(merged, inicioIso, data);
+  // Atrasadas primeiro (prazo mais antigo) e depois as da própria semana — como ambas já vêm ordenadas
+  // por data, a junção mantém a ordem cronológica geral.
+  const entregasRows = atrasadasRows.concat(entregasSemanaRows);
   const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
   const kpiAbertos = buildOnePagerAbertosPorClassificacao(merged);
   const kpiAnaliseTecnica = buildOnePagerEmAnaliseTecnicaKpi(merged);
@@ -7456,8 +7476,8 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   const semanaLabel = fmtSemanaLabel(inicio, fim);
   addOnePagerHeader(slide, 'One-Pager Plano · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Plano da Semana', PAGE_W);
 
-  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS COM PRAZO NA SEMANA');
-  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma entrega com prazo previsto para esta semana.'});
+  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS COM PRAZO NA SEMANA (+ ATRASADAS DE SEMANAS ANTERIORES)');
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma entrega com prazo previsto ou atrasada para esta semana.'});
 
   addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
   addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
