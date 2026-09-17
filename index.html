@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.6';
+const APP_BUILD_ID = '2026-09-14.7';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7357,6 +7357,53 @@ function buildOnePagerAtrasadasRows(merged, inicioIso, data){
 }
 const ONE_PAGER_ENTREGAS_HEADERS = ['DATA','CLIENTE','DEMANDA','CLASSIFICAÇÃO','LINEAR','RESP.'];
 const ONE_PAGER_ENTREGAS_COLW = [0.55, 0.95, null, 1.5, 0.55, 1.0];
+
+// Linhas da tabela de "Entregas de Desenvolvimento" do One-Pager RESULTADOS (pedido em 17/09/2026) —
+// substitui a antiga lista (só os tickets concluídos na semana) por uma visão completa: TODAS as tasks que
+// estavam na "planning" da semana — mesma população de base do One-Pager Plano (prazo dentro da semana +
+// atrasadas de semanas anteriores) — sinalizando se cada uma foi ou não entregue, mais as entregas EXTRAS
+// feitas na semana que não estavam nessa lista de planning. Duas colunas de label: PLANNING (Sim/Não — se
+// a task fazia parte do que estava previsto pra essa semana) logo ao lado de CLASSIFICAÇÃO, e ENTREGA
+// (Entregue/Não entregue) no fim da tabela. Sempre restrito a tickets com desenvolvedor alocado (mesmo
+// critério de "demanda de desenvolvimento" já usado neste One-Pager).
+function buildOnePagerResultadosRows(merged, inicioIso, fimIso, data){
+  const temDevAlocado = m => !!m.responsavelDesenvolvimentoId;
+
+  const dentroSemana = merged.filter(m => temDevAlocado(m) && isoDiaDentroDoIntervalo(m.prazo, inicioIso, fimIso));
+  // "Atrasada" aqui é um pouco mais ampla que a do One-Pager Plano (que só quer o backlog AINDA aberto):
+  // além das ainda não concluídas, também entram as que só foram concluídas DENTRO dessa semana — elas
+  // estavam em aberto quando a semana começou e viraram uma entrega desta semana, então precisam continuar
+  // aparecendo aqui (como "Entregue"), mesmo já não sendo mais backlog aberto hoje.
+  const atrasada = merged.filter(m => temDevAlocado(m) && m.prazo && m.prazo.slice(0, 10) < inicioIso &&
+    (!DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo) || isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso)));
+
+  const planningSet = atrasada.concat(dentroSemana);
+  const planningNumeros = new Set(planningSet.map(m => m.numero));
+
+  // Entregas "extras": concluídas na semana, com dev alocado, mas que não faziam parte da planning acima
+  // (nem prazo na semana, nem atrasada) — entregues além do que estava previsto.
+  const extras = merged.filter(m => temDevAlocado(m) && isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso) && !planningNumeros.has(m.numero));
+
+  const ordenarPor = (lista, campo) => lista.slice().sort((a, b) => {
+    const da = a[campo] || '', db = b[campo] || '';
+    if(da !== db) return da < db ? -1 : 1;
+    return (a.cliente || '').localeCompare(b.cliente || '', 'pt-BR');
+  });
+
+  const linha = (m, campoData, planningLabel, entregaLabel) => {
+    const devNome = m.responsavelDesenvolvimentoId ? pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) : '';
+    const resp = devNome || m.responsavel || '—';
+    return [fmtDataAbertura(m[campoData]), m.cliente || '—', m.assunto || '(sem assunto)', m.classificacao || '—', planningLabel, m.linear || '—', resp, entregaLabel];
+  };
+
+  const planningRows = ordenarPor(planningSet, 'prazo').map(m => linha(m, 'prazo', 'Sim',
+    isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso) ? 'Entregue' : 'Não entregue'));
+  const extraRows = ordenarPor(extras, 'concluidoEm').map(m => linha(m, 'concluidoEm', 'Não', 'Entregue'));
+
+  return planningRows.concat(extraRows);
+}
+const ONE_PAGER_RESULTADOS_HEADERS = ['DATA','CLIENTE','DEMANDA','CLASSIFICAÇÃO','PLANNING','LINEAR','RESP.','ENTREGA'];
+const ONE_PAGER_RESULTADOS_COLW = [0.62, 0.75, null, 1.0, 0.55, 0.5, 0.75, 0.75];
 // Mesmas colunas do One-Pager, só que redimensionadas pra largura widescreen do deck (12.53" de conteúdo
 // em vez dos 7.5" do One-Pager em retrato) — usadas no slide de Backlog da Semana por cliente, ver
 // addReportClienteBacklogSemanaSlide.
@@ -7533,10 +7580,13 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   downloadDataUrl(dataUrl, 'One-Pager Plano - Semana ' + semanaN + ' - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.png');
 }
 
-// Monta o One-Pager "Resultados" — o que foi de fato entregue na semana escolhida, pela data de
-// CONCLUSÃO lançada na aba Demandas, restrito a tickets com um desenvolvedor alocado (mesmo critério
-// pedido pelo usuário): tabela de entregas concluídas, o mesmo KPI de Contas Finalizadas (real x budget
-// proporcional ao fim da semana) e o total entregue por classificação.
+// Monta o One-Pager "Resultados" — o que foi de fato entregue na semana escolhida. Ajuste em 17/09/2026:
+// a tabela de topo deixou de ser só "concluídos na semana" e passou a listar as demandas de desenvolvimento
+// que ESTAVAM NA PLANNING da semana (mesma população do One-Pager Plano — prazo na semana + atrasadas),
+// sinalizadas como Entregue/Não entregue, mais as entregas EXTRAS feitas além da planning (ver
+// buildOnePagerResultadosRows) — sempre restrito a tickets com desenvolvedor alocado. O restante do
+// One-Pager continua igual: o mesmo KPI de Contas Finalizadas (real x budget proporcional ao fim da
+// semana), o total entregue por classificação e o KPI de Análise Técnica.
 async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   await preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64);
 
@@ -7545,7 +7595,7 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
   const temDevAlocado = m => !!m.responsavelDesenvolvimentoId;
 
-  const entregasRows = buildOnePagerEntregasRows(merged, 'concluidoEm', inicioIso, fimIso, temDevAlocado, data);
+  const entregasRows = buildOnePagerResultadosRows(merged, inicioIso, fimIso, data);
   const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
   const entreguesNaSemana = merged.filter(m => temDevAlocado(m) && isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso));
   const kpiEntregues = buildOnePagerEntreguesPorClassificacao(entreguesNaSemana);
@@ -7553,7 +7603,7 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
 
   const PAGE_W = 8.5, ONE_PAGER_DPI = 220, startX = 0.5, contentW = PAGE_W - startX * 2;
   const y = 1.62 + 0.32; // título da seção "Entregas" (0.32 = mesmo avanço de addOnePagerSectionTitle)
-  const yAposEntregas = y + alturaListaTabela(entregasRows, contentW, ONE_PAGER_ENTREGAS_COLW, 7.5) + 0.28;
+  const yAposEntregas = y + alturaListaTabela(entregasRows, contentW, ONE_PAGER_RESULTADOS_COLW, 7.5) + 0.28;
   const yKpiContasTitle = yAposEntregas;
   const yKpiContasTable = yKpiContasTitle + 0.32;
   const yAposKpiContas = yKpiContasTable + alturaKpiTabela(kpiContas.rows, kpiContas.totalRow) + 0.28;
@@ -7573,8 +7623,8 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   const semanaLabel = fmtSemanaLabel(inicio, fim);
   addOnePagerHeader(slide, 'One-Pager Resultados · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Resultados da Semana', PAGE_W);
 
-  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS CONCLUÍDAS NA SEMANA (COM DESENVOLVEDOR ALOCADO)');
-  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma entrega concluída nesta semana com desenvolvedor alocado.'});
+  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS DE DESENVOLVIMENTO · PLANNING DA SEMANA + EXTRAS');
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_RESULTADOS_HEADERS, entregasRows, ONE_PAGER_RESULTADOS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma demanda de desenvolvimento na planning ou entregue nesta semana.'});
 
   addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
   addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
@@ -9529,7 +9579,7 @@ function TrackingIndexPage({data}){
           <button type="button" className="btn btn-ghost report-generate-btn" style={{marginTop:14}} disabled={gerandoOnePagerResultados} onClick={handleGerarOnePagerResultados}>
             {gerandoOnePagerResultados ? 'Gerando one-pager…' : 'Gerar One-Pager Resultados'}
           </button>
-          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Entregas concluídas na semana escolhida (com desenvolvedor alocado), o mesmo KPI de Contas Finalizadas e o total entregue por classificação.</div>
+          <div style={{marginTop:6, fontSize:11.5, color:'var(--ink-soft)'}}>Demandas de desenvolvimento da planning da semana sinalizadas como Entregue/Não entregue, mais as entregas extras além da planning, o mesmo KPI de Contas Finalizadas e o total entregue por classificação.</div>
           {erroOnePagerResultados && <div style={{marginTop:12, color:'var(--negative)', fontSize:12.5}}>{erroOnePagerResultados}</div>}
         </div>
 
