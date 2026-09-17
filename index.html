@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.8';
+const APP_BUILD_ID = '2026-09-14.9';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7396,8 +7396,13 @@ function buildOnePagerResultadosRows(merged, inicioIso, fimIso, data){
     return [fmtDataAbertura(m[campoData]), m.cliente || '—', m.assunto || '(sem assunto)', m.classificacao || '—', planningLabel, m.linear || '—', resp, entregaLabel];
   };
 
+  // ENTREGA (pedido em 17/09/2026, ajuste): o rótulo é guiado pela CONCLUSÃO da task (statusEfetivo já
+  // cobre tanto o status oficial do Movidesk quanto uma conclusão manual), não pela data de conclusão cair
+  // dentro dessa semana especificamente — uma task com prazo nesta semana mas concluída antes (ex.: semana
+  // passada) deve aparecer como "Entregue" mesmo assim, já que o prazo é quem decide SE ela aparece na
+  // lista, e o status de conclusão é quem decide o rótulo.
   const planningRows = ordenarPor(planningSet, 'prazo').map(m => linha(m, 'prazo', 'Sim',
-    isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso) ? 'Entregue' : 'Não entregue'));
+    DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo) ? 'Entregue' : 'Não entregue'));
   const extraRows = ordenarPor(extras, 'concluidoEm').map(m => linha(m, 'concluidoEm', 'Não', 'Entregue'));
 
   return planningRows.concat(extraRows);
