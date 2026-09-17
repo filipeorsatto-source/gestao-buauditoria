@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.7';
+const APP_BUILD_ID = '2026-09-14.8';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7624,7 +7624,15 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   addOnePagerHeader(slide, 'One-Pager Resultados · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Resultados da Semana', PAGE_W);
 
   addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS DE DESENVOLVIMENTO · PLANNING DA SEMANA + EXTRAS');
-  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_RESULTADOS_HEADERS, entregasRows, ONE_PAGER_RESULTADOS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma demanda de desenvolvimento na planning ou entregue nesta semana.'});
+  // rowFill (pedido em 17/09/2026): pinta cada linha de verde claro quando ENTREGA = "Entregue" e de
+  // vermelho claro quando "Não entregue" — a coluna ENTREGA é sempre a última da linha.
+  const resultadosRowFill = row => {
+    const entrega = row[row.length - 1];
+    if(entrega === 'Entregue') return 'D9F2D0';
+    if(entrega === 'Não entregue') return 'F6C0C0';
+    return null;
+  };
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_RESULTADOS_HEADERS, entregasRows, ONE_PAGER_RESULTADOS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma demanda de desenvolvimento na planning ou entregue nesta semana.', rowFill: resultadosRowFill});
 
   addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
   addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
@@ -8128,7 +8136,19 @@ function addPlanningListTable(pptx, slide, x, y, w, h, headers, rows, colWs, opt
       }, 1);
       return Math.max(0.19, maxLinhas * lineH);
     });
-    bodyRows = rows.map(r => r.map(val => ({text: val === null || val === undefined ? '' : String(val), options:{fontSize:bodyFontSize, color:RIVIO_PPTX.tinta, align}})));
+    // rowFill (opcional, pedido em 17/09/2026 pro One-Pager Resultados): função(row) => cor hex ou null,
+    // pinta o FUNDO de toda a linha (todas as células) — usada pra sinalizar visualmente Entregue/Não
+    // entregue na tabela de planning. Cai em sem-cor (fundo branco padrão) quando não informado, então não
+    // afeta nenhuma das outras tabelas que usam addPlanningListTable sem passar essa opção.
+    const rowFill = typeof opts.rowFill === 'function' ? opts.rowFill : null;
+    bodyRows = rows.map(r => {
+      const fillColor = rowFill ? rowFill(r) : null;
+      return r.map(val => {
+        const cellOpts = {fontSize:bodyFontSize, color:RIVIO_PPTX.tinta, align};
+        if(fillColor) cellOpts.fill = {color: fillColor};
+        return {text: val === null || val === undefined ? '' : String(val), options: cellOpts};
+      });
+    });
     const finalRowH = [headerH, ...rowHeights];
     slide.addTable([header, ...bodyRows], {
       x, y, w, colW,
