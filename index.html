@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-14.9';
+const APP_BUILD_ID = '2026-09-29.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7533,7 +7533,12 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
 
   const {inicio, fim} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
   const inicioIso = dateParaIsoDia(inicio), fimIso = dateParaIsoDia(fim);
-  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+  // Pedido em 29/09/2026: demandas marcadas com Prioridade "Despriorizado" ficam de fora de TODOS os
+  // visuais do One-Pager (mesmo que estivessem na planning da semana) — mesmo critério já usado em outras
+  // métricas do app (ex.: "Média dias ticket em aberto"). Filtrando aqui, na origem, garante que a exclusão
+  // vale pra tabela de entregas, atrasadas e pro backlog de tickets em aberto, todos derivados de `merged`.
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
+    .filter(m => m.prioridade !== 'Despriorizado');
 
   const entregasSemanaRows = buildOnePagerEntregasRows(merged, 'prazo', inicioIso, fimIso, null, data);
   const atrasadasRows = buildOnePagerAtrasadasRows(merged, inicioIso, data);
@@ -7597,7 +7602,11 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
 
   const {inicio, fim} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
   const inicioIso = dateParaIsoDia(inicio), fimIso = dateParaIsoDia(fim);
-  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
+  // Pedido em 29/09/2026: mesmo critério do One-Pager Plano — demandas "Despriorizado" ficam de fora de
+  // todos os visuais (tabela de entregas/planning+extras, entregues por classificação, análise técnica),
+  // mesmo que estivessem na planning da semana.
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
+    .filter(m => m.prioridade !== 'Despriorizado');
   const temDevAlocado = m => !!m.responsavelDesenvolvimentoId;
 
   const entregasRows = buildOnePagerResultadosRows(merged, inicioIso, fimIso, data);
