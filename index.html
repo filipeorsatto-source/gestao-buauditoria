@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-09-29.1';
+const APP_BUILD_ID = '2026-10-01.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -7880,6 +7880,176 @@ async function finalizarExportacao(pptx, fileNameSemExtensao, formato){
   }
 }
 
+// ---------------------------------------------------------------
+// Seção "Entregas do mês · desenvolvedor alocado" (pedido em 01/10/2026) — insere, no Report Mensal, um
+// bloco ANTES da abertura por área/cliente: 1 slide de introdução com 4 gráficos de coluna (qtd. de
+// tickets entregues por desenvolvedor, soma de esforço entregue por desenvolvedor, e as mesmas 2 métricas
+// quebradas por semana do mês) seguido de quantos slides forem necessários (15 demandas por slide) com a
+// lista completa de tudo que foi entregue no mês por quem tinha um Desenvolvedor Alocado (c.
+// responsavelDesenvolvimentoId preenchido). "Entregue no mês" usa mesConclusao (mês da data de conclusão
+// — manual ou do Movidesk —, já restrito ao ano corrente, ver buildDemandasMergedUncached), não o mês do
+// prazo, já que a ideia aqui é fechamento do mês, não planejamento.
+// ---------------------------------------------------------------
+const REPORT_DEV_ALOCADO_DEMANDAS_POR_SLIDE = 15;
+
+function buildReportDevAlocadoRows(merged, mesN){
+  return merged.filter(m => m.responsavelDesenvolvimentoId && m.mesConclusao === mesN);
+}
+
+// Agrega quantidade entregue e soma de esforço por desenvolvedor, ordenado do que mais entregou (em
+// quantidade) pro que menos entregou — mesma ordem usada nos dois gráficos "por desenvolvedor" (quantidade
+// e esforço), pra facilitar comparar os dois lado a lado.
+function buildReportDevAlocadoPorDev(rows, data){
+  const porDev = {};
+  rows.forEach(m => {
+    const nome = pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) || 'Sem nome';
+    if(!porDev[nome]) porDev[nome] = {qtd: 0, esforco: 0};
+    porDev[nome].qtd += 1;
+    porDev[nome].esforco += Number(m.esforco) || 0;
+  });
+  const nomes = Object.keys(porDev).sort((a, b) => porDev[b].qtd - porDev[a].qtd);
+  return {
+    nomes,
+    qtd: nomes.map(n => porDev[n].qtd),
+    esforco: nomes.map(n => porDev[n].esforco),
+  };
+}
+
+// Agrega por SEMANA DO MÊS (segunda a domingo, cobrindo o mês inteiro) — diferente da "Semana N" dos
+// One-Pagers (que de propósito pula os dias antes da 1ª segunda-feira do mês, ver getWeekRangeOfMonth):
+// aqui TODA entrega do mês precisa cair em algum bucket, então a semana é definida pela segunda-feira da
+// própria data de conclusão de cada ticket, não pelo calendário fixo de "Semana 1 a 5" do mês.
+function buildReportDevAlocadoPorSemana(rows){
+  const buckets = {};
+  rows.forEach(m => {
+    const d = parseConcluidoEmDate(m.concluidoEm);
+    if(!d || isNaN(d.getTime())) return;
+    const dow = d.getDay();
+    const diff = dow === 0 ? -6 : 1 - dow;
+    const monday = new Date(d);
+    monday.setDate(d.getDate() + diff);
+    const key = dateParaIsoDia(monday);
+    if(!buckets[key]) buckets[key] = {qtd: 0, esforco: 0};
+    buckets[key].qtd += 1;
+    buckets[key].esforco += Number(m.esforco) || 0;
+  });
+  const keys = Object.keys(buckets).sort();
+  return {
+    labels: keys.map((_, i) => 'Sem ' + (i + 1)),
+    qtd: keys.map(k => buckets[k].qtd),
+    esforco: keys.map(k => buckets[k].esforco),
+  };
+}
+
+// Slide de introdução da seção: 4 gráficos de coluna em grade 2x2 — quantidade e esforço entregue por
+// desenvolvedor (linha de cima) e as mesmas 2 métricas por semana do mês (linha de baixo).
+function addReportDevAlocadoIntroSlide(pptx, mesLabel, porDev, porSemana){
+  const slide = pptx.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+  addReportHeader(pptx, slide, mesLabel, 'Entregas do mês · desenvolvedor alocado');
+
+  const startX = 0.4, startY = 1.55, totalW = 12.53, totalH = 5.55, gapX = 0.3, gapY = 0.4;
+  const colW = (totalW - gapX) / 2, rowH = (totalH - gapY) / 2;
+  const titleH = 0.26;
+
+  const quadrantes = [
+    {title: 'Tickets entregues por desenvolvedor', labels: porDev.nomes, values: porDev.qtd, cor: RIVIO_PPTX.azul, x: startX, y: startY},
+    {title: 'Esforço entregue por desenvolvedor', labels: porDev.nomes, values: porDev.esforco, cor: RIVIO_PPTX.lilas, x: startX + colW + gapX, y: startY},
+    {title: 'Tickets entregues por semana', labels: porSemana.labels, values: porSemana.qtd, cor: RIVIO_PPTX.azul, x: startX, y: startY + rowH + gapY},
+    {title: 'Esforço entregue por semana', labels: porSemana.labels, values: porSemana.esforco, cor: RIVIO_PPTX.lilas, x: startX + colW + gapX, y: startY + rowH + gapY},
+  ];
+
+  quadrantes.forEach(q => {
+    slide.addText(q.title, {x: q.x, y: q.y, w: colW, h: titleH, fontFace: RIVIO_PPTX.fontFace, fontSize: 10.5, bold: true, color: RIVIO_PPTX.tinta});
+    const temDados = q.labels.length > 0;
+    const chartData = [{name: q.title, labels: temDados ? q.labels : ['—'], values: temDados ? q.values : [0]}];
+    slide.addChart(pptx.ChartType.bar, chartData, {
+      x: q.x, y: q.y + titleH, w: colW, h: rowH - titleH,
+      barDir: 'col', barGapWidthPct: 35,
+      chartColors: [q.cor],
+      showLegend: false,
+      catAxisLabelFontSize: 7, valAxisLabelFontSize: 7,
+      catAxisLabelColor: RIVIO_PPTX.tintaSoft, valAxisLabelColor: RIVIO_PPTX.tintaSoft,
+      catAxisLineShow: false, valAxisLineShow: false,
+      valGridLine: {color: RIVIO_PPTX.linhaClara, style: 'solid', size: 0.75},
+      catGridLine: {style: 'none'},
+    });
+  });
+}
+
+// Divide a lista completa de entregas em blocos de REPORT_DEV_ALOCADO_DEMANDAS_POR_SLIDE (15) e adiciona
+// um slide de tabela (DEMANDA / DESENVOLVEDOR / DATA DE ENTREGA) por bloco — quantos forem necessários,
+// numerados quando houver mais de um. Ordenado por desenvolvedor (pra manter as entregas de uma mesma
+// pessoa agrupadas, mesmo quando "vazam" pra um 2º slide) e, dentro de cada um, por data de entrega.
+function addReportDevAlocadoListaSlides(pptx, mesLabel, rows, data){
+  const ordenadas = rows.slice().sort((a, b) => {
+    const nomeA = pessoaNomePlanning(data, a.responsavelDesenvolvimentoId) || '';
+    const nomeB = pessoaNomePlanning(data, b.responsavelDesenvolvimentoId) || '';
+    if(nomeA !== nomeB) return nomeA.localeCompare(nomeB, 'pt-BR');
+    return (a.concluidoEm || '').localeCompare(b.concluidoEm || '');
+  });
+  const porSlide = REPORT_DEV_ALOCADO_DEMANDAS_POR_SLIDE;
+  const totalSlides = Math.max(1, Math.ceil(ordenadas.length / porSlide));
+  for(let i = 0; i < totalSlides; i++){
+    const bloco = ordenadas.slice(i * porSlide, (i + 1) * porSlide);
+    const slide = pptx.addSlide();
+    slide.background = {color: RIVIO_PPTX.branco};
+    const sufixo = totalSlides > 1 ? ' (' + (i + 1) + '/' + totalSlides + ')' : '';
+    addReportHeader(pptx, slide, mesLabel, 'Entregas do mês · desenvolvedor alocado' + sufixo);
+    const tableRows = bloco.map(m => [
+      m.assunto || '(sem assunto)',
+      pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) || '—',
+      fmtDataAbertura(m.concluidoEm),
+    ]);
+    addPlanningListTable(pptx, slide, 0.4, 1.7, 12.53, 5.3, ['DEMANDA', 'DESENVOLVEDOR', 'DATA DE ENTREGA'], tableRows, [null, 2.8, 1.8], {fontSize: 10.5, emptyText: 'Nenhuma entrega com desenvolvedor alocado neste mês.'});
+  }
+}
+
+// ---------------------------------------------------------------
+// Seção "Entregas do mês · sem desenvolvedor alocado" (pedido em 01/10/2026) — logo depois da seção
+// acima: tickets concluídos no mês que NÃO tinham desenvolvedor alocado (resolvidos só pelo time de
+// Atendimento/Auditoria no Movidesk mesmo), somados por responsável do Movidesk, por cliente e por
+// classificação — mesma quebra pedida pelo usuário, em 3 tabelas lado a lado (molde já usado no slide
+// "Geral Deployment" do Planning — ver addPlanningDeploymentGeralSlide).
+// ---------------------------------------------------------------
+function buildReportSemDevAlocadoRows(merged, mesN){
+  return merged.filter(m => !m.responsavelDesenvolvimentoId && m.mesConclusao === mesN);
+}
+
+function contarPorCampoReport(rows, campo, semLabel){
+  const porCampo = {};
+  rows.forEach(m => {
+    const key = m[campo] || semLabel;
+    porCampo[key] = (porCampo[key] || 0) + 1;
+  });
+  return Object.keys(porCampo)
+    .sort((a, b) => porCampo[b] - porCampo[a] || a.localeCompare(b, 'pt-BR'))
+    .map(key => [key, String(porCampo[key])]);
+}
+
+function addReportSemDevAlocadoSlide(pptx, mesLabel, rows){
+  const slide = pptx.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+  addReportHeader(pptx, slide, mesLabel, 'Entregas do mês · sem desenvolvedor alocado');
+
+  const totalW = 12.53, gap = 0.2, colW = (totalW - gap * 2) / 3;
+  const startX = 0.4, startY = 1.7, colH = 5.2;
+  const specs = [
+    {titulo: 'Por Responsável', rows: contarPorCampoReport(rows, 'responsavel', 'Sem responsável'), headers: ['RESPONSÁVEL', 'QTD.']},
+    {titulo: 'Por Cliente', rows: contarPorCampoReport(rows, 'cliente', 'Sem cliente'), headers: ['CLIENTE', 'QTD.']},
+    {titulo: 'Por Classificação', rows: contarPorCampoReport(rows, 'classificacao', 'Sem classificação'), headers: ['CLASSIFICAÇÃO', 'QTD.']},
+  ];
+  specs.forEach((spec, i) => {
+    const x = startX + i * (colW + gap);
+    slide.addShape(pptx.ShapeType.roundRect, {x, y: startY, w: colW, h: colH, rectRadius: 0.05, fill: {color: RIVIO_PPTX.branco}, line: {color: 'E6E6E6', width: 1}});
+    slide.addText(spec.titulo, {x: x + 0.16, y: startY + 0.1, w: colW - 0.32, h: 0.3, fontFace: RIVIO_PPTX.fontFace, fontSize: 14, bold: true, color: RIVIO_PPTX.tinta});
+    addPlanningListTable(pptx, slide, x + 0.16, startY + 0.5, colW - 0.32, colH - 0.66, spec.headers, spec.rows, [null, 0.9], {fontSize: 9, align: 'center', emptyText: 'Nenhum ticket.'});
+  });
+  slide.addText('Total de tickets entregues sem desenvolvedor alocado: ' + rows.length, {
+    x: startX, y: startY + colH + 0.16, w: totalW, h: 0.3, fontFace: RIVIO_PPTX.fontFace, fontSize: 11, color: RIVIO_PPTX.tintaSoft,
+  });
+}
+
 // Pedido em 14/09/2026: além dos slides que já existiam (visão geral, abertura por cliente e ranking por
 // área), o deck agora termina com 2 slides por cliente — OKRs do cliente (mesmo formato do Slide 1, só
 // que com os números filtrados pra esse cliente) seguido do Backlog da Semana desse cliente (mesma tabela
@@ -7903,15 +8073,27 @@ async function gerarReportPptx(data, mesN, formato, semanaN){
   const mesLabel = mesNome + '/' + CURRENT_YEAR;
 
   const areaSummary = buildReportAreaSummary(data, mesN);
+  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
 
   addReportSlide1(pptx, areaSummary, mesLabel);
+
+  // Pedido em 01/10/2026: seções "Desenvolvedor Alocado" e "Sem Desenvolvedor Alocado", logo após a visão
+  // geral e ANTES da abertura por área/cliente.
+  const devAlocadoRows = buildReportDevAlocadoRows(merged, mesN);
+  const porDevAlocado = buildReportDevAlocadoPorDev(devAlocadoRows, data);
+  const porSemanaAlocado = buildReportDevAlocadoPorSemana(devAlocadoRows);
+  addReportDevAlocadoIntroSlide(pptx, mesLabel, porDevAlocado, porSemanaAlocado);
+  addReportDevAlocadoListaSlides(pptx, mesLabel, devAlocadoRows, data);
+
+  const semDevAlocadoRows = buildReportSemDevAlocadoRows(merged, mesN);
+  addReportSemDevAlocadoSlide(pptx, mesLabel, semDevAlocadoRows);
+
   REPORT_AREAS.forEach(area => addReportAreaClienteSlide(pptx, area, areaSummary, mesN, data, mesLabel));
   REPORT_AREAS.forEach(area => addReportRankingAreaSlide(pptx, area, data, mesN, mesLabel));
 
   const {inicio: inicioSemana, fim: fimSemana} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
   const inicioIso = dateParaIsoDia(inicioSemana), fimIso = dateParaIsoDia(fimSemana);
   const semanaLabel = fmtSemanaLabel(inicioSemana, fimSemana);
-  const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais);
   const clientesOkrBacklog = DEMANDAS_CLIENTES_ORDEM.filter(c => c.toLowerCase() !== 'interno');
   clientesOkrBacklog.forEach(clienteNome => {
     const areaSummaryCliente = buildReportAreaSummaryPorCliente(data, mesN, clienteNome);
