@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-10-01.1';
+const APP_BUILD_ID = '2026-10-01.2';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -8006,6 +8006,81 @@ function addReportDevAlocadoListaSlides(pptx, mesLabel, rows, data){
 }
 
 // ---------------------------------------------------------------
+// Seção "Planning não entregue · desenvolvedor alocado" (pedido em 01/10/2026) — mesma ótica da seção de
+// entregues acima, só que para o lado inverso: demandas com Desenvolvedor Alocado cujo PRAZO caía neste
+// mês (m.mesPlanning, que é só o mês do campo Prazo — ver buildDemandasMergedUncached) mas que SEGUEM em
+// aberto até agora (statusEfetivo não-terminal — mesmo critério de "não concluído" usado em todo o app,
+// que já contempla tanto o status do Movidesk quanto uma conclusão manual). Como não existe uma "data de
+// entrega" pra quem não entregou, o slide de introdução tem só os 2 gráficos "por desenvolvedor" (não o
+// 2x2 com a quebra por semana, que não se aplica aqui), e a tabela da lista troca a coluna DATA DE
+// ENTREGA por PRAZO.
+// ---------------------------------------------------------------
+function buildReportDevAlocadoNaoEntregueRows(merged, mesN){
+  return merged.filter(m => m.responsavelDesenvolvimentoId && m.mesPlanning === mesN && !DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo));
+}
+
+// Slide de introdução: 2 gráficos de coluna lado a lado (quantidade e esforço NÃO entregue por
+// desenvolvedor) — reaproveita buildReportDevAlocadoPorDev (genérica sobre qualquer lista de linhas) pra
+// agregar. Cores vermelho/laranja (em vez do azul/lilás da seção de entregues) pra reforçar visualmente
+// que isso é o lado "pendente" da mesma história.
+function addReportDevAlocadoNaoEntregueIntroSlide(pptx, mesLabel, porDev){
+  const slide = pptx.addSlide();
+  slide.background = {color: RIVIO_PPTX.branco};
+  addReportHeader(pptx, slide, mesLabel, 'Planning não entregue · desenvolvedor alocado');
+
+  const startX = 0.4, startY = 1.7, totalW = 12.53, gapX = 0.35, chartH = 4.6, titleH = 0.3;
+  const colW = (totalW - gapX) / 2;
+  const temDados = porDev.nomes.length > 0;
+
+  const quadrantes = [
+    {title: 'Tickets não entregues por desenvolvedor', values: porDev.qtd, cor: RIVIO_PPTX.vermelho, x: startX},
+    {title: 'Esforço não entregue por desenvolvedor', values: porDev.esforco, cor: RIVIO_PPTX.laranja, x: startX + colW + gapX},
+  ];
+
+  quadrantes.forEach(q => {
+    slide.addText(q.title, {x: q.x, y: startY, w: colW, h: titleH, fontFace: RIVIO_PPTX.fontFace, fontSize: 12, bold: true, color: RIVIO_PPTX.tinta});
+    const chartData = [{name: q.title, labels: temDados ? porDev.nomes : ['—'], values: temDados ? q.values : [0]}];
+    slide.addChart(pptx.ChartType.bar, chartData, {
+      x: q.x, y: startY + titleH, w: colW, h: chartH,
+      barDir: 'col', barGapWidthPct: 35,
+      chartColors: [q.cor],
+      showLegend: false,
+      catAxisLabelFontSize: 8, valAxisLabelFontSize: 8,
+      catAxisLabelColor: RIVIO_PPTX.tintaSoft, valAxisLabelColor: RIVIO_PPTX.tintaSoft,
+      catAxisLineShow: false, valAxisLineShow: false,
+      valGridLine: {color: RIVIO_PPTX.linhaClara, style: 'solid', size: 0.75},
+      catGridLine: {style: 'none'},
+    });
+  });
+}
+
+// Lista completa (15 por slide, mesma constante da seção de entregues), ordenada por desenvolvedor e,
+// dentro de cada um, por PRAZO (mais antigo primeiro — destaca o que está em aberto há mais tempo).
+function addReportDevAlocadoNaoEntregueListaSlides(pptx, mesLabel, rows, data){
+  const ordenadas = rows.slice().sort((a, b) => {
+    const nomeA = pessoaNomePlanning(data, a.responsavelDesenvolvimentoId) || '';
+    const nomeB = pessoaNomePlanning(data, b.responsavelDesenvolvimentoId) || '';
+    if(nomeA !== nomeB) return nomeA.localeCompare(nomeB, 'pt-BR');
+    return (a.prazo || '').localeCompare(b.prazo || '');
+  });
+  const porSlide = REPORT_DEV_ALOCADO_DEMANDAS_POR_SLIDE;
+  const totalSlides = Math.max(1, Math.ceil(ordenadas.length / porSlide));
+  for(let i = 0; i < totalSlides; i++){
+    const bloco = ordenadas.slice(i * porSlide, (i + 1) * porSlide);
+    const slide = pptx.addSlide();
+    slide.background = {color: RIVIO_PPTX.branco};
+    const sufixo = totalSlides > 1 ? ' (' + (i + 1) + '/' + totalSlides + ')' : '';
+    addReportHeader(pptx, slide, mesLabel, 'Planning não entregue · desenvolvedor alocado' + sufixo);
+    const tableRows = bloco.map(m => [
+      m.assunto || '(sem assunto)',
+      pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) || '—',
+      fmtDataAbertura(m.prazo),
+    ]);
+    addPlanningListTable(pptx, slide, 0.4, 1.7, 12.53, 5.3, ['DEMANDA', 'DESENVOLVEDOR', 'PRAZO'], tableRows, [null, 2.8, 1.8], {fontSize: 10.5, emptyText: 'Nenhuma demanda da planning em aberto neste mês.'});
+  }
+}
+
+// ---------------------------------------------------------------
 // Seção "Entregas do mês · sem desenvolvedor alocado" (pedido em 01/10/2026) — logo depois da seção
 // acima: tickets concluídos no mês que NÃO tinham desenvolvedor alocado (resolvidos só pelo time de
 // Atendimento/Auditoria no Movidesk mesmo), somados por responsável do Movidesk, por cliente e por
@@ -8084,6 +8159,13 @@ async function gerarReportPptx(data, mesN, formato, semanaN){
   const porSemanaAlocado = buildReportDevAlocadoPorSemana(devAlocadoRows);
   addReportDevAlocadoIntroSlide(pptx, mesLabel, porDevAlocado, porSemanaAlocado);
   addReportDevAlocadoListaSlides(pptx, mesLabel, devAlocadoRows, data);
+
+  // Pedido em 01/10/2026 (2ª rodada): o "lado oposto" da mesma seção — demandas com Desenvolvedor Alocado
+  // que estavam na planning deste mês (prazo no mês) e ainda não foram entregues.
+  const devAlocadoNaoEntregueRows = buildReportDevAlocadoNaoEntregueRows(merged, mesN);
+  const porDevNaoEntregue = buildReportDevAlocadoPorDev(devAlocadoNaoEntregueRows, data);
+  addReportDevAlocadoNaoEntregueIntroSlide(pptx, mesLabel, porDevNaoEntregue);
+  addReportDevAlocadoNaoEntregueListaSlides(pptx, mesLabel, devAlocadoNaoEntregueRows, data);
 
   const semDevAlocadoRows = buildReportSemDevAlocadoRows(merged, mesN);
   addReportSemDevAlocadoSlide(pptx, mesLabel, semDevAlocadoRows);
