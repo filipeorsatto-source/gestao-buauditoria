@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-10-09.1';
+const APP_BUILD_ID = '2026-10-13.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -11952,7 +11952,9 @@ function EntregasPrazoPage({data}){
 /* ---------------------------------------------------------------
    CSAT (Tech / Atendimento / Produto) — matrizes pessoa x mês e cliente x mês
 --------------------------------------------------------------- */
-function CsatMatrixTable({title, desc, rows, avgFn, emptyText}){
+// totalRow (opcional, pedido em 13/10/2026 pra "Média dias ticket em aberto"): linha extra no fim da
+// tabela com o valor GERAL de cada mês, sem a quebra por pessoa/cliente — {label, valueFn(mesN)}.
+function CsatMatrixTable({title, desc, rows, avgFn, emptyText, totalRow}){
   return (
     <div className="card" style={{marginBottom:16}}>
       <div className="section-block-head" style={{padding:'18px 22px 0'}}>
@@ -11982,6 +11984,15 @@ function CsatMatrixTable({title, desc, rows, avgFn, emptyText}){
                   })}
                 </tr>
               ))}
+              {totalRow && (
+                <tr style={{background:'var(--accent-soft)'}}>
+                  <td style={{textAlign:'left', paddingLeft:12, fontWeight:700}}>{totalRow.label}</td>
+                  {MESES_PLANNING.map(m => {
+                    const v = totalRow.valueFn(m.n);
+                    return <td key={m.n} style={{fontWeight:700}}>{(v === null || v === undefined) ? '—' : v.toLocaleString('pt-BR', {maximumFractionDigits:1})}</td>;
+                  })}
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -12154,6 +12165,10 @@ function DiasTicketAbertoPage({data}){
     DEMANDAS_CLIENTES_ORDEM.filter(c => merged.some(m => m.cliente === c)).map(c => ({key:c, label:c, match:(m)=>m.cliente===c, base: merged})),
   [merged]);
 
+  // Linha "Total" das duas tabelas abaixo: a média geral de cada mês (mesAvg), sem a quebra por pessoa ou
+  // cliente — mesma população e mesma fórmula da meta de Atendimento (e do número do cabeçalho acima).
+  const totalGeralRow = {label: 'Total (média geral)', valueFn: n => mesAvg[n]};
+
   function avgForRowMes(row, mesN){
     const source = row.base || merged;
     const dias = source
@@ -12186,6 +12201,7 @@ function DiasTicketAbertoPage({data}){
         desc="Colunas = mês civil (situação no fim de cada mês). Linhas = Responsável (Movidesk)."
         rows={personRows}
         avgFn={avgForRowMes}
+        totalRow={totalGeralRow}
         emptyText="Nenhum ticket aplicável a esse recorte ainda."
       />
       <CsatMatrixTable
@@ -12193,6 +12209,7 @@ function DiasTicketAbertoPage({data}){
         desc="Colunas = mês civil (situação no fim de cada mês). Linhas = clientes."
         rows={clienteRows}
         avgFn={avgForRowMes}
+        totalRow={totalGeralRow}
         emptyText="Nenhum ticket aplicável a esse recorte ainda."
       />
     </div>
