@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-10-01.2';
+const APP_BUILD_ID = '2026-10-09.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2787,14 +2787,18 @@ function endOfMonth(ano, mesN){
 function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, status, ano, mesN){
   const abertoDate = new Date(abertoEmIso);
   if(isNaN(abertoDate.getTime())) return null;
-  // Considera apenas tickets abertos dentro do próprio ano `ano` — tickets abertos em anos anteriores
-  // não entram nessa média (a partir do pedido do usuário de restringir a métrica aos tickets de 2026).
-  if(abertoDate.getFullYear() !== ano) return null;
-  // Ticket com status terminal (Resolvido/Cancelado/Fechado) mas sem "Concluído em" preenchido é uma
-  // lacuna de dados (comum em cancelamentos, que às vezes não passam pelo mesmo fluxo de resolução no
-  // Movidesk) — nesse caso não sabemos a data real de conclusão, então excluímos o ticket da média em
-  // vez de contá-lo como "ainda aberto" indefinidamente (o que inflaria todo mês desde a abertura dele,
-  // inclusive o mês corrente). Isso é diferente de um ticket genuinamente em aberto.
+  // Revisado em 09/10/2026 pra bater com o racional da planilha de conferência do usuário (colunas M a X
+  // da base do Movidesk): (1) `status` agora é o status BRUTO do Movidesk (x.status, não statusEfetivo) —
+  // tickets hoje "Cancelado" ou "Fechado" ficam FORA da média em qualquer mês, mesmo que tivessem
+  // "Resolvido em" depois do fim daquele mês; (2) saiu a restrição "só tickets abertos no ano corrente":
+  // um ticket aberto em 2025 e ainda sem resolução segue entrando na média (e com a idade real dele);
+  // (3) a idade é em dias CORRIDOS FRACIONADOS (fim do mês − Aberto em, com a hora), não mais arredondada
+  // pra dias de calendário — igual à planilha. Conclusão manual continua valendo (vem em concluidoEmIso).
+  if(status === 'Cancelado' || status === 'Fechado') return null;
+  // Ticket "Resolvido" mas sem "Concluído em" preenchido é uma lacuna de dados — não sabemos a data real
+  // de conclusão, então excluímos o ticket da média em vez de contá-lo como "ainda aberto"
+  // indefinidamente (o que inflaria todo mês desde a abertura dele, inclusive o mês corrente). Isso é
+  // diferente de um ticket genuinamente em aberto.
   if(DEMANDA_STATUS_TERMINAL.includes(status) && !concluidoEmIso) return null;
   // Nunca projeta para o futuro: um mês que ainda nem começou não entra na média, e o mês em curso usa
   // "hoje" como corte em vez do fim do mês (que ainda não aconteceu) — a partir do pedido do usuário de
@@ -2809,7 +2813,7 @@ function diasAbertoNoFimDoMes(abertoEmIso, concluidoEmIso, status, ano, mesN){
     const concluidoDate = new Date(concluidoEmIso.includes('T') ? concluidoEmIso : concluidoEmIso + 'T00:00:00');
     if(!isNaN(concluidoDate.getTime()) && concluidoDate <= corteEfetivo) return null;
   }
-  return daysBetween(abertoEmIso, corteEfetivo);
+  return (corteEfetivo - abertoDate) / 86400000;
 }
 
 // Formata um valor em minutos como "Xh Ymin" (ou só "Ymin" quando < 1h) — usado para exibir o Tempo
@@ -5599,7 +5603,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
     const out = {};
     MONTHS.forEach(m => {
       const dias = scoped
-        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, m.n))
+        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, m.n))
         .filter(v => v !== null);
       out[m.n] = dias.length ? avgOf(dias) : null;
     });
@@ -5826,7 +5830,7 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
       .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && (pessoaProjeto ? !!m.responsavelDesenvolvimentoId : !m.responsavelDesenvolvimentoId));
     const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
-      .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, mesN))
+      .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, mesN))
       .filter(v => v !== null);
     return dias.length ? avgOf(dias) : null;
   }
@@ -12114,7 +12118,7 @@ function DiasTicketAbertoPage({data}){
     const out = {};
     MONTHS.forEach(m => {
       const dias = merged
-        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, m.n))
+        .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, m.n))
         .filter(v => v !== null);
       out[m.n] = dias.length ? avgOf(dias) : null;
     });
@@ -12154,7 +12158,7 @@ function DiasTicketAbertoPage({data}){
     const source = row.base || merged;
     const dias = source
       .filter(row.match)
-      .map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, m.statusEfetivo, CURRENT_YEAR, mesN))
+      .map(m => diasAbertoNoFimDoMes(m.abertoEm, m.concluidoEm, m.status, CURRENT_YEAR, mesN))
       .filter(v => v !== null);
     return dias.length ? avgOf(dias) : null;
   }
@@ -12170,9 +12174,10 @@ function DiasTicketAbertoPage({data}){
           <div className="kpi-hero-value" style={{fontSize:20, color:'#9BA0B8'}}>Sem dados ainda</div>
         )}
         <div className="kpi-hero-formula">
-          Para cada mês, considera os tickets abertos até o fim daquele mês e finalizados só depois dele (ou
-          ainda em aberto) — a contribuição de cada ticket é (fim do mês) − (Aberto em). "Concluído em" vem
-          direto da coluna "Resolvido Em" do Movidesk.
+          Para cada mês, considera os tickets abertos até o fim daquele mês e resolvidos só depois dele (ou
+          ainda em aberto), excluindo os hoje Cancelados ou Fechados — a contribuição de cada ticket é (fim
+          do mês) − (Aberto em), em dias corridos. "Concluído em" vem da coluna "Resolvido Em" do Movidesk
+          (ou da conclusão manual, quando houver). O mês em curso usa "hoje" como corte.
         </div>
       </div>
 
@@ -12525,7 +12530,7 @@ function buildMonthlyDiasAbertoBreakdown(filtered, keyFn){
     const counts = {};
     MONTHS.forEach(mo => {
       const dias = tickets
-        .map(t => diasAbertoNoFimDoMes(t.abertoEm, t.concluidoEm, t.statusEfetivo, CURRENT_YEAR, mo.n))
+        .map(t => diasAbertoNoFimDoMes(t.abertoEm, t.concluidoEm, t.status, CURRENT_YEAR, mo.n))
         .filter(v => v !== null);
       counts[mo.n] = dias.length ? avgOf(dias) : null;
     });
@@ -12586,19 +12591,23 @@ const DEMANDAS_RESUMO_CAMPOS_DATA = [
 // Data Conclusão ou Data Prazo). Quando a métrica é "Média dias aberto", o seletor de data não se
 // aplica — o agrupamento segue sempre a mesma lógica de fim de mês civil da KPI "Média dias ticket
 // em aberto" (diasAbertoNoFimDoMes), por isso os pontos do gráfico passam a ser meses, não semanas.
-function DemandasResumoSection({filtered, devTeam}){
+function DemandasResumoSection({filtered, filteredSemStatus, devTeam}){
   const [metrica, setMetrica] = useState('tickets'); // 'tickets' | 'esforco' | 'dias-aberto'
   const [campoData, setCampoData] = useState('abertoEm'); // 'abertoEm' | 'concluidoEm' | 'prazo'
 
   const isDiasAberto = metrica === 'dias-aberto';
   const valueFn = metrica === 'esforco' ? (m => Number(m.esforco) || 0) : null;
   const metricaLabel = metrica === 'esforco' ? 'Esforço' : isDiasAberto ? 'Média dias aberto' : 'Tickets';
+  // "Média dias aberto" é uma foto de fim de mês: usa a lista SEM o filtro de Status (ver
+  // filteredSemStatus em DemandasPage) — os demais filtros (responsável, classificação, prioridade...)
+  // continuam valendo.
+  const baseDiasAberto = filteredSemStatus || filtered;
 
   const semanas = useMemo(() => {
     if(isDiasAberto){
       return MONTHS.map(m => {
-        const dias = filtered
-          .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.statusEfetivo, CURRENT_YEAR, m.n))
+        const dias = baseDiasAberto
+          .map(x => diasAbertoNoFimDoMes(x.abertoEm, x.concluidoEm, x.status, CURRENT_YEAR, m.n))
           .filter(v => v !== null);
         return { key: m.n, label: m.label, count: dias.length ? avgOf(dias) : 0, semDados: !dias.length };
       });
@@ -12622,25 +12631,25 @@ function DemandasResumoSection({filtered, devTeam}){
       out.push({ key: t, label: weekLabel(new Date(t)), count: buckets[t] || 0 });
     }
     return out;
-  }, [filtered, campoData, metrica]);
+  }, [filtered, baseDiasAberto, campoData, metrica]);
 
   const porSuporte = useMemo(() => {
     const keyFn = m => m.responsavel || 'Sem responsável';
-    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
-  }, [filtered, campoData, metrica]);
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(baseDiasAberto, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
+  }, [filtered, baseDiasAberto, campoData, metrica]);
   const porDev = useMemo(() => {
     const devById = Object.fromEntries(devTeam.map(p => [p.id, p.nome]));
     const keyFn = m => m.responsavelDesenvolvimentoId ? (devById[m.responsavelDesenvolvimentoId] || 'Não atribuído') : 'Não atribuído';
-    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
-  }, [filtered, devTeam, campoData, metrica]);
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(baseDiasAberto, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
+  }, [filtered, baseDiasAberto, devTeam, campoData, metrica]);
   const porClassificacao = useMemo(() => {
     const keyFn = m => m.classificacao || 'Sem classificação';
-    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
-  }, [filtered, campoData, metrica]);
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(baseDiasAberto, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
+  }, [filtered, baseDiasAberto, campoData, metrica]);
   const porCliente = useMemo(() => {
     const keyFn = m => m.cliente || 'Sem cliente';
-    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(filtered, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
-  }, [filtered, campoData, metrica]);
+    return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(baseDiasAberto, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
+  }, [filtered, baseDiasAberto, campoData, metrica]);
 
   const mediaDiasAberto = useMemo(() => avgOf(filtered.map(m => m.diasEmAberto)), [filtered]);
   const diasAbertoUltimoMes = useMemo(() => {
@@ -12695,7 +12704,7 @@ function DemandasResumoSection({filtered, devTeam}){
       <div className="section-block-title" style={{marginBottom:4}}>{metricaLabel} por {isDiasAberto ? 'mês' : 'semana'}</div>
       <div className="section-block-desc" style={{marginBottom:12}}>
         {isDiasAberto
-          ? 'Segue a mesma lógica de agrupamento da meta "Média dias ticket em aberto": para cada mês civil, considera os tickets (dentre os filtrados acima) abertos até o fim daquele mês e finalizados só depois dele (ou ainda em aberto), e só tickets abertos em ' + CURRENT_YEAR + '.'
+          ? 'Segue a mesma lógica da meta "Média dias ticket em aberto": para cada mês civil, considera os tickets abertos até o fim daquele mês e resolvidos só depois dele (ou ainda em aberto), sem os Cancelados/Fechados. A idade de cada ticket é (fim do mês) − (Aberto em), em dias corridos. O filtro de Status acima não se aplica a esta métrica (os demais filtros sim).'
           : <>Considera os tickets que respeitam os filtros acima, pela {(DEMANDAS_RESUMO_CAMPOS_DATA.find(c => c.key === campoData) || DEMANDAS_RESUMO_CAMPOS_DATA[0]).descLabel} (nº {filtered.length}).</>}
       </div>
       <WeeklyTicketsChart weeks={semanas} metricaLabel={metricaLabel} unitLabel={isDiasAberto ? 'Mês: ' : undefined}/>
@@ -13234,6 +13243,25 @@ function DemandasPage({data, actions}){
     new Set(statusOptions.filter(s => !DEMANDA_STATUS_TERMINAL.includes(s))),
   [statusOptions]);
 
+  // Todos os filtros EXCETO o de Status. Usado pela métrica "Média dias aberto" do resumo: ela é uma
+  // "foto" de cada fim de mês (precisa enxergar tickets que estavam abertos naquela época e hoje já estão
+  // Resolvidos), então não faz sentido restringir pelo status ATUAL — o filtro padrão "ocultar concluídos"
+  // tirava justamente esses tickets e deixava os meses passados quase vazios/incoerentes (09/10/2026).
+  const filteredSemStatus = useMemo(() => merged.filter(m => {
+    if(!demandaFiltroMatch(respFilter, m.responsavel)) return false;
+    if(mesFinalizacaoFilter.length){
+      if(!m.concluidoEm) return false;
+      const mesConclusao = Number(m.concluidoEm.split('-')[1]);
+      if(!mesFinalizacaoFilter.map(Number).includes(mesConclusao)) return false;
+    }
+    if(mesPlanningFilter.length && !mesPlanningFilter.map(String).includes(String(m.mesPlanning))) return false;
+    if(!demandaFiltroMatch(tipoFilter, m.tipo)) return false;
+    if(!demandaFiltroMatch(classificacaoFilter, m.classificacao)) return false;
+    if(!demandaFiltroMatch(respDevFilter, m.responsavelDesenvolvimentoId)) return false;
+    if(!demandaFiltroMatch(prioridadeFilter, m.prioridade)) return false;
+    return true;
+  }), [merged, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter]);
+
   const filtered = useMemo(() => merged.filter(m => {
     if(!statusFilter.has(m.status)) return false;
     if(!demandaFiltroMatch(respFilter, m.responsavel)) return false;
@@ -13468,7 +13496,7 @@ function DemandasPage({data, actions}){
         </div>
       </div>
 
-      <DemandasResumoSection filtered={filtered} devTeam={devTeam}/>
+      <DemandasResumoSection filtered={filtered} filteredSemStatus={filteredSemStatus} devTeam={devTeam}/>
 
       {clientesComDados.length === 0 ? (
         <div className="card"><EmptyState icon={IconClipboard} title="Nenhuma demanda encontrada"
