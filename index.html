@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-10-13.1';
+const APP_BUILD_ID = '2026-10-13.2';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -2738,6 +2738,13 @@ const DEMANDA_PRIORIDADE_OPTIONS = ['Despriorizado','P0','P1','P2'];
 // Opções de Status e Urgência oferecidas ao criar/editar um ticket manual (fora do Movidesk) — um
 // subconjunto curado dos valores reais que aparecem na base sincronizada (DEMANDA_STATUS_COLORS tem
 // mais variações específicas do Movidesk que não fazem sentido escolher manualmente aqui).
+// Pedido em 13/10/2026: a meta 'Média dias ticket em aberto' desconsidera tickets que, no status atual,
+// estão parados esperando o cliente (o relógio corre por um motivo fora do controle do Atendimento).
+const DIAS_ABERTO_STATUS_EXCLUIDOS = ['Aguardando retorno do cliente', 'Em Desenvolvimento - Cliente'];
+function statusExcluidoDiasAberto(status){
+  const s = String(status || '').trim().toLowerCase();
+  return DIAS_ABERTO_STATUS_EXCLUIDOS.some(x => x.toLowerCase() === s);
+}
 const DEMANDA_STATUS_MANUAL_OPTIONS = ['Em aberto', 'Em execução', 'Aguardando retorno do cliente', 'Em Análise Técnica', 'Resolvido', 'Cancelado', 'Fechado'];
 const DEMANDA_URGENCIA_OPTIONS = ['Baixa', 'Média', 'Alta', 'Urgente'];
 
@@ -5598,6 +5605,7 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
       .filter(m => m.prioridade !== 'Despriorizado')
       .filter(m => !m.blocked)
+      .filter(m => !statusExcluidoDiasAberto(m.status))
       .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && (pessoaProjeto ? !!m.responsavelDesenvolvimentoId : !m.responsavelDesenvolvimentoId));
     const scoped = merged.filter(m => pessoaId ? ticketPertenceAPessoa(m, pessoaFiltro) : (!clienteNomesFilter || clienteNomesFilter.has(m.cliente)));
     const out = {};
@@ -5827,6 +5835,7 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
       .filter(m => m.prioridade !== 'Despriorizado')
       .filter(m => !m.blocked)
+      .filter(m => !statusExcluidoDiasAberto(m.status))
       .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento') && (pessoaProjeto ? !!m.responsavelDesenvolvimentoId : !m.responsavelDesenvolvimentoId));
     const subset = merged.filter(x => x.cliente === clienteNome && (!pessoaId || ticketPertenceAPessoa(x, pessoaFiltro)));
     const dias = subset
@@ -12114,6 +12123,7 @@ function DiasTicketAbertoPage({data}){
   const baseAtendimento = useMemo(() => buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
     .filter(m => m.prioridade !== 'Despriorizado')
     .filter(m => !m.blocked)
+    .filter(m => !statusExcluidoDiasAberto(m.status))
     .filter(m => m.classificacao && m.classificacao.startsWith('Atendimento')), [data.demandasCustom, data.demandasBase, data.demandasManuais]);
   const merged = useMemo(() => baseAtendimento.filter(m => !m.responsavelDesenvolvimentoId), [baseAtendimento]);
   // Pedido em 04/09/2026: pessoa de Atendimento com o label "Projeto" (ver ATENDIMENTO_LABEL_OPTIONS)
@@ -12192,7 +12202,8 @@ function DiasTicketAbertoPage({data}){
           Para cada mês, considera os tickets abertos até o fim daquele mês e resolvidos só depois dele (ou
           ainda em aberto), excluindo os hoje Cancelados ou Fechados — a contribuição de cada ticket é (fim
           do mês) − (Aberto em), em dias corridos. "Concluído em" vem da coluna "Resolvido Em" do Movidesk
-          (ou da conclusão manual, quando houver). O mês em curso usa "hoje" como corte.
+          (ou da conclusão manual, quando houver). O mês em curso usa "hoje" como corte. Tickets hoje com status
+          "Aguardando retorno do cliente" ou "Em Desenvolvimento - Cliente" ficam de fora.
         </div>
       </div>
 
@@ -13246,6 +13257,7 @@ function DemandasPage({data, actions}){
   const [tipoFilter, setTipoFilter] = useState([]);
   const [classificacaoFilter, setClassificacaoFilter] = useState([]);
   const [respDevFilter, setRespDevFilter] = useState([]);
+  const [excluirStatusMeta, setExcluirStatusMeta] = useState(false);
   const [prioridadeFilter, setPrioridadeFilter] = useState([]);
 
   const toggleStatus = (s) => {
@@ -13265,6 +13277,7 @@ function DemandasPage({data, actions}){
   // Resolvidos), então não faz sentido restringir pelo status ATUAL — o filtro padrão "ocultar concluídos"
   // tirava justamente esses tickets e deixava os meses passados quase vazios/incoerentes (09/10/2026).
   const filteredSemStatus = useMemo(() => merged.filter(m => {
+    if(excluirStatusMeta && statusExcluidoDiasAberto(m.status)) return false;
     if(!demandaFiltroMatch(respFilter, m.responsavel)) return false;
     if(mesFinalizacaoFilter.length){
       if(!m.concluidoEm) return false;
@@ -13277,10 +13290,11 @@ function DemandasPage({data, actions}){
     if(!demandaFiltroMatch(respDevFilter, m.responsavelDesenvolvimentoId)) return false;
     if(!demandaFiltroMatch(prioridadeFilter, m.prioridade)) return false;
     return true;
-  }), [merged, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter]);
+  }), [merged, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter, excluirStatusMeta]);
 
   const filtered = useMemo(() => merged.filter(m => {
     if(!statusFilter.has(m.status)) return false;
+    if(excluirStatusMeta && statusExcluidoDiasAberto(m.status)) return false;
     if(!demandaFiltroMatch(respFilter, m.responsavel)) return false;
     if(mesFinalizacaoFilter.length){
       if(!m.concluidoEm) return false;
@@ -13293,11 +13307,11 @@ function DemandasPage({data, actions}){
     if(!demandaFiltroMatch(respDevFilter, m.responsavelDesenvolvimentoId)) return false;
     if(!demandaFiltroMatch(prioridadeFilter, m.prioridade)) return false;
     return true;
-  }), [merged, statusFilter, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter]);
+  }), [merged, statusFilter, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter, excluirStatusMeta]);
 
-  const anyExtraFilterActive = mesFinalizacaoFilter.length || mesPlanningFilter.length || tipoFilter.length || classificacaoFilter.length || respDevFilter.length || prioridadeFilter.length;
+  const anyExtraFilterActive = (excluirStatusMeta ? 1 : 0) || mesFinalizacaoFilter.length || mesPlanningFilter.length || tipoFilter.length || classificacaoFilter.length || respDevFilter.length || prioridadeFilter.length;
   const clearExtraFilters = () => {
-    setMesFinalizacaoFilter([]); setMesPlanningFilter([]); setTipoFilter([]); setClassificacaoFilter([]); setRespDevFilter([]); setPrioridadeFilter([]);
+    setExcluirStatusMeta(false); setMesFinalizacaoFilter([]); setMesPlanningFilter([]); setTipoFilter([]); setClassificacaoFilter([]); setRespDevFilter([]); setPrioridadeFilter([]);
   };
 
   const byCliente = useMemo(() => {
@@ -13502,13 +13516,17 @@ function DemandasPage({data, actions}){
           <button
             type="button"
             className="btn btn-ghost btn-sm"
-            title="Aplica de uma vez os filtros usados no cálculo da meta 'Média dias ticket em aberto': Classificação = Atendimento (qualquer tipo), Prioridade = P0/P1/P2/Em branco (exclui Despriorizado), Responsável Desenvolvimento = Em branco."
+            title="Aplica de uma vez os filtros usados no cálculo da meta 'Média dias ticket em aberto': Classificação = Atendimento (qualquer tipo), Prioridade = P0/P1/P2/Em branco (exclui Despriorizado), Responsável Desenvolvimento = Em branco, e desconsidera tickets com status Aguardando retorno do cliente / Em Desenvolvimento - Cliente."
             onClick={() => {
               setClassificacaoFilter(['Atendimento Bug', 'Atendimento Dúvida', 'Atendimento Personalização', 'Atendimento Regra']);
               setPrioridadeFilter(['P0', 'P1', 'P2', DEMANDAS_FILTRO_BLANK_ID]);
               setRespDevFilter([DEMANDAS_FILTRO_BLANK_ID]);
+              setExcluirStatusMeta(true);
             }}
           >Meta Atendimento</button>
+          {excluirStatusMeta && <button type="button" className="btn btn-ghost btn-sm"
+            title="Tickets com status 'Aguardando retorno do cliente' e 'Em Desenvolvimento - Cliente' estão fora da lista e da métrica de média de dias em aberto. Clique para voltar a incluí-los."
+            onClick={() => setExcluirStatusMeta(false)}>✕ Sem status aguardando cliente</button>}
           {anyExtraFilterActive > 0 && <button className="btn btn-ghost btn-sm" onClick={clearExtraFilters}>Limpar</button>}
         </div>
       </div>
