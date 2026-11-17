@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-10-13.2';
+const APP_BUILD_ID = '2026-11-17.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -1040,7 +1040,9 @@ function transformMovideskRows(rows){
     const responsavel = row[7];
     const abertoEmRaw = row[8];
     if(numero === undefined || numero === null || numero === '' || !clienteRaw || !status || !abertoEmRaw){ skippedMissingFields++; continue; }
-    const firstClient = String(clienteRaw).split(',')[0].trim();
+    // Pedido em 17/11/2026: se QUALQUER parte do texto de cliente citar "AC Camargo" (ex.: "Interno AC
+    // Camargo"), o ticket é do AC Camargo — antes caía em "Interno" por vir de uma organização Rivio.
+    const firstClient = /ac\s*camargo/.test(normalizeClientName(clienteRaw)) ? 'AC Camargo' : String(clienteRaw).split(',')[0].trim();
     // Casa primeiro pelo nome exato; se não bater, tenta pelo nome normalizado (sem acento, sem
     // diferenças de espaçamento/maiúsculas) — cobre pequenas variações de grafia na exportação do
     // Movidesk sem precisar atualizar o mapeamento a cada mudança cosmética.
@@ -1300,6 +1302,7 @@ const MONTH_ABBR_TO_N = {
 const REALIZADO_SHEET_TAB = {
   'contas-finalizadas': 'Contas Finalizadas',
   'contas-automatico': 'Contas Automáticas',
+  'valor-finalizado': 'Valor Finalizado',
   'penetracao-regras': 'Penetração Regras',
   'efetividade-regras': 'Efetividade Regras',
   'subfaturamento': 'Subfaturamento',
@@ -3017,7 +3020,10 @@ function buildDemandasMergedUncached(customMap, baseRows, manualRows){
       abertoEm: o.d,
       diasEmAberto: dias,
       tempoPrimeiraResposta: (o.tr === undefined || o.tr === null) ? null : o.tr, // minutos, vem direto do Movidesk
-      csat: c.csatSheet || o.csat || '', // c.csatSheet vem da sincronização SEPARADA da planilha de CSAT (ver importCsatAvaliacao) e tem prioridade; o.csat vem direto da base do Movidesk quando a própria planilha do Movidesk tiver uma coluna "CSAT" (ex.: preenchida com VLOOKUP/PROCV na planilha) — ver transformMovideskRows. Esse segundo caminho evita depender de uma gravação separada em demandasCustom.
+      // Pedido em 17/11/2026: o CSAT pode ser atribuído manualmente na aba Demandas (c.csatManual) — tem
+      // prioridade sobre csatSheet (sincronização separada) e sobre o.csat (coluna CSAT do Movidesk).
+      csat: (c.csatManual !== undefined && c.csatManual !== null && c.csatManual !== '') ? Number(c.csatManual) : (c.csatSheet || o.csat || ''),
+      csatEhManual: (c.csatManual !== undefined && c.csatManual !== null && c.csatManual !== ''),
       classificacao: c.classificacao || '',
       tipo: c.tipo || '',
       responsavelDesenvolvimentoId: c.responsavelDesenvolvimentoId || '',
@@ -3099,6 +3105,7 @@ const INDICADORES = [
   {slug:'ticket-medio', titulo:'Ticket Médio', area:'Deployment', descricao:'Receita Líquida / número de clientes (7). Mesma fonte de dados de "Margem Bruta & Ticket Médio" — veja o detalhamento mês a mês na aba de Margem Bruta, dentro de Acompanhamento de Metas.', unidade:'R$', fonte:'https://docs.google.com/spreadsheets/d/1NyWHRONncZluzG_bHZXo8flc-6g83kUcupSg1vXOSMU/edit?usp=sharing', metaOnly:true},
   {slug:'upsell-score', titulo:'Relacionamento', area:'Deployment', descricao:'Percepção de relacionamento com o cliente, medida pelo Termômetro CRM e pela realização dos ritos de acompanhamento.', unidade:'Absoluto', fonte:'CRM + Dash Auditoria'},
   {slug:'contas-finalizadas', titulo:'Contas Finalizadas', area:'Deployment', descricao:'Número total de contas finalizadas.', unidade:'Absoluto', fonte:'https://drive.google.com/drive/folders/1DWX_WwDim66gze8egbpzkcsq0iN0-url'},
+  {slug:'valor-finalizado', titulo:'Valor Finalizado', area:'Deployment', descricao:'Valor (R$) das contas finalizadas no mês, por cliente.', unidade:'R$', fonte:'Sincronizado da aba "Valor Finalizado" da planilha Gestão Metas.'},
   {slug:'subfaturamento', titulo:'Subfaturamento', area:'Auditoria', descricao:'Percentual de subfaturamento identificado e corrigido pela auditoria.', unidade:'%', fonte:'Preenchimento manual por cliente e mês.'},
   // Renomeado de "% Contas Automático" para "Contas Automático" (pedido em 02/09/2026, v2) — o KPI guarda
   // valores ABSOLUTOS (quantidade de contas), não percentual, então o "%" no nome era enganoso (mesmo
@@ -3139,7 +3146,7 @@ const INDICADORES_BY_SLUG = Object.fromEntries(INDICADORES.map(ind => [ind.slug,
 // exibidas depois de todas as listadas, em ordem alfabética.
 const GESTAO_METAS_ORDEM = [
   'nps', 'margem-bruta',
-  'upsell-score', 'contas-finalizadas', 'ticket-medio',
+  'upsell-score', 'contas-finalizadas', 'valor-finalizado', 'ticket-medio',
   'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico',
   'dias-ticket-aberto', 'csat-atendimento', 'sla-primeira-resposta',
   'entregas-prazo', 'csat-tech', 'tempo-processamento',
@@ -3169,7 +3176,7 @@ function metaArea(goal){
 // Metas cujo Budget mensal é definido direto na tela do próprio indicador (Acompanhamento de Metas),
 // e não mais no card/modal de Gestão de Metas. "ticket-medio" é a exceção de local: o budget dela é
 // definido por cliente na aba Margem Bruta (não tem tela própria em Acompanhamento de Metas).
-const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico', 'ticket-medio', 'tempo-processamento', 'cobertura-produto'];
+const META_BUDGET_EXTERNO_SLUGS = ['contas-finalizadas', 'valor-finalizado', 'penetracao-regras', 'efetividade-regras', 'subfaturamento', 'contas-automatico', 'ticket-medio', 'tempo-processamento', 'cobertura-produto'];
 
 // Metas em que "quanto menor, melhor" (Realizado abaixo do Budget é bom) — o oposto da maioria das
 // metas, em que Realizado acima do Budget é bom. Usado só para decidir a cor (verde/vermelho) na
@@ -3735,6 +3742,8 @@ function buildSeedFinanceiro(){
     subfaturamentoBudget: {},
     contasAutomatico: {},
     contasAutomaticoBudget: {},
+    valorFinalizado: {},
+    valorFinalizadoBudget: {},
   };
 }
 
@@ -3881,7 +3890,7 @@ function runMigrations(parsed){
       }
       // migrate: ensure Subfaturamento / % Contas Automático fields exist (metas criadas em Ago/2026)
       if(parsed.financeiro){
-        ['subfaturamento','subfaturamentoBudget','contasAutomatico','contasAutomaticoBudget'].forEach(k => {
+        ['subfaturamento','subfaturamentoBudget','contasAutomatico','contasAutomaticoBudget','valorFinalizado','valorFinalizadoBudget'].forEach(k => {
           if(!parsed.financeiro[k]){ parsed.financeiro[k] = {}; changed = true; }
         });
       }
@@ -5488,15 +5497,15 @@ function getMetaRealizadoByMonth(slug, data, clienteNomesFilter, pessoaId){
     return out;
   }
 
-  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
-    const dataKey = slug === 'subfaturamento' ? 'subfaturamento' : 'contasAutomatico';
+  if(slug === 'subfaturamento' || slug === 'contas-automatico' || slug === 'valor-finalizado'){
+    const dataKey = slug === 'subfaturamento' ? 'subfaturamento' : (slug === 'valor-finalizado' ? 'valorFinalizado' : 'contasAutomatico');
     const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo']
       .filter(c => !clienteNomesFilter || clienteNomesFilter.has(c));
     const yearData = (data.financeiro && data.financeiro[dataKey] && data.financeiro[dataKey][CURRENT_YEAR]) || {};
     // % Contas Automático agora guarda valores absolutos (quantidade de contas) — o totalizador deve
     // ser a SOMA entre clientes, não a média. Subfaturamento continua sendo percentual, então mantém a
     // média entre clientes.
-    const isSoma = slug === 'contas-automatico';
+    const isSoma = slug !== 'subfaturamento';
     const out = {};
     MONTHS.forEach(m => {
       const vals = clientNames.map(c => (yearData[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
@@ -5705,14 +5714,14 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
     return out;
   }
 
-  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
-    const budgetKey = slug === 'subfaturamento' ? 'subfaturamentoBudget' : 'contasAutomaticoBudget';
+  if(slug === 'subfaturamento' || slug === 'contas-automatico' || slug === 'valor-finalizado'){
+    const budgetKey = slug === 'subfaturamento' ? 'subfaturamentoBudget' : (slug === 'valor-finalizado' ? 'valorFinalizadoBudget' : 'contasAutomaticoBudget');
     const clientNames = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo']
       .filter(c => !clienteNomesFilter || clienteNomesFilter.has(c));
     const yearData = (data.financeiro && data.financeiro[budgetKey] && data.financeiro[budgetKey][CURRENT_YEAR]) || {};
     // Mesma lógica do Realizado acima: Budget de % Contas Automático também soma entre clientes (é uma
     // meta de quantidade absoluta), Budget de Subfaturamento continua sendo a média (percentual).
-    const isSoma = slug === 'contas-automatico';
+    const isSoma = slug !== 'subfaturamento';
     const out = {};
     MONTHS.forEach(m => {
       const vals = clientNames.map(c => (yearData[c]||{})[m.n]).filter(v => v !== undefined && v !== null && v !== '').map(Number);
@@ -5767,7 +5776,7 @@ function getMetaBudgetOverrideByMonth(slug, data, clienteNomesFilter){
 const META_GRANULAR_CLIENTE_SLUGS = [
   'upsell-score','contas-finalizadas','penetracao-regras','efetividade-regras',
   'cobertura-dados','entregas-prazo','csat-tech','csat-atendimento','csat-produto',
-  'dias-ticket-aberto','nps','subfaturamento','contas-automatico','sla-primeira-resposta','ticket-medio',
+  'dias-ticket-aberto','nps','subfaturamento','contas-automatico','valor-finalizado','sla-primeira-resposta','ticket-medio',
 ];
 
 // Realizado de um indicador, para um cliente e mês específicos. Retorna null se não aplicável.
@@ -5782,8 +5791,8 @@ function getMetaRealizadoPorClienteMes(slug, data, clienteId, clienteNome, mesN,
     const v = (yearData[clienteNome]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
   }
-  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
-    const dataKey = slug === 'subfaturamento' ? 'subfaturamento' : 'contasAutomatico';
+  if(slug === 'subfaturamento' || slug === 'contas-automatico' || slug === 'valor-finalizado'){
+    const dataKey = slug === 'subfaturamento' ? 'subfaturamento' : (slug === 'valor-finalizado' ? 'valorFinalizado' : 'contasAutomatico');
     const yearData = (data.financeiro && data.financeiro[dataKey] && data.financeiro[dataKey][CURRENT_YEAR]) || {};
     const v = (yearData[clienteNome]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
@@ -5872,8 +5881,8 @@ function getMetaBudgetPorClienteMes(slug, data, clienteId, clienteNome, mesN){
     const v = (yearData[clienteNome]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
   }
-  if(slug === 'subfaturamento' || slug === 'contas-automatico'){
-    const budgetKey = slug === 'subfaturamento' ? 'subfaturamentoBudget' : 'contasAutomaticoBudget';
+  if(slug === 'subfaturamento' || slug === 'contas-automatico' || slug === 'valor-finalizado'){
+    const budgetKey = slug === 'subfaturamento' ? 'subfaturamentoBudget' : (slug === 'valor-finalizado' ? 'valorFinalizadoBudget' : 'contasAutomaticoBudget');
     const yearData = (data.financeiro && data.financeiro[budgetKey] && data.financeiro[budgetKey][CURRENT_YEAR]) || {};
     const v = (yearData[clienteNome]||{})[mesN];
     return (v === undefined || v === null || v === '') ? null : Number(v);
@@ -5915,7 +5924,7 @@ function GoalClienteMesTable({goal, data, clienteNomesFilter, pessoaId}){
 
   const isExterno = META_BUDGET_EXTERNO_SLUGS.includes(goal.slug);
   const flatBudgetByMonth = isExterno ? getMetaBudgetOverrideByMonth(goal.slug, data, clienteNomesFilter) : (goal.budgets[CURRENT_YEAR] || {});
-  const budgetIsPerCliente = ['contas-finalizadas','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'].includes(goal.slug);
+  const budgetIsPerCliente = ['contas-finalizadas','valor-finalizado','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'].includes(goal.slug);
 
   return (
     <div style={{marginTop:14}}>
@@ -6975,8 +6984,9 @@ function fmtMetaValorReportArredondado(v, unidade){
 // 'contas-finalizadas' (único citado pelo usuário) e só dentro do Report Mensal — não mexe no budget
 // "oficial" mostrado na tela de Gestão de Metas nem no gerador do Planning (que usa outro caminho de
 // dados, getClienteBudgetComFallback, propositalmente não tocado aqui).
+const BUDGET_LINEAR_REPORT_SLUGS = ['contas-finalizadas', 'contas-automatico', 'valor-finalizado'];
 function linearizarBudgetContasFinalizadasReport(budgetCheio, slug, mesN){
-  if(slug !== 'contas-finalizadas') return budgetCheio;
+  if(!BUDGET_LINEAR_REPORT_SLUGS.includes(slug)) return budgetCheio;
   if(budgetCheio === null || budgetCheio === undefined || budgetCheio === '') return budgetCheio;
   const hoje = new Date();
   const mesAtual = hoje.getMonth() + 1;
@@ -7043,7 +7053,7 @@ function buildReportClienteBreakdown(data, mesN, areaKpiSlugs){
     });
   });
   const clientesCols = clientesTodos.filter(c => nomesComDados.has(c.nome));
-  const budgetIsPerClienteSlugs = ['contas-finalizadas','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'];
+  const budgetIsPerClienteSlugs = ['contas-finalizadas','valor-finalizado','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'];
   const rows = clientesCols.map(c => {
     const valores = {};
     granularSlugs.forEach(slug => {
@@ -8268,7 +8278,7 @@ function getAreaResponsavelGeralPlanning(data, area){
 // (buildReportClienteBreakdown): usa o budget nativo por cliente quando existir (Contas Finalizadas,
 // Penetração/Efetividade Regras, Subfaturamento, Contas Automático, Ticket Médio); senão cai pro budget
 // único do mês (goal.budgets ou getMetaBudgetOverrideByMonth, dependendo da meta).
-const PLANNING_BUDGET_POR_CLIENTE_SLUGS = ['contas-finalizadas','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'];
+const PLANNING_BUDGET_POR_CLIENTE_SLUGS = ['contas-finalizadas','valor-finalizado','penetracao-regras','efetividade-regras','subfaturamento','contas-automatico','ticket-medio'];
 function getClienteBudgetComFallback(data, slug, clienteId, clienteNome, mesN){
   const goal = getMetaBySlug(data, slug);
   let budget = PLANNING_BUDGET_POR_CLIENTE_SLUGS.includes(slug) ? getMetaBudgetPorClienteMes(slug, data, clienteId, clienteNome, mesN) : null;
@@ -9440,7 +9450,8 @@ async function gerarReportStaffDocx(data, mesN, colId){
   // (não existe hoje nenhum dado de "inclusão" separado) — o de "Exclusão" foi descartado por não ter
   // fonte de dados no app.
   const blocoInclusao = buildStaffOverviewBlockChildren(data, 'Inclusão (dados de Subfaturamento) — mês a mês', 'subfaturamento', (v) => fmtPercent(v, 1), 'media');
-  children.push(...blocoContasFinalizadas, ...blocoContasAutomatico, ...blocoInclusao);
+  const blocoValorFinalizado = buildStaffOverviewBlockChildren(data, 'Valor Finalizado (R$) — mês a mês', 'valorFinalizado', (v) => Math.round(v).toLocaleString('pt-BR'));
+  children.push(...blocoContasFinalizadas, ...blocoValorFinalizado, ...blocoContasAutomatico, ...blocoInclusao);
 
   // ---- Folha 3: Financials ----
   children.push(staffH1('II. Financials', true));
@@ -10768,6 +10779,19 @@ function ContasAutomaticoPage({financeiro, actions, sync}){
     setRealizado={actions.setContasAutomaticoRealizado} setBudget={actions.setContasAutomaticoBudget}
     sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Contas Automáticas" da planilha Gestão Metas — valores absolutos (quantidade de contas), não percentual.'
     unidade="Absoluto" totalMode="soma"/>;
+}
+
+function ValorFinalizadoPage({financeiro, actions, sync}){
+  const handleSync = async () => {
+    const token = await getGoogleDriveAccessToken();
+    const values = await fetchSheetTabValues(token, REALIZADO_SHEET_TAB['valor-finalizado']);
+    const porCliente = parseClienteMesSheet(values);
+    actions.importValorFinalizadoRealizado(porCliente);
+  };
+  return <PercentClientGoalPage titulo="Valor Finalizado" financeiro={financeiro} dataKey="valorFinalizado" budgetKey="valorFinalizadoBudget"
+    setRealizado={actions.setValorFinalizadoRealizado} setBudget={actions.setValorFinalizadoBudget}
+    sync={sync} onSync={handleSync} descRealizado='Dados sincronizados da aba "Valor Finalizado" da planilha Gestão Metas — valor em R$ das contas finalizadas.'
+    unidade="R$" totalMode="soma"/>;
 }
 
 // Reescrito em 04/09/2026: o Realizado passou a ter granularidade por cliente dentro de cada categoria
@@ -12322,6 +12346,9 @@ function TrackingPage({slug, financeiro, upsellScore, clientes, actions, data}){
   if(slug === 'subfaturamento'){
     return <SubfaturamentoPage financeiro={financeiro} actions={actions} sync={data.subfaturamentoSync}/>;
   }
+  if(slug === 'valor-finalizado'){
+    return <ValorFinalizadoPage financeiro={financeiro} actions={actions} sync={data.valorFinalizadoSync}/>;
+  }
   if(slug === 'contas-automatico'){
     return <ContasAutomaticoPage financeiro={financeiro} actions={actions} sync={data.contasAutomaticoSync}/>;
   }
@@ -13254,6 +13281,7 @@ function DemandasPage({data, actions}){
   const [respFilter, setRespFilter] = useState([]);
   const [mesFinalizacaoFilter, setMesFinalizacaoFilter] = useState([]);
   const [mesPlanningFilter, setMesPlanningFilter] = useState([]);
+  const [clienteFilter, setClienteFilter] = useState([]);
   const [tipoFilter, setTipoFilter] = useState([]);
   const [classificacaoFilter, setClassificacaoFilter] = useState([]);
   const [respDevFilter, setRespDevFilter] = useState([]);
@@ -13285,12 +13313,13 @@ function DemandasPage({data, actions}){
       if(!mesFinalizacaoFilter.map(Number).includes(mesConclusao)) return false;
     }
     if(mesPlanningFilter.length && !mesPlanningFilter.map(String).includes(String(m.mesPlanning))) return false;
+    if(!demandaFiltroMatch(clienteFilter, m.cliente)) return false;
     if(!demandaFiltroMatch(tipoFilter, m.tipo)) return false;
     if(!demandaFiltroMatch(classificacaoFilter, m.classificacao)) return false;
     if(!demandaFiltroMatch(respDevFilter, m.responsavelDesenvolvimentoId)) return false;
     if(!demandaFiltroMatch(prioridadeFilter, m.prioridade)) return false;
     return true;
-  }), [merged, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter, excluirStatusMeta]);
+  }), [merged, respFilter, mesFinalizacaoFilter, mesPlanningFilter, clienteFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter, excluirStatusMeta]);
 
   const filtered = useMemo(() => merged.filter(m => {
     if(!statusFilter.has(m.status)) return false;
@@ -13302,16 +13331,17 @@ function DemandasPage({data, actions}){
       if(!mesFinalizacaoFilter.map(Number).includes(mesConclusao)) return false;
     }
     if(mesPlanningFilter.length && !mesPlanningFilter.map(String).includes(String(m.mesPlanning))) return false;
+    if(!demandaFiltroMatch(clienteFilter, m.cliente)) return false;
     if(!demandaFiltroMatch(tipoFilter, m.tipo)) return false;
     if(!demandaFiltroMatch(classificacaoFilter, m.classificacao)) return false;
     if(!demandaFiltroMatch(respDevFilter, m.responsavelDesenvolvimentoId)) return false;
     if(!demandaFiltroMatch(prioridadeFilter, m.prioridade)) return false;
     return true;
-  }), [merged, statusFilter, respFilter, mesFinalizacaoFilter, mesPlanningFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter, excluirStatusMeta]);
+  }), [merged, statusFilter, respFilter, mesFinalizacaoFilter, mesPlanningFilter, clienteFilter, tipoFilter, classificacaoFilter, respDevFilter, prioridadeFilter, excluirStatusMeta]);
 
-  const anyExtraFilterActive = (excluirStatusMeta ? 1 : 0) || mesFinalizacaoFilter.length || mesPlanningFilter.length || tipoFilter.length || classificacaoFilter.length || respDevFilter.length || prioridadeFilter.length;
+  const anyExtraFilterActive = (excluirStatusMeta ? 1 : 0) || mesFinalizacaoFilter.length || mesPlanningFilter.length || clienteFilter.length || tipoFilter.length || classificacaoFilter.length || respDevFilter.length || prioridadeFilter.length;
   const clearExtraFilters = () => {
-    setExcluirStatusMeta(false); setMesFinalizacaoFilter([]); setMesPlanningFilter([]); setTipoFilter([]); setClassificacaoFilter([]); setRespDevFilter([]); setPrioridadeFilter([]);
+    setExcluirStatusMeta(false); setMesFinalizacaoFilter([]); setMesPlanningFilter([]); setClienteFilter([]); setTipoFilter([]); setClassificacaoFilter([]); setRespDevFilter([]); setPrioridadeFilter([]);
   };
 
   const byCliente = useMemo(() => {
@@ -13479,6 +13509,14 @@ function DemandasPage({data, actions}){
               value={mesPlanningFilter}
               onChange={setMesPlanningFilter}
               placeholder="Mês do Prazo"
+            />
+          </div>
+          <div className="filters-bar-ms">
+            <MultiSelect
+              options={withBlankOption([...new Set([...DEMANDAS_CLIENTES_ORDEM, ...merged.map(m => m.cliente).filter(Boolean)])].map(o => ({id:o, label:o})))}
+              value={clienteFilter}
+              onChange={setClienteFilter}
+              placeholder="Cliente"
             />
           </div>
           <div className="filters-bar-ms">
@@ -13885,20 +13923,24 @@ function DemandaRow({row, devTeam, actions, onRequestDeleteManual}){
         {row.atrasado && <span className="status-pill atrasado-tag">Atrasado</span>}
       </td>
       <ConcluidoEmCell row={row} actions={actions}/>
-      <td className="demanda-csat" title={isManual ? undefined : (fmtEditMetaTooltip(row.editMeta && row.editMeta.csatSheet) || 'CSAT ainda não sincronizado para este ticket — use "Atualizar CSAT".')}>
-        {isManual ? (
-          <input
-            type="number"
-            className="upsell-input"
-            defaultValue={row.csat || ''}
-            key={row.numero + '-csat-' + row.csat}
-            placeholder="—"
-            step="1"
-            min="1"
-            max="5"
-            onBlur={e => actions.updateDemandaManual(row.numero, {csat: e.target.value === '' ? '' : Number(e.target.value)})}
-          />
-        ) : (row.csat || '—')}
+      <td className="demanda-csat" title={row.csatEhManual ? ('CSAT atribuído manualmente. ' + (fmtEditMetaTooltip(row.editMeta && row.editMeta.csatManual) || '')) : (isManual ? 'CSAT do ticket manual.' : (fmtEditMetaTooltip(row.editMeta && row.editMeta.csatSheet) || 'CSAT ainda não sincronizado para este ticket — preencha manualmente ou use "Atualizar CSAT".'))}>
+        <input
+          type="number"
+          className="upsell-input"
+          style={row.csatEhManual ? {fontWeight:700} : undefined}
+          defaultValue={row.csat || ''}
+          key={row.numero + '-csat-' + row.csat + (row.csatEhManual ? 'm' : '')}
+          placeholder="—"
+          step="1"
+          min="1"
+          max="5"
+          onBlur={e => {
+            const raw = e.target.value;
+            const v = raw === '' ? '' : Math.min(5, Math.max(1, Math.round(Number(raw))));
+            if(isManual) actions.updateDemandaManual(row.numero, {csat: v});
+            else if(String(v) !== String(row.csat || '') || (v === '' && row.csatEhManual)) actions.updateDemandaCustom(row.numero, {csatManual: v});
+          }}
+        />
       </td>
       <td className="demanda-resp">
         {isManual ? (
@@ -14803,6 +14845,36 @@ function App(){
       };
       return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
     },
+    setValorFinalizadoRealizado: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const valorFinalizado = {...(financeiro.valorFinalizado||{})};
+        const yearData = {...(valorFinalizado[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        valorFinalizado[CURRENT_YEAR] = yearData;
+        financeiro.valorFinalizado = valorFinalizado;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
+    setValorFinalizadoBudget: (mesN, clienteNome, value) => {
+      const aplicar = (base) => {
+        const financeiro = {...(base||{})};
+        const valorFinalizadoBudget = {...(financeiro.valorFinalizadoBudget||{})};
+        const yearData = {...(valorFinalizadoBudget[CURRENT_YEAR]||{})};
+        const clienteData = {...(yearData[clienteNome]||{})};
+        if(value === null || value === undefined || value === ''){ delete clienteData[mesN]; }
+        else { clienteData[mesN] = value; }
+        yearData[clienteNome] = clienteData;
+        valorFinalizadoBudget[CURRENT_YEAR] = yearData;
+        financeiro.valorFinalizadoBudget = valorFinalizadoBudget;
+        return financeiro;
+      };
+      return mutateTopLevelFieldGranular('financeiro', d => ({...d, financeiro: aplicar(d.financeiro)}), aplicar, null);
+    },
     setTempoProcessamentoRealizado: (mesN, categoria, value) => {
       const aplicar = (base) => {
         const financeiro = {...(base||{})};
@@ -15155,6 +15227,27 @@ function App(){
         d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), contasAutomaticoSync: aplicarSync()}),
         { financeiro: aplicarFinanceiro, contasAutomaticoSync: aplicarSync },
         `Base de Contas Automático atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`
+      );
+    },
+
+    // Realizado sincronizado da aba "Valor Finalizado" da planilha Gestão Metas (por cliente, nome como chave).
+    importValorFinalizadoRealizado: (porCliente) => {
+      const aplicarFinanceiro = (base) => {
+        const financeiro = {...(base||{})};
+        const valorFinalizado = {...(financeiro.valorFinalizado||{})};
+        valorFinalizado[CURRENT_YEAR] = porCliente;
+        financeiro.valorFinalizado = valorFinalizado;
+        return financeiro;
+      };
+      const aplicarSync = () => ({
+        by: (authUser && (authUser.displayName || authUser.email)) || 'Desconhecido',
+        at: new Date().toISOString(),
+        count: Object.keys(porCliente).length,
+      });
+      return mutateFieldsGranular(
+        d => ({...d, financeiro: aplicarFinanceiro(d.financeiro), valorFinalizadoSync: aplicarSync()}),
+        { financeiro: aplicarFinanceiro, valorFinalizadoSync: aplicarSync },
+        `Base de Valor Finalizado atualizada (${Object.keys(porCliente).length} cliente${Object.keys(porCliente).length===1?'':'s'})`
       );
     },
 
