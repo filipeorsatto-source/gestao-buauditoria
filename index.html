@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-11-17.1';
+const APP_BUILD_ID = '2026-11-24.3';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -4752,7 +4752,6 @@ const NAV_MAIN = [
   {key:'overview', label:'Organograma', icon:IconGrid},
   {key:'roles', label:'Papéis e Responsabilidades', icon:IconUsers},
   {key:'goals', label:'Gestão de Metas', icon:IconTarget},
-  {key:'rotinas', label:'Rotinas', icon:IconClock},
 ];
 
 function Sidebar({route, setRoute}){
@@ -7235,14 +7234,30 @@ function isoDiaDentroDoIntervalo(iso, inicioIso, fimIso){
 }
 function fmtDataCurtaDDMM(d){ return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1); }
 function fmtSemanaLabel(inicio, fim){ return fmtDataCurtaDDMM(inicio) + ' a ' + fmtDataCurtaDDMM(fim); }
-// As 5 opções do dropdown "Semana do One-Pager" pro mês escolhido em "Mês da análise".
+// As 5 opções do dropdown "Semana do One-Pager" pro mês escolhido em "Mês da análise" + (pedido em
+// 24/11/2026) a opção "Mensal" (n = 0), que gera o One-Pager do mês inteiro.
+const ONE_PAGER_MENSAL_N = 0;
 function getWeekOptionsForMonth(ano, mesN){
   const opts = [];
   for(let n = 1; n <= 5; n++){
     const {inicio, fim} = getWeekRangeOfMonth(ano, mesN, n);
     opts.push({n, label: 'Semana ' + n + ' (' + fmtSemanaLabel(inicio, fim) + ')'});
   }
+  opts.push({n: ONE_PAGER_MENSAL_N, label: 'Mensal (mês inteiro)'});
   return opts;
+}
+// Período de um One-Pager: semana N do mês, ou o mês inteiro quando semanaN === ONE_PAGER_MENSAL_N.
+// Em modo mensal, `fimBudget` é o corte do budget proporcional de Contas Finalizadas: o fim do mês, ou
+// "hoje" se o mês ainda está em andamento (mesma régua linear do Report Mensal).
+function getPeriodoOnePager(ano, mesN, semanaN){
+  if(semanaN === ONE_PAGER_MENSAL_N){
+    const inicio = new Date(ano, mesN - 1, 1), fim = new Date(ano, mesN, 0);
+    const hoje = new Date();
+    const fimBudget = (hoje >= inicio && hoje <= fim) ? hoje : fim;
+    return {inicio, fim, mensal: true, fimBudget};
+  }
+  const {inicio, fim} = getWeekRangeOfMonth(ano, mesN, semanaN);
+  return {inicio, fim, mensal: false, fimBudget: fim};
 }
 
 // Budget de um KPI linear no tempo (hoje só usado para "Contas Finalizadas"), proporcional aos dias do
@@ -7430,6 +7445,24 @@ function buildOnePagerResultadosRows(merged, inicioIso, fimIso, data){
 
   return planningRows.concat(extraRows);
 }
+// Versão MENSAL das linhas do One-Pager Resultados (pedido em 24/11/2026): TODAS as demandas marcadas como
+// Planning (Tipo = Planning) com prazo dentro do mês, cada uma sinalizada como Entregue/Não entregue pelo
+// mesmo critério do semanal (statusEfetivo terminal = conclusão por status ou data manual) — as cores
+// verde/vermelho vêm da coluna ENTREGA (ver resultadosRowFill). Sem "extras": todas as linhas já são planning.
+function buildOnePagerResultadosMensalRows(merged, inicioIso, fimIso, data){
+  const lista = merged.filter(m => m.tipo === 'Planning' && isoDiaDentroDoIntervalo(m.prazo, inicioIso, fimIso))
+    .slice().sort((a, b) => {
+      const da = a.prazo || '', db = b.prazo || '';
+      if(da !== db) return da < db ? -1 : 1;
+      return (a.cliente || '').localeCompare(b.cliente || '', 'pt-BR');
+    });
+  return lista.map(m => {
+    const devNome = m.responsavelDesenvolvimentoId ? pessoaNomePlanning(data, m.responsavelDesenvolvimentoId) : '';
+    const resp = devNome || m.responsavel || '—';
+    return [fmtDataAbertura(m.prazo), m.cliente || '—', m.assunto || '(sem assunto)', m.classificacao || '—', 'Sim', m.linear || '—', resp,
+      DEMANDA_STATUS_TERMINAL.includes(m.statusEfetivo) ? 'Entregue' : 'Não entregue'];
+  });
+}
 const ONE_PAGER_RESULTADOS_HEADERS = ['DATA','CLIENTE','DEMANDA','CLASSIFICAÇÃO','PLANNING','LINEAR','RESP.','ENTREGA'];
 const ONE_PAGER_RESULTADOS_COLW = [0.62, 0.75, null, 1.0, 0.55, 0.5, 0.75, 0.75];
 // Mesmas colunas do One-Pager, só que redimensionadas pra largura widescreen do deck (12.53" de conteúdo
@@ -7554,7 +7587,7 @@ const ONE_PAGER_STAT_CARD_H = 1.05;
 async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   await preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64);
 
-  const {inicio, fim} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
+  const {inicio, fim, mensal, fimBudget} = getPeriodoOnePager(CURRENT_YEAR, mesN, semanaN);
   const inicioIso = dateParaIsoDia(inicio), fimIso = dateParaIsoDia(fim);
   // Pedido em 29/09/2026: demandas marcadas com Prioridade "Despriorizado" ficam de fora de TODOS os
   // visuais do One-Pager (mesmo que estivessem na planning da semana) — mesmo critério já usado em outras
@@ -7563,12 +7596,13 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   const merged = buildDemandasMerged(data.demandasCustom, data.demandasBase, data.demandasManuais)
     .filter(m => m.prioridade !== 'Despriorizado');
 
-  const entregasSemanaRows = buildOnePagerEntregasRows(merged, 'prazo', inicioIso, fimIso, null, data);
-  const atrasadasRows = buildOnePagerAtrasadasRows(merged, inicioIso, data);
+  // Modo mensal (24/11/2026): todas as demandas marcadas como Planning (Tipo = Planning) com prazo no mês.
+  const entregasSemanaRows = buildOnePagerEntregasRows(merged, 'prazo', inicioIso, fimIso, mensal ? (m => m.tipo === 'Planning') : null, data);
+  const atrasadasRows = mensal ? [] : buildOnePagerAtrasadasRows(merged, inicioIso, data);
   // Atrasadas primeiro (prazo mais antigo) e depois as da própria semana — como ambas já vêm ordenadas
   // por data, a junção mantém a ordem cronológica geral.
   const entregasRows = atrasadasRows.concat(entregasSemanaRows);
-  const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
+  const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fimBudget);
   const kpiAbertos = buildOnePagerAbertosPorClassificacao(merged);
   const kpiAnaliseTecnica = buildOnePagerEmAnaliseTecnicaKpi(merged);
 
@@ -7592,12 +7626,12 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
 
   const mesLabel = mesPlanningNome(mesN) + '/' + CURRENT_YEAR;
   const semanaLabel = fmtSemanaLabel(inicio, fim);
-  addOnePagerHeader(slide, 'One-Pager Plano · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Plano da Semana', PAGE_W);
+  addOnePagerHeader(slide, mensal ? ('One-Pager Plano · Mensal · ' + mesLabel) : ('One-Pager Plano · Semana de ' + semanaLabel + ' · ' + mesLabel), mensal ? 'Plano do Mês' : 'Plano da Semana', PAGE_W);
 
-  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS COM PRAZO NA SEMANA (+ ATRASADAS DE SEMANAS ANTERIORES)');
-  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma entrega com prazo previsto ou atrasada para esta semana.'});
+  addOnePagerSectionTitle(slide, startX, 1.62, contentW, mensal ? 'DEMANDAS DA PLANNING DO MÊS (PRAZO NO MÊS)' : 'ENTREGAS COM PRAZO NA SEMANA (+ ATRASADAS DE SEMANAS ANTERIORES)');
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_ENTREGAS_HEADERS, entregasRows, ONE_PAGER_ENTREGAS_COLW, {fontSize: 7.5, align: 'center', emptyText: mensal ? 'Nenhuma demanda marcada como Planning com prazo neste mês.' : 'Nenhuma entrega com prazo previsto ou atrasada para esta semana.'});
 
-  addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
+  addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, mensal ? 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL (FIM DO MÊS OU HOJE, SE EM ANDAMENTO)' : 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
   addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
 
   addOnePagerSectionTitle(slide, startX, yKpiAbertosTitle, contentW, 'TICKETS EM ABERTO POR CLASSIFICAÇÃO (ATENDIMENTO E AUDITORIA · SEM DEV. ALOCADO · BACKLOG ATUAL)');
@@ -7610,7 +7644,7 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
   addOnePagerFooter(slide, PAGE_W, PAGE_H);
 
   const dataUrl = slide.canvas.toDataURL('image/png');
-  downloadDataUrl(dataUrl, 'One-Pager Plano - Semana ' + semanaN + ' - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.png');
+  downloadDataUrl(dataUrl, 'One-Pager Plano - ' + (mensal ? 'Mensal' : 'Semana ' + semanaN) + ' - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.png');
 }
 
 // Monta o One-Pager "Resultados" — o que foi de fato entregue na semana escolhida. Ajuste em 17/09/2026:
@@ -7623,7 +7657,7 @@ async function gerarOnePagerPlanoPng(data, mesN, semanaN){
 async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   await preloadPdfImage('image/png;base64,' + RIVIO_LOGO_PRETO_B64);
 
-  const {inicio, fim} = getWeekRangeOfMonth(CURRENT_YEAR, mesN, semanaN);
+  const {inicio, fim, mensal, fimBudget} = getPeriodoOnePager(CURRENT_YEAR, mesN, semanaN);
   const inicioIso = dateParaIsoDia(inicio), fimIso = dateParaIsoDia(fim);
   // Pedido em 29/09/2026: mesmo critério do One-Pager Plano — demandas "Despriorizado" ficam de fora de
   // todos os visuais (tabela de entregas/planning+extras, entregues por classificação, análise técnica),
@@ -7632,7 +7666,7 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
     .filter(m => m.prioridade !== 'Despriorizado');
   const temDevAlocado = m => !!m.responsavelDesenvolvimentoId;
 
-  const entregasRows = buildOnePagerResultadosRows(merged, inicioIso, fimIso, data);
+  const entregasRows = mensal ? buildOnePagerResultadosMensalRows(merged, inicioIso, fimIso, data) : buildOnePagerResultadosRows(merged, inicioIso, fimIso, data);
   const kpiContas = buildOnePagerContasFinalizadasKpi(data, mesN, fim);
   const entreguesNaSemana = merged.filter(m => temDevAlocado(m) && isoDiaDentroDoIntervalo(m.concluidoEm, inicioIso, fimIso));
   const kpiEntregues = buildOnePagerEntreguesPorClassificacao(entreguesNaSemana);
@@ -7658,9 +7692,9 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
 
   const mesLabel = mesPlanningNome(mesN) + '/' + CURRENT_YEAR;
   const semanaLabel = fmtSemanaLabel(inicio, fim);
-  addOnePagerHeader(slide, 'One-Pager Resultados · Semana de ' + semanaLabel + ' · ' + mesLabel, 'Resultados da Semana', PAGE_W);
+  addOnePagerHeader(slide, mensal ? ('One-Pager Resultados · Mensal · ' + mesLabel) : ('One-Pager Resultados · Semana de ' + semanaLabel + ' · ' + mesLabel), mensal ? 'Resultados do Mês' : 'Resultados da Semana', PAGE_W);
 
-  addOnePagerSectionTitle(slide, startX, 1.62, contentW, 'ENTREGAS DE DESENVOLVIMENTO · PLANNING DA SEMANA + EXTRAS');
+  addOnePagerSectionTitle(slide, startX, 1.62, contentW, mensal ? 'DEMANDAS DA PLANNING DO MÊS · ENTREGUE x NÃO ENTREGUE' : 'ENTREGAS DE DESENVOLVIMENTO · PLANNING DA SEMANA + EXTRAS');
   // rowFill (pedido em 17/09/2026): pinta cada linha de verde claro quando ENTREGA = "Entregue" e de
   // vermelho claro quando "Não entregue" — a coluna ENTREGA é sempre a última da linha.
   const resultadosRowFill = row => {
@@ -7669,13 +7703,13 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
     if(entrega === 'Não entregue') return 'F6C0C0';
     return null;
   };
-  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_RESULTADOS_HEADERS, entregasRows, ONE_PAGER_RESULTADOS_COLW, {fontSize: 7.5, align: 'center', emptyText: 'Nenhuma demanda de desenvolvimento na planning ou entregue nesta semana.', rowFill: resultadosRowFill});
+  addPlanningListTable(null, slide, startX, 1.62 + 0.32, contentW, 4, ONE_PAGER_RESULTADOS_HEADERS, entregasRows, ONE_PAGER_RESULTADOS_COLW, {fontSize: 7.5, align: 'center', emptyText: mensal ? 'Nenhuma demanda marcada como Planning com prazo neste mês.' : 'Nenhuma demanda de desenvolvimento na planning ou entregue nesta semana.', rowFill: resultadosRowFill});
 
-  addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
+  addOnePagerSectionTitle(slide, startX, yKpiContasTitle, contentW, mensal ? 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL (FIM DO MÊS OU HOJE, SE EM ANDAMENTO)' : 'CONTAS FINALIZADAS · REAL x BUDGET PROPORCIONAL AO FIM DA SEMANA');
   addOnePagerKpiTable(slide, startX, yKpiContasTable, contentW, ['CLIENTE','REAL','BUDGET PROPORCIONAL'], kpiContas.rows, kpiContas.totalRow, [null, 1.6, 2.1], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum cliente com dado neste mês.'});
 
-  addOnePagerSectionTitle(slide, startX, yKpiEntreguesTitle, contentW, 'TICKETS ENTREGUES NA SEMANA POR CLASSIFICAÇÃO');
-  addOnePagerKpiTable(slide, startX, yKpiEntreguesTable, contentW, ['CLASSIFICAÇÃO','QTD. ENTREGUE'], kpiEntregues.rows, kpiEntregues.totalRow, [null, 1.4], {fontSize: 8.5, align: 'center', emptyText: 'Nenhum ticket entregue nesta semana.'});
+  addOnePagerSectionTitle(slide, startX, yKpiEntreguesTitle, contentW, mensal ? 'TICKETS ENTREGUES NO MÊS POR CLASSIFICAÇÃO' : 'TICKETS ENTREGUES NA SEMANA POR CLASSIFICAÇÃO');
+  addOnePagerKpiTable(slide, startX, yKpiEntreguesTable, contentW, ['CLASSIFICAÇÃO','QTD. ENTREGUE'], kpiEntregues.rows, kpiEntregues.totalRow, [null, 1.4], {fontSize: 8.5, align: 'center', emptyText: mensal ? 'Nenhum ticket entregue neste mês.' : 'Nenhum ticket entregue nesta semana.'});
 
   addOnePagerStatCard(slide, startX, yKpiAnaliseTecnica, contentW, ONE_PAGER_STAT_CARD_H, 'MÉDIA DIAS EM ABERTO · TICKETS EM ANÁLISE TÉCNICA (FOTO ATUAL)',
     kpiAnaliseTecnica.media === null ? '—' : kpiAnaliseTecnica.media.toLocaleString('pt-BR', {maximumFractionDigits: 1}),
@@ -7684,7 +7718,7 @@ async function gerarOnePagerResultadosPng(data, mesN, semanaN){
   addOnePagerFooter(slide, PAGE_W, PAGE_H);
 
   const dataUrl = slide.canvas.toDataURL('image/png');
-  downloadDataUrl(dataUrl, 'One-Pager Resultados - Semana ' + semanaN + ' - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.png');
+  downloadDataUrl(dataUrl, 'One-Pager Resultados - ' + (mensal ? 'Mensal' : 'Semana ' + semanaN) + ' - ' + mesPlanningNome(mesN) + ' ' + CURRENT_YEAR + '.png');
 }
 
 // Slides 2 a 6: uma área por slide, com uma tabela Cliente x KPI (Real/Budget) para os KPIs que têm
@@ -9752,7 +9786,7 @@ function TrackingIndexPage({data}){
       // novos slides de "Backlog da Semana" por cliente no fim do deck — ver comentário em
       // gerarReportPptx. Funciona por closure mesmo declarado depois: só é lido quando o botão é
       // clicado, bem depois do componente já ter renderizado por completo.
-      await gerarReportPptx(data, mesRelatorio, formatoExport, semanaOnePager);
+      await gerarReportPptx(data, mesRelatorio, formatoExport, semanaOnePager === ONE_PAGER_MENSAL_N ? 1 : semanaOnePager);
     }catch(e){
       console.error('Erro ao gerar Report', e);
       setErro((e && e.message) || 'Não foi possível gerar o report. Tente novamente.');
@@ -9883,14 +9917,14 @@ function TrackingIndexPage({data}){
         </div>
 
         <div className="card report-generate-card">
-          <div className="report-card-title">One-Pager Semanal</div>
+          <div className="report-card-title">One-Pager Semanal &amp; Mensal</div>
           <div className="report-card-sub">Uma página .png por relatório, formato retrato, pronta pra compartilhar.</div>
           <div className="field">
-            <label>Semana do One-Pager</label>
+            <label>Período do One-Pager</label>
             <select className="select" value={semanaOnePager} onChange={e => setSemanaOnePager(Number(e.target.value))}>
               {semanaOnePagerOpcoes.map(o => <option value={o.n} key={o.n}>{o.label}</option>)}
             </select>
-            <div className="hint">Semanas de Segunda a Domingo — a Semana 1 é sempre a 1ª semana inteiramente dentro do mês escolhido em "Mês da análise" ao lado.</div>
+            <div className="hint">Semanas de Segunda a Domingo — a Semana 1 é sempre a 1ª semana inteiramente dentro do mês escolhido em "Mês da análise" ao lado. "Mensal" gera o One-Pager do mês inteiro: o Plano traz todas as demandas marcadas como Planning com prazo no mês, e o Resultados mostra essas mesmas demandas como Entregue (verde) ou Não entregue (vermelho).</div>
           </div>
           <button type="button" className="btn btn-primary report-generate-btn" disabled={gerandoOnePagerPlano} onClick={handleGerarOnePagerPlano}>
             {gerandoOnePagerPlano ? 'Gerando one-pager…' : 'Gerar One-Pager Plano'}
@@ -11622,7 +11656,7 @@ function NPSPage({data, actions}){
   );
 }
 
-function MonthCoberturaTable({mes, monthData, clientesCols, actions, expanded, onToggle}){
+function MonthCoberturaTable({mes, monthData, clientesCols, actions, expanded, onToggle, prevMonthData, prevMonthLabel}){
   const monthLabel = MONTHS.find(m => m.n === mes.n).label;
   const totalCampos = COBERTURA_BASES.length * COBERTURA_ITENS.length;
 
@@ -11659,6 +11693,17 @@ function MonthCoberturaTable({mes, monthData, clientesCols, actions, expanded, o
         <span className="group-card-count" style={pctAll !== null ? {background:'var(--accent-soft)', color:'var(--accent-ink)'} : undefined}>
           {pctAll !== null ? fmtNumber(pctAll.toFixed(1)) + '%' : 'Sem dados'}
         </span>
+        {/* Pedido em 24/11/2026: copia os checks do mês anterior pra este mês, pra não precisar remarcar tudo
+            todo mês. Sobrescreve o que já estiver marcado neste mês (pede confirmação se houver dados). */}
+        {prevMonthData && (
+          <button type="button" className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}}
+            title={'Copia todos os checks de ' + prevMonthLabel + ' para ' + monthLabel + ' (substitui o que já estiver marcado em ' + monthLabel + ').'}
+            onClick={e => {
+              e.stopPropagation();
+              if(monthData && Object.keys(monthData).length && !window.confirm('Substituir os checks já marcados em ' + monthLabel + ' pelos de ' + prevMonthLabel + '?')) return;
+              actions.replicarCoberturaDados(mes.n);
+            }}>Replicar {prevMonthLabel}</button>
+        )}
       </div>
       {expanded && (
         <div className="table-wrap">
@@ -11772,6 +11817,8 @@ function CoberturaDadosPage({data, actions}){
           key={m.n}
           mes={m}
           monthData={coberturaYear[m.n]}
+          prevMonthData={m.n > 1 ? coberturaYear[m.n - 1] : null}
+          prevMonthLabel={m.n > 1 ? (MONTHS.find(x => x.n === m.n - 1) || {}).label : ''}
           clientesCols={clientesCols}
           actions={actions}
           expanded={expandedMonths.has(m.n)}
@@ -12470,7 +12517,7 @@ function weekLabel(mondayDate){
 
 // Gráfico de barras (semana a semana, ou mês a mês para "Média dias aberto") da métrica escolhida,
 // com hover interativo. `unitLabel` prefixa o título do tooltip (ex.: "Semana de " ou "Mês: ").
-function WeeklyTicketsChart({weeks, metricaLabel, unitLabel}){
+function WeeklyTicketsChart({weeks, metricaLabel, unitLabel, groupW, wideLabels, decimals}){
   const label = metricaLabel || 'Tickets';
   const prefix = unitLabel === undefined ? 'Semana de ' : unitLabel;
   const wrapRef = useRef(null);
@@ -12479,16 +12526,22 @@ function WeeklyTicketsChart({weeks, metricaLabel, unitLabel}){
 
   if(!weeks.length) return <div className="hint">Sem dados suficientes para o período filtrado.</div>;
 
-  const barGroupW = 26;
+  const barGroupW = groupW || 26;
   const W = Math.max(640, weeks.length * barGroupW + 52);
-  const H = 220, padL = 40, padB = 28, padT = 12, padR = 12;
+  const H = wideLabels ? 244 : 220, padL = 40, padB = wideLabels ? 52 : 28, padT = 12, padR = 12;
+  const fmtV = (v) => decimals ? Number(v).toLocaleString('pt-BR', {maximumFractionDigits: decimals}) : fmtNumber(v);
+  const quebraLabel = (txt) => {
+    const palavras = String(txt).split(' '); const linhas = ['']; 
+    palavras.forEach(w => { const l = linhas[linhas.length-1]; if((l + ' ' + w).trim().length <= 16 || !l) linhas[linhas.length-1] = (l + ' ' + w).trim(); else linhas.push(w); });
+    return linhas.slice(0, 3);
+  };
   const chartW = W - padL - padR;
   const chartH = H - padT - padB;
   const maxVal = Math.max(1, ...weeks.map(w => w.count));
   const gW = chartW / weeks.length;
-  const barW = Math.min(18, gW*0.6);
+  const barW = Math.min(wideLabels ? 36 : 18, gW*0.6);
   const gridLines = 4;
-  const labelEvery = Math.max(1, Math.ceil(weeks.length/16));
+  const labelEvery = wideLabels ? 1 : Math.max(1, Math.ceil(weeks.length/16));
 
   const handleMove = (e) => {
     if(!wrapRef.current) return;
@@ -12514,7 +12567,7 @@ function WeeklyTicketsChart({weeks, metricaLabel, unitLabel}){
             return (
               <g key={i}>
                 <line x1={padL} x2={W-padR} y1={y} y2={y} stroke="#EEF0F4" strokeWidth="1"/>
-                <text x={padL-8} y={y+3} fontSize="9.5" fill="#93970F" textAnchor="end" fontFamily="IBM Plex Mono, monospace" opacity="0.75">{Math.round(val)}</text>
+                <text x={padL-8} y={y+3} fontSize="9.5" fill="#93970F" textAnchor="end" fontFamily="IBM Plex Mono, monospace" opacity="0.75">{decimals ? Number(val).toLocaleString('pt-BR', {maximumFractionDigits: 1}) : Math.round(val)}</text>
               </g>
             );
           })}
@@ -12529,7 +12582,9 @@ function WeeklyTicketsChart({weeks, metricaLabel, unitLabel}){
             return (
               <g key={w.key}>
                 <rect x={bx} y={bY} width={barW} height={bH} rx="2" fill="var(--accent)" opacity={hoverIdx===null || hoverIdx===i ? 0.92 : 0.45}/>
-                {(i % labelEvery === 0) && <text x={gx+gW/2} y={H-8} fontSize="9.5" fill="#5D6274" textAnchor="middle" fontFamily="Inter, sans-serif">{w.label}</text>}
+                {wideLabels && <text x={gx+gW/2} y={bY-4} fontSize="9.5" fill="#1E3E70" textAnchor="middle" fontFamily="IBM Plex Mono, monospace">{fmtV(w.count)}</text>}
+                {wideLabels && (i % labelEvery === 0) && <text textAnchor="middle" fontSize="9.5" fill="#5D6274" fontFamily="Inter, sans-serif"><title>{w.label}</title>{quebraLabel(w.label).map((ln, li) => <tspan key={li} x={gx+gW/2} y={padT+chartH+14+li*11}>{ln}</tspan>)}</text>}
+                {!wideLabels && (i % labelEvery === 0) && <text x={gx+gW/2} y={H-8} fontSize="9.5" fill="#5D6274" textAnchor="middle" fontFamily="Inter, sans-serif">{w.label}</text>}
               </g>
             );
           })}
@@ -12539,7 +12594,7 @@ function WeeklyTicketsChart({weeks, metricaLabel, unitLabel}){
         {hovered && (
           <div className="chart-tooltip" style={{left: tooltipLeftPct + '%'}}>
             <div className="chart-tooltip-title">{prefix}{hovered.label}</div>
-            <div className="chart-tooltip-row"><span className="chart-tooltip-dot" style={{background:'var(--accent)'}}></span>{label}: <b>{fmtNumber(hovered.count)}</b></div>
+            <div className="chart-tooltip-row"><span className="chart-tooltip-dot" style={{background:'var(--accent)'}}></span>{label}: <b>{fmtV(hovered.count)}</b></div>
           </div>
         )}
       </div>
@@ -12706,6 +12761,25 @@ function DemandasResumoSection({filtered, filteredSemStatus, devTeam}){
     return isDiasAberto ? buildMonthlyDiasAbertoBreakdown(baseDiasAberto, keyFn) : buildWeeklyBreakdown(filtered, keyFn, campoData, valueFn);
   }, [filtered, baseDiasAberto, campoData, metrica]);
 
+  // Pedido em 24/11/2026: gráfico da variável escolhida (Tickets / Esforço / Média dias aberto) por Status,
+  // considerando TODOS os filtros aplicados (inclusive o de Status — por isso usa `filtered`). Média dias
+  // aberto aqui = média simples de "dias em aberto" dos tickets de cada status (idade atual do ticket, ou
+  // dias até a conclusão para os já finalizados).
+  const porStatus = useMemo(() => {
+    const grupos = {};
+    filtered.forEach(m => {
+      const k = m.status || 'Sem status';
+      if(!grupos[k]) grupos[k] = {tickets: 0, esforco: 0, dias: []};
+      grupos[k].tickets += 1;
+      grupos[k].esforco += Number(m.esforco) || 0;
+      if(m.diasEmAberto !== null && m.diasEmAberto !== undefined && !isNaN(m.diasEmAberto)) grupos[k].dias.push(Number(m.diasEmAberto));
+    });
+    return Object.keys(grupos).map(k => ({
+      key: k, label: k,
+      count: metrica === 'esforco' ? grupos[k].esforco : isDiasAberto ? (grupos[k].dias.length ? avgOf(grupos[k].dias) : 0) : grupos[k].tickets,
+    })).sort((a, b) => b.count - a.count);
+  }, [filtered, metrica]);
+
   const mediaDiasAberto = useMemo(() => avgOf(filtered.map(m => m.diasEmAberto)), [filtered]);
   const diasAbertoUltimoMes = useMemo(() => {
     if(!isDiasAberto) return null;
@@ -12768,6 +12842,13 @@ function DemandasResumoSection({filtered, filteredSemStatus, devTeam}){
       <WeeklyBreakdownTable titulo="Por pessoa de desenvolvimento" weeks={semanas} rows={porDev}/>
       <WeeklyBreakdownTable titulo="Por classificação" weeks={semanas} rows={porClassificacao}/>
       <WeeklyBreakdownTable titulo="Por cliente" weeks={semanas} rows={porCliente}/>
+
+      <div className="section-block-title" style={{marginTop:28, marginBottom:4}}>{metricaLabel} por Status</div>
+      <div className="section-block-desc" style={{marginBottom:12}}>
+        Considera todos os filtros aplicados acima (inclusive Status) — {filtered.length} ticket{filtered.length === 1 ? '' : 's'}.
+        {isDiasAberto ? ' Média dias aberto = média de "dias em aberto" dos tickets de cada status (idade atual; para os já finalizados, dias até a conclusão).' : ''}
+      </div>
+      <WeeklyTicketsChart weeks={porStatus} metricaLabel={metricaLabel} unitLabel="Status: " groupW={96} wideLabels={true} decimals={isDiasAberto ? 1 : 0}/>
     </div>
   );
 }
@@ -14201,7 +14282,6 @@ const SECTION_META = {
   roles: {title:'Papéis e Responsabilidades', eyebrow:'Organização de funções'},
   goals: {title:'Gestão de Metas', eyebrow:'Metas & budget'},
   tracking: {title:'Acompanhamento de Metas', eyebrow:'Realizado vs. budget'},
-  rotinas: {title:'Rotinas', eyebrow:'Agenda semanal do time'},
   demandas: {title:'Demandas', eyebrow:'Tickets Movidesk por cliente'},
   report: {title:'Report', eyebrow:'Histórico de registros por cliente'},
 };
@@ -14960,6 +15040,21 @@ function App(){
       return mutateTopLevelFieldGranular('coberturaDados', d => ({...d, coberturaDados: aplicar(d.coberturaDados)}), aplicar, null);
     },
 
+    // Replica os checks de Cobertura de Dados do mês anterior para o mês escolhido (cópia profunda).
+    replicarCoberturaDados: (mesN) => {
+      if(mesN <= 1) return;
+      const aplicar = (base) => {
+        const coberturaDados = {...(base||{})};
+        const yearData = {...(coberturaDados[CURRENT_YEAR]||{})};
+        const origem = yearData[mesN - 1];
+        if(!origem) return coberturaDados;
+        yearData[mesN] = JSON.parse(JSON.stringify(origem));
+        coberturaDados[CURRENT_YEAR] = yearData;
+        return coberturaDados;
+      };
+      return mutateTopLevelFieldGranular('coberturaDados', d => ({...d, coberturaDados: aplicar(d.coberturaDados)}), aplicar, 'Cobertura de Dados replicada do mês anterior');
+    },
+
     // Cobertura Produto: cadastro de funções do produto (grade funções x clientes) + KPIs derivados.
     addProdutoFuncao: ({categoria, descricao}) => {
       const aplicar = (base) => [...(base||[]), {id: uid(), categoria, descricao}];
@@ -15411,7 +15506,6 @@ function App(){
           {route.section === 'roles' && <RolesPage data={data} actions={actions}/>}
           {route.section === 'goals' && <GoalsPage data={data} actions={actions}/>}
           {route.section === 'tracking' && (route.indicator ? <TrackingPage slug={route.indicator} financeiro={data.financeiro} upsellScore={data.upsellScore} clientes={data.clientes} actions={actions} data={data}/> : <TrackingIndexPage data={data}/>)}
-          {route.section === 'rotinas' && <RotinasPage data={data} actions={actions}/>}
           {route.section === 'demandas' && <DemandasPage data={data} actions={actions}/>}
           {route.section === 'report' && <ReportPage data={data} actions={actions}/>}
         </div>
