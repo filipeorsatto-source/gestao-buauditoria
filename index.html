@@ -905,7 +905,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 // lateral (ver Sidebar). Serve pra confirmar rapidamente se o navegador/GitHub Pages está mesmo servindo
 // a versão mais recente antes de investigar um bug "que já devia ter sido corrigido": se o número aqui
 // não bater com o da última versão enviada, é cache (do navegador ou do GitHub Pages), não um bug novo.
-const APP_BUILD_ID = '2026-11-24.3';
+const APP_BUILD_ID = '2026-11-26.1';
 
 const CLIENTES_DEFAULT = ['Einstein SP','Einstein GO','Sírio SP','Sírio BSB','HCOR','HAOC','AC Camargo','Interno'];
 
@@ -4163,9 +4163,15 @@ async function ensureFirestoreSeeded(){
   const ref = await getAppDataDocRef();
   const snap = await fb.getDocFromServer(ref);
   if(!snap.exists()){
-    const seed = await loadLegacyLocalData();
-    await fb.setDoc(ref, seed);
-    return seed;
+    // Endurecido em 26/11/2026 (novo incidente de "reset para a versão zero" depois do 1º acesso de uma
+    // pessoa nova): este era o ÚNICO caminho do app capaz de sobrescrever o documento INTEIRO
+    // (fb.setDoc sem merge) — bastava o servidor responder "não existe" por qualquer motivo (leitura
+    // enganosa, documento apagado/renomeado, regra de segurança, ou uma cópia antiga do app aberta por
+    // alguém novo) para a base de todo mundo ser substituída pela base padrão do navegador de quem acabou
+    // de entrar. Agora o app NUNCA recria o documento sozinho: só avisa. Para restaurar de verdade, use um
+    // backup (botão de backup da topbar / restore_firestore.html) ou a recuperação do console do Firebase.
+    console.error('ensureFirestoreSeeded: documento gestaoAuditoria/appData NÃO encontrado no servidor — nada foi escrito (recriação automática desativada).');
+    return 'missing';
   }
   return null;
 }
@@ -14433,7 +14439,10 @@ function App(){
 
     (async () => {
       try{
-        await ensureFirestoreSeeded();
+        const seedResult = await ensureFirestoreSeeded();
+        if(seedResult === 'missing'){
+          push('ATENÇÃO: a base compartilhada não foi encontrada no servidor. Nada foi sobrescrito — avise o time antes de editar qualquer coisa.', 'error');
+        }
       }catch(e){
         // Não conseguiu confirmar com o SERVIDOR se o documento já existe — de propósito NÃO faz nada
         // (nem semeia, nem trava o resto do efeito): ver comentário grande em ensureFirestoreSeeded.
